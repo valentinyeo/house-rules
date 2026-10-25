@@ -22,6 +22,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Every shared setup rule lives in this file. Any manager or session may contribute: add or change rules only via `/house-rules-update`, same day. (2026-10-25, why: everyone stays on one setup)
 - Load or refresh rules in a session with `/house-rules`. (2026-10-25, why: running sessions miss new rules)
 - Project-only rule? Put it in that project's repo rules file, not here. (2026-10-25, why: projects stay separate)
+- Test skills and rules. Run blind agents with versus without. Keep only what wins. Cut what changes nothing. (2026-10-25, why: Valentin via Thorsten Ball post)
 
 ## Models and harnesses
 - Fast mode off everywhere: no fast models, flags or tiers. (2026-10-25, why: burns quota, Valentin said HARD)
@@ -30,6 +31,10 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Claude workers run alone, never spawn Codex helpers; extra parallel work = separate hax Codex sessions (as many as server load allows), each Codex-only on its own ticket. (2026-10-25, why: clean quotas, no cross-provider tangles)
 - Codex (hax) is always on for legwork; only server load limits it. Keep launching hax runners while load is green. Brake only scarce plans (Claude). (2026-10-25, why: Codex resets daily; 17 days of unused tokens)
 - Grok cloud agents: grok-4.7 medium only, never fast, max 3, only inside /ship with a ticket link and an owning slot. (2026-10-25, why: cost cap)
+
+## Doing the work
+- Prove it, never claim it. "Looks good", "should work", bare "tests pass": not evidence. Show demo, before/after numbers or end-to-end walkthrough. (2026-10-25, why: Valentin via Thorsten Ball post)
+- Ask for options, not ping-pong. Give several theories or variations. Check all, then pick. (2026-10-25, why: Valentin via Thorsten Ball post)
 
 ## Talking to Valentin
 - No status messages, Telegram, briefings or digests to Valentin. Only new releases reaching his desktop matter. (2026-10-25, why: he never asked for them)
@@ -57,3 +62,4 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 
 ## Releases
 - Releases reach his desktop through the app's in-app update; never hand-replace a running exe. (2026-10-25, why: updater is the tested path)
+- Runners may read prod logs, health checks and flag state. Read only, for own work. Flag flips still need Valentin's go. (2026-10-25, why: Valentin via Thorsten Ball post)
