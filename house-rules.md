@@ -57,3 +57,4 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 
 ## Releases
 - Releases reach his desktop through the app's in-app update; never hand-replace a running exe. (2026-10-25, why: updater is the tested path)
+<!-- IGSH-881 propagation probe -->
