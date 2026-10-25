@@ -8,7 +8,7 @@ Path: `~/.local/share/house-rules/house-rules.md` (synced from private repo vale
 
 ## Start here: new session
 Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on any harness (Claude Code, Codex, hax, cloud).
-1. Read and follow this whole file. On hypertask-vps it already auto-loads: Claude via `~/.claude/CLAUDE.md`, Codex and hax via their AGENTS.md.
+1. Run `/house-rules` (or read and follow this whole file). On hypertask-vps it already auto-loads: Claude via `~/.claude/CLAUDE.md`, Codex and hax via their AGENTS.md.
 2. Install or verify pstack from its official source only: https://github.com/cursor/plugins/tree/main/pstack (Claude Code: `/plugin marketplace add cursor/plugins`, then `/plugin install pstack@cursor-plugins`). Never copy pstack content.
 3. Install or verify caveman from its official marketplace only (Claude Code): `claude plugin marketplace add JuliusBrussee/caveman && claude plugin install caveman@caveman`. Never hand-copy caveman skills. Codex and hax follow the caveman rules below via their synced AGENTS.md.
 4. Find your project. Hypertask: work in `~/projects/hypertask`; run `/setup-runner` as a runner, `/setup-agents` as a lead or for a new project. Other projects: run that repo's own setup skill.
@@ -19,9 +19,9 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 
 ## How to use this file
 - Re-read this file at the start of every ticket or turn. (2026-10-25, why: running sessions miss new rules)
-- Every shared setup rule lives in this file. Any agent Valentin tells a new rule adds it here by PR the same day, merges it, then tells the other managers it changed. (2026-10-25, why: everyone stays on one setup)
+- Every shared setup rule lives in this file. Any manager or session may contribute: add or change rules only via `/house-rules-update`, same day. (2026-10-25, why: everyone stays on one setup)
+- Load or refresh rules in a session with `/house-rules`. (2026-10-25, why: running sessions miss new rules)
 - Project-only rule? Put it in that project's repo rules file, not here. (2026-10-25, why: projects stay separate)
-- One line per rule, with date and a why of 8 words max. (2026-10-25, why: short files get read)
 
 ## Models and harnesses
 - Fast mode off everywhere: no fast models, flags or tiers. (2026-10-25, why: burns quota, Valentin said HARD)
@@ -36,6 +36,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Message him only for money, keys, X or a risky release, always with your recommendation. (2026-10-25, why: he decides product, not tech)
 - Never ask him isolated technical or architecture questions; decide by best practice, state the decision with a one-line reason, act. (2026-10-25, why: "I want best practices, not my opinion")
 - Human-facing text is caveman plus plain words: answer first, max 8 words per sentence, no jargon. Agent lane may be verbose. Drafts for outside people use normal sentences. (2026-10-25, why: product owner, ADHD reader)
+- Caveman always sits on top of the ADHD style: ADHD sets the order, caveman sets the length. Max 5 short lines per reply unless asked to explain. Restating state = one short line, not a paragraph. (2026-10-25, why: Valentin's caveman change in adhd output style)
 - Every Claude session uses the official caveman plugin `caveman@caveman` (marketplace JuliusBrussee/caveman); no hand-copied caveman skills. Codex and hax follow the same caveman rules from this file. (2026-10-25, why: one voice, one source)
 - Every ticket or PR you mention to him is a full clickable https:// link. (2026-10-25, why: he clicks, never searches IDs)
 
