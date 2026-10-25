@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import importlib.util
 from pathlib import Path
+import os
+import subprocess
 import tempfile
 import unittest
 
@@ -42,6 +44,26 @@ class SyncTests(unittest.TestCase):
             self.assertEqual(current.resolve(), first)
             self.assertEqual((current / "house-rules.md").stat().st_mode & 0o777, 0o644)
             self.assertEqual(current.resolve().stat().st_mode & 0o777, 0o755)
+
+    def test_local_skill_restored_after_daily_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            skills = home / '.claude/skills'
+            skills.mkdir(parents=True)
+            command = ['python3', str(ROOT / 'bin/link-inne.py')]
+            environment = os.environ | {'HOME': str(home)}
+            subprocess.run(command, env=environment, check=True)
+            link = skills / 'house-rules'
+            target = link.readlink()
+            link.rename(home / 'daily-archive')
+            subprocess.run(command, env=environment, check=True)
+            self.assertEqual(link.readlink(), target)
+            link.unlink()
+            link.mkdir()
+            result = subprocess.run(command, env=environment, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(link.is_dir())
+            self.assertIn('Refusing to replace existing path', result.stderr)
 
     def test_secrets_leave_previous_copy_untouched(self):
         secrets = [
