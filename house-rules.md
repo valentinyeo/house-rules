@@ -36,7 +36,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Message him only for money, keys, X or a risky release, always with your recommendation. (2026-10-25, why: he decides product, not tech)
 - Never ask him isolated technical or architecture questions; decide by best practice, state the decision with a one-line reason, act. (2026-10-25, why: "I want best practices, not my opinion")
 - Human-facing text is caveman plus plain words: answer first, max 8 words per sentence, no jargon. Agent lane may be verbose. Drafts for outside people use normal sentences. (2026-10-25, why: product owner, ADHD reader)
-- Caveman always sits on top of the ADHD style: ADHD sets the order, caveman sets the length. Max 5 short lines per reply unless asked to explain. Restating state = one short line, not a paragraph. (2026-10-25, why: Valentin's caveman change in adhd output style)
+- Chat replies use caveman only; no other output style (no Concise, no ADHD). Max 5 short lines per reply unless asked to explain. Restating state = one short line. (2026-10-25, why: "remove all other output style rules")
 - Every Claude session uses the official caveman plugin `caveman@caveman` (marketplace JuliusBrussee/caveman); no hand-copied caveman skills. Codex and hax follow the same caveman rules from this file. (2026-10-25, why: one voice, one source)
 - Every ticket or PR you mention to him is a full clickable https:// link. (2026-10-25, why: he clicks, never searches IDs)
 
