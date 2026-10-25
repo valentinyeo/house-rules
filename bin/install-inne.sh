@@ -9,8 +9,8 @@ fi
 chmod 700 "$source"
 install -d -m 755 /opt/house-rules-inne/bin /opt/house-rules-inne/skills/house-rules /etc/systemd/system/skills-sync.service.d
 install -m 644 "$repo"/bin/{inne-sync.py,test-inne-sync.py,link-inne.py} /opt/house-rules-inne/bin/
-install -m 644 "$repo/house-rules.md" /opt/house-rules-inne/
-install -m 644 "$repo/skills/house-rules/SKILL.md" /opt/house-rules-inne/skills/house-rules/
+install -m 600 "$repo/house-rules.md" /opt/house-rules-inne/
+install -m 600 "$repo/skills/house-rules/SKILL.md" /opt/house-rules-inne/skills/house-rules/
 install -m 644 "$repo"/systemd/house-rules-inne.{service,timer} /etc/systemd/system/
 install -m 644 "$repo/systemd/skills-sync-house-rules.conf" /etc/systemd/system/skills-sync.service.d/house-rules.conf
 systemctl daemon-reload
