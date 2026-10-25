@@ -1,6 +1,6 @@
 ---
 name: runner-update
-description: Runner status and top-up for a project manager. Use when asked for "runner update", "/runner-update" or runner status, and at every manager check-in. Counts your project's Claude Code and hax (Codex) runners, checks the token ladder and server load, fixes gaps, then reports one line.
+description: Runner status and top-up for a project manager. Use when asked for "runner update", "/runner-update" or runner status, and at every manager check-in. Counts your project's Claude Code and hax (Codex) runners, checks the token ladder and server load, fixes gaps, then reports two lines.
 ---
 
 # /runner-update
@@ -31,10 +31,18 @@ For each runner: active (working a ticket now) or idle. For every idle one, name
 - Restart dead or stuck runners. Unstick panes waiting on a prompt.
 - Idle for "no tickets"? Get tickets written or groomed. That is your gap to close.
 
-## 4. Report: one line, caveman
+## 4. Count shipped (last 2h)
+
+- Tickets closed: tickets moved to Done in the last 2h on your project's Hypertask board.
+- PRs live: PRs merged to the production branch whose production deploy finished in the last 2h. Deploy time not readable? Count PRs merged to the production branch in the last 2h, and add `(merged, deploy unverified)`.
+
+## 5. Report: two lines, caveman
 
 `<project> runners: X/Y claude code runners active, Z idle (reason); X/Y hax runners active -> reason`
+`<project> shipped (2h): N tickets closed, M PRs live`
 
-Example: `hypertask runners: 5/5 claude code runners active, 0 idle; 9/10 hax runners active -> 1 starting, load green`
+Example:
+`hypertask runners: 5/5 claude code runners active, 0 idle; 9/10 hax runners active -> 1 starting, load green`
+`hypertask shipped (2h): 4 tickets closed, 2 PRs live`
 
 Never say "0 hax by design". Zero hax is a gap: say why and what you did.
