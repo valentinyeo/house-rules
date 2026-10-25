@@ -25,6 +25,7 @@ For each runner: active (working a ticket now) or idle. For every idle one, name
 
 ## 3. Act
 
+- Launching = your project's own launcher (table above). No add-runner skill needed.
 - Codex (hax) is never braked. Only server load limits it. While load says `add`, start hax runners up to target (Hypertask: `ht-hax-runner top-up`; SF: `hax-runner <n>`).
 - Claude runners follow the ladder. Claude is scarce: brake only Claude.
 - Restart dead or stuck runners. Unstick panes waiting on a prompt.
