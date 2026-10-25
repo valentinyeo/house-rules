@@ -1,0 +1,11 @@
+[Unit]
+Description=Publish filtered house rules for inne
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0022
+ExecStart=/usr/bin/python3 /opt/house-rules-inne/bin/inne-sync.py
+ExecStartPost=/usr/sbin/runuser -u inne -- /usr/bin/python3 /opt/house-rules-inne/bin/link-inne.py
