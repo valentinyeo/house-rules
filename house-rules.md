@@ -29,7 +29,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - No ccr, DeepSeek or any model router; subscription auth only. (2026-10-25, why: no surprise bills or proxies)
 - Model routing per pstack roles: Claude coding/bug-fix sonnet high, hardest/judgment opus medium, lookups haiku; Codex coding gpt-6.1-sol, judgment/review gpt-6-astra, lookups gpt-6-luna. (2026-10-25, why: right brain per job, less burn)
 - Claude workers run alone, never spawn Codex helpers; extra parallel work = separate hax Codex sessions (as many as server load allows), each Codex-only on its own ticket. (2026-10-25, why: clean quotas, no cross-provider tangles)
-- Codex (hax) is always on for legwork; only server load limits it. Keep launching hax runners while load is green. Brake only scarce plans (Claude). (2026-10-25, why: Codex resets daily; 17 days of unused tokens)
+- Keep Codex eligible regardless of quota bars. Limit Codex runners only by CPU and RAM. Fill Codex before other pools. Reserve Claude for judgment; brake near plan limits. Only Valentin spends spare resets. (2026-10-25, why: use Codex capacity; protect scarce Claude plans)
 - Grok cloud agents: grok-4.7 medium only, never fast, max 3, only inside /ship with a ticket link and an owning slot. (2026-10-25, why: cost cap)
 
 ## Doing the work
