@@ -27,6 +27,7 @@ Read-only. Never write to the board, GitHub, servers or sessions while gathering
 - Line 1: window.
 - Then numbers, one per line: Done, merges, releases (with latest version), runners, CI.
 - One highlight block (a `>` quote) with the single most important thing.
-- Broke: one line, or skip if nothing broke.
-- Needs you: one line per item, full https link plus a pick. Or "nothing waits on you".
+- Broke: one line per item, each with its full https ticket link. Skip if nothing broke.
+- Needs you: one line per item, full https ticket link plus a pick. Or "nothing waits on you".
+- No ticket for a broken item yet? File one first, then link it. (2026-10-26, Valentin: "each item needs ticket links")
 - Never invent numbers. Mark a guess as a guess. Name a source that failed.
