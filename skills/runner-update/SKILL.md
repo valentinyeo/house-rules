@@ -36,15 +36,16 @@ For each runner: active (working a ticket now) or idle. For every idle one, name
 ## 4. Count shipped (last 2h)
 
 - Tickets closed: tickets moved to Done in the last 2h on your project's Hypertask board.
+- Time to live: average hours from ticket creation to Done, over the tickets counted above (`createdAt` to the move to Done). Add the median when you have 5 or more. No closed tickets: write `n/a`.
 - PRs live: PRs merged to the production branch whose production deploy finished in the last 2h. Deploy time not readable? Count PRs merged to the production branch in the last 2h, and add `(merged, deploy unverified)`.
 
 ## 5. Report: two lines, caveman
 
 `<project> runners: X/Y claude code runners active, Z idle (reason); X/Y hax runners active -> reason`
-`<project> shipped (2h): N tickets closed, M PRs live`
+`<project> shipped (2h): N tickets closed, M PRs live, avg time to live Xh`
 
 Example:
 `hypertask runners: 5/5 claude code runners active, 0 idle; 9/10 hax runners active -> 1 starting, load green`
-`hypertask shipped (2h): 4 tickets closed, 2 PRs live`
+`hypertask shipped (2h): 4 tickets closed, 2 PRs live, avg time to live 6.5h`
 
 Never say "0 hax by design". Zero hax is a gap: say why and what you did.
