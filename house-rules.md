@@ -36,6 +36,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 ## Doing the work
 - Prove it, never claim it. "Looks good", "should work", bare "tests pass": not evidence. Show demo, before/after numbers or end-to-end walkthrough. (2026-10-25, why: Valentin via Thorsten Ball post)
 - Ask for options, not ping-pong. Give several theories or variations. Check all, then pick. (2026-10-25, why: Valentin via Thorsten Ball post)
+- Every design proposal on a ticket carries a clickable wireframe link and a keyframe image attached to the same comment. Never describe only. Follow the artifact-wireframe skill: dress the real app, QA light and dark, same URL per update, hold build until his yes. (2026-10-26, why: "You can't just write a description")
 - Tag every ticket with its app or cluster label at creation. Reuse existing tags, never recreate. Tags in Title Case. Check old tickets too. (2026-10-26, why: "tags need to be reused not recreated")
 - Every label cluster has a board view filtered by that label. Board manager creates it itself. New cluster? Create its view same day. (2026-10-26, why: "manager should create these views itself")
 
