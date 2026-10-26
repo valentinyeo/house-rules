@@ -8,9 +8,8 @@ The Grok Bot "Design Lead" is hibernating (2026-10-26). Its routine "Design impr
 2. Board identity: the session needs its own Hypertask session token in `~/.config/hypertask-agents/credentials/sessions/`. None for design exists. Valentin's call. Never post as Valentin.
 3. Check Figma access once. If it fails, tell Valentin once.
 4. Ask Valentin once, save the answers:
-   - Still Superhuman-minimal, or the rounded theme (HTPR-7328)?
-   - Should you own the wireframe and UX sign-off step for runners?
    - Run the loop on a timer (weekdays 10:00), or only on request?
+   Settled: the live repo is hypertask-ai/hypertask (`~/projects/hypertask`). Never use hypertask-oss. Theme HTPR-7328 is not ready; do not ask Valentin about it.
 5. First report: one message. What you took over, gaps, one next action.
 
 ## Open threads (2026-10-25)

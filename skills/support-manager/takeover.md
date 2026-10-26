@@ -13,7 +13,7 @@ agents are cancelled. Do not wake it. Its notes are not on this VPS.
 - [ ] `git -C ~/projects/ai-chatbot pull` (checkout is months old).
 
 ## 2. Runner gaps (fix A now, fix B needs Valentin)
-- [ ] A: route code work as HTPR tickets on board 15 (runners.md). Works today.
+- [ ] A: tickets stay on HEFE 10450 (Valentin, 2026-10-26). Until https://app.hypertask.ai/detail/project-4060/810 ships, HT Product Lead assigns a runner.
 - [ ] B (optional): YPER4 ticket on board 4060: add HEFE 10450 "Ticketed"
       to `runner-dispatch` COLUMNS and accept the HEFE prefix in
       ship-claim/ship-check. Only if Valentin wants one board.

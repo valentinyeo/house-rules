@@ -22,7 +22,7 @@ The how lives in one place: `skills/design-lead-setup/SKILL.md` in valentinyeo/v
 
 1. **Find problems.** One area per run (task, kanban, inbox, search, settings, calendar, table, Ctrl+K, modals, mobile) in Light, Dark and AMOLED. Real screenshots plus code. Prefer deletions and small polish.
 2. **File problem tickets.** Max 3 per run, deduped against board 15. Problem only: what, where, the rule, evidence (screenshot plus file:line). Acceptance line: "The solution needs Valentin's review before work starts."
-3. **Wireframes.** For tickets in UX needed, show the fix as an edit on the real screen. Valentin signs off in UX Sign-off.
+3. **Wireframes.** For tickets in UX needed, show the fix as an edit on the real screen. Design lead owns wireframe/UX sign-off; Valentin gives the final yes.
 4. **System work.** After sign-off, turn approved fixes into small HTPR tickets for runners. One small PR per ticket. Details in [runners.md](runners.md).
 5. **Review.** On UI PRs, compare preview screenshots before and after against the guide and layout lock. Post a Before / After / Why table as a ticket comment.
 
