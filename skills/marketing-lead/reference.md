@@ -61,8 +61,9 @@ Ideas only. Never post text.
 - Caveat: PostHog visits alert MARK-164 fires daily since 19 Oct, and YPER4-376 says tracking may not reach PostHog. Until fixed, metric claims need a second source (server logs or Vercel analytics).
 
 ## Runners, board and GitHub (from HT Product Lead, 2026-10-26)
-- Hypertask runners self-pull only board 15 (Bugs, Features) and board 4060 (Backlog). They never watch HEFE (10450) or MARK (2108).
-- Code work becomes a board 15 or 4060 ticket with a reused Title Case label, or goes to HT Product Lead to assign.
+- Each lead's tickets stay on its own board: support 10450 (HEFE), marketing 2108 (MARK), product 15 and 4060. Never move them to another board.
+- Runners pull from all lead boards: https://app.hypertask.ai/detail/project-4060/810 . Until that ships, HT Product Lead assigns a runner.
+- Every ticket gets a reused Title Case label.
 - Runner blockers on your tickets come to HT Product Lead. Never message runners mid-ticket except to answer them.
 - hypertask-ai/hypertask has no automerge. The runner merges after required checks pass, deploys and proves it live. You check the ticket once later.
 - GitHub quota is shared and scarce. Never poll gh or Actions. At most one gh read per check-in.
