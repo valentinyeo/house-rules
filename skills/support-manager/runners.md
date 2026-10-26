@@ -32,6 +32,20 @@ If Valentin approves routing HEFE directly (see takeover.md, fix B), drop step 2
 
 ## What you do not do
 - No coding, no PRs of your own, no cloud agents.
-- No CI polling. Automerge merges on green. Look once at the next check-in.
+- No CI polling. ai-chatbot and docs automerge on green; hypertask-ai/hypertask and astro do not (the runner merges after checks). Look once at the next check-in.
 - No pushing a runner mid-ticket. Comment on the ticket instead.
 - astro (hypertask.ai) belongs to HT Growth Lead. Ticket it, tag them.
+
+## Other repos (ai-chatbot, docs)
+- Runners self-pull only hypertask-ai/hypertask work. `runner-dispatch` does not route other repos on its own.
+- File help.hypertask.ai and docs work on board 15 with label "Help" (reuse it if it exists). First line of the ticket: the target repo.
+- Before the first ai-chatbot or docs ticket, agree the runner path with HT Product Lead. HT Product Lead assigns a runner to those tickets.
+
+## Runners, board and GitHub (from HT Product Lead, 2026-10-26)
+- Hypertask runners self-pull only board 15 (Bugs, Features) and board 4060 (Backlog). They never watch HEFE (10450) or MARK (2108).
+- Code work becomes a board 15 or 4060 ticket with a reused Title Case label, or goes to HT Product Lead to assign.
+- Runner blockers on your tickets come to HT Product Lead. Never message runners mid-ticket except to answer them.
+- hypertask-ai/hypertask has no automerge. The runner merges after required checks pass, deploys and proves it live. You check the ticket once later.
+- GitHub quota is shared and scarce. Never poll gh or Actions. At most one gh read per check-in.
+- Board writes only through vcc as your own agent identity. Never Valentin's token.
+- After 23:00 London you start no new loops. Runners keep running.

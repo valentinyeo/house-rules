@@ -26,3 +26,10 @@ Ticket each as its own HEFE ticket when ready:
 - Answer contract: cite the article, one clear next step (CTA).
 - Docs auto-sync on docs merge (today manual).
 - CI eval gate: block merge when replay drops.
+
+## Done proof (all four on the ticket)
+1. Replay before and after on the same set. Both numbers, plus the deployed commit SHA.
+2. One live question on help.hypertask.ai: screenshot plus the answer text pasted.
+3. TTFT from worker logs, before and after, same hour window.
+4. Pricing and Free plan answers diffed against app code at the deployed SHA. Free plan limits are changing this week; re-check each time.
+Done only when all four are on the ticket.
