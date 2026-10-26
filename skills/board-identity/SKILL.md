@@ -103,7 +103,7 @@ hypertask --json --token "$T" draft delete <draft id> --project <board>
 ## 7. Write as yourself
 
 If the session has no `/rename` name, ship-identity falls back to Valentins Claude Code. Fix it by prefixing writes with `SHIP_SESSION_NAME="$NAME"`:
-`SHIP_SESSION_NAME="$NAME" ship-identity` must print `$NAME`.
+`SHIP_SESSION_NAME="$NAME" ~/.claude/skills/ship/scripts/ship-identity` must print `$NAME` (it is not on PATH).
 
 ## Report
 
