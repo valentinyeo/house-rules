@@ -105,6 +105,40 @@ hypertask --json --token "$T" draft delete <draft id> --project <board>
 If the session has no `/rename` name, ship-identity falls back to Valentins Claude Code. Fix it by prefixing writes with `SHIP_SESSION_NAME="$NAME"`:
 `SHIP_SESSION_NAME="$NAME" ~/.claude/skills/ship/scripts/ship-identity` must print `$NAME` (it is not on PATH).
 
+## 8. One startup check
+
+Run this in the lead's own named session:
+
+```bash
+python3 ~/.agents/skills/board-identity/check.py
+```
+
+Set `SHIP_SESSION_NAME` to your role above. Never another role.
+The check reads only that role's flat token.
+It verifies the real agent name and boards.
+No tokens appear in arguments or output.
+
+It checks these checkouts without changing them:
+
+| Lead | Repos under `~/projects/` | Runner path |
+|---|---|---|
+| Support | `ai-chatbot`, `HypertaskDocs`, `hypertask` | Hypertask fleet, HEFE 10450; [contract](../support-manager/runners.md) |
+| Design | `hypertask` | Hypertask fleet, HTPR 15; [contract](../design-lead/runners.md) |
+| Growth | `hypertask-astro` | Hypertask fleet, MARK 2108; [contract](../marketing-lead/SKILL.md) |
+| Finance | `pecunia` | No finance runners; code through HT Product Lead |
+
+Clean means no tracked or untracked changes.
+Fast-forwardable means local HEAD precedes the remote tip.
+The check reads the live upstream, never pulls.
+Unknown remote commits require fetching before retrying.
+Ahead, diverged, missing and unavailable checkouts fail.
+Preserve existing work; never reset or stash.
+
+`setup: PASS` means all four checks passed.
+Any failure exits nonzero; readiness stays blocked.
+Fix setup through the existing steps, then rerun.
+Never start role work on failed setup.
+
 ## Report
 
 Print one line, for example: `identity: HT Finance Lead, boards 2462, read ok, write ok`. Nothing else, and never the token.
@@ -115,4 +149,4 @@ Print one line, for example: `identity: HT Finance Lead, boards 2462, read ok, w
 - Never rename or re-board an `OTHER BOARDS` agent.
 - Never copy tokens from Grok Bot or another machine.
 - Never print a token, the key or `ht` output that holds one.
-- A step fails after its retries: report the exact error in the identity line, then carry on with the role. Do not stop to ask.
+- A failed step blocks readiness and board work. Report its safe error through HT Product Lead. Fix it, then rerun the startup check.
