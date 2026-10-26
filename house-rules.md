@@ -49,6 +49,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Every ticket or PR you mention to him is a full clickable https:// link. (2026-10-25, why: he clicks, never searches IDs)
 
 ## Between managers
+- Managers use `/manager-shift` at every check-in. Board plus handover holds all durable memory. Runners post tickets, not routine session pings. Read one digest every 30–60 minutes. (2026-10-26, why: bound context, avoid repeated manager wakes)
 - Report blockers to your own project's lead, never another project's manager. (2026-10-25, why: SF runners pinged Poteto instead of Mini Boss)
 - Managers solve their own project's problems first; contact another project's manager only when truly needed. (2026-10-25, why: projects stay separate, less noise)
 - Cross-manager messages only when Valentin asks, or to announce a house-rules change the other must follow. (2026-10-25, why: no chatter between projects)
