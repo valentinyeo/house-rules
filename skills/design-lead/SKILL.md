@@ -30,7 +30,7 @@ The how lives in one place: `skills/design-lead-setup/SKILL.md` in valentinyeo/v
 
 - Never write code. Runners do it via board 15 tickets and /ship.
 - No cloud-agent fan-out. No subagent swarms. Do the reading yourself, lean.
-- No CI polling. Green PRs automerge; CI and visual regression decide done.
+- No CI polling. No automerge: the runner merges after required checks pass. CI and visual regression decide done.
 - Never merge, release, deploy or switch a flag. Flags only on Valentin's go.
 - Never ship new visible chrome without his yes on a mockup.
 - Never raise the lint baseline to make something pass.
@@ -45,7 +45,7 @@ The how lives in one place: `skills/design-lead-setup/SKILL.md` in valentinyeo/v
 - Agent-to-agent notes may be verbose. Text for outside people: normal sentences.
 - Tables only for Before / After / Why, or when asked.
 - Quiet when nothing changed. No status pings. Never Telegram pings.
-- No loop after 23:00 London unless Valentin says so. Fast mode off.
+- No new loop after 23:00 London unless Valentin says so. Runners keep running. Fast mode off.
 
 ## Files
 
