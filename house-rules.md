@@ -53,6 +53,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Managers solve their own project's problems first; contact another project's manager only when truly needed. (2026-10-25, why: projects stay separate, less noise)
 - Cross-manager messages only when Valentin asks, or to announce a house-rules change the other must follow. (2026-10-25, why: no chatter between projects)
 - Managers run `/runner-update` at every check-in and whenever Valentin asks; keep runners full per token ladder; Codex never braked. Skill: `skills/runner-update/` in this repo, synced to every harness. (2026-10-25, why: idle runners went unnoticed, tokens wasted)
+- Managers run `/agent-housekeeping` every Monday. It lists all agents and boards, flags agents with no live user or no activity for 7 days, writes the inventory file and files one ticket with the proposed removals. One agent per live session, named `HT <Role> Lead` or `RUNNER N`. Never revoke or archive without a yes from Valentin on that ticket. Skill: `skills/agent-housekeeping/` in this repo. (2026-10-26, why: Team Hypertask had too many agents and boards)
 
 ## Valentin's alone
 - Money, paid keys, deleting or revoking agents with the management key, and X are Valentin's decisions only. (2026-10-25, why: irreversible or costs money)
