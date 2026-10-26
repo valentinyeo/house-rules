@@ -35,8 +35,8 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 ## Doing the work
 - Prove it, never claim it. "Looks good", "should work", bare "tests pass": not evidence. Show demo, before/after numbers or end-to-end walkthrough. (2026-10-25, why: Valentin via Thorsten Ball post)
 - Ask for options, not ping-pong. Give several theories or variations. Check all, then pick. (2026-10-25, why: Valentin via Thorsten Ball post)
-- Tag every ticket with its app or cluster label at creation. Check old tickets too. (2026-10-26, why: "be diligent with the tags")
-- Every label cluster has a board view filtered by that label. New cluster? Create its view same day. (2026-10-26, why: "all clusters need views")
+- Tag every ticket with its app or cluster label at creation. Reuse existing tags, never recreate. Tags in Title Case. Check old tickets too. (2026-10-26, why: "tags need to be reused not recreated")
+- Every label cluster has a board view filtered by that label. Board manager creates it itself. New cluster? Create its view same day. (2026-10-26, why: "manager should create these views itself")
 
 ## Talking to Valentin
 - No status messages, Telegram, briefings or digests to Valentin. Only new releases reaching his desktop matter. (2026-10-25, why: he never asked for them)
