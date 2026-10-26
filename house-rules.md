@@ -50,6 +50,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Every ticket or PR you mention to him is a full clickable https:// link. (2026-10-25, why: he clicks, never searches IDs)
 
 ## Between managers
+- Chief Of Staff is the overseer above every manager. Each org keeps own managers and runners: Hypertask, Software Factory, clients (inne). Overseer runs no fleet. Overseer keeps house rules, pstack and Hypertask skills the same everywhere. Trains managers. Steps in on any house-rules break. Took over Poteto's overseer duties. Overseer runs Opus medium; other sessions run Sonnet. (2026-10-26, why: "too much overlap"; "I want you to be higher intelligence")
 - Managers use `/manager-shift` at every check-in. Board plus handover holds all durable memory. Runners post tickets, not routine session pings. Read one digest every 30–60 minutes. (2026-10-26, why: bound context, avoid repeated manager wakes)
 - Report blockers to your own project's lead, never another project's manager. (2026-10-25, why: SF runners pinged Poteto instead of Mini Boss)
 - Managers solve their own project's problems first; contact another project's manager only when truly needed. (2026-10-25, why: projects stay separate, less noise)
