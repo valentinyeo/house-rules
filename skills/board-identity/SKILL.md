@@ -5,7 +5,7 @@ description: First step of every lead role (support-manager, design-lead, market
 
 # Board identity
 
-Get your own board login. Do it yourself. Never ask Valentin. Never print a token.
+Get your own board login. Do it yourself. Never ask Valentin: this rule already allows finding, renaming, creating and boarding your own role agent. Never print a token.
 
 ## Board map
 
@@ -16,36 +16,38 @@ Get your own board login. Do it yourself. Never ask Valentin. Never print a toke
 | marketing-lead | HT Growth Lead | ht-growth-lead | 2108, 15 |
 | finance-lead | HT Finance Lead | ht-finance-lead | 2462 |
 
-Set these for your row, in every shell call below:
+Set these for your row, in every shell call below (`h` is `ht` with a retry on "Rate limit"):
 
 ```bash
-NAME="HT Finance Lead"; SLUG=ht-finance-lead; BOARDS="2462"
+NAME="HT Finance Lead"; SLUG=ht-finance-lead; BOARDS="2462"; export NAME BOARDS
 C=~/.config/hypertask-agents/credentials; S=$C/sessions; export PATH=$HOME/.local/bin:$PATH
+h(){ for i in 1 2 3 4 5 6; do r=$(ht "$@"); case $r in *"Rate limit"*) timeout 20 tail -f /dev/null;; *) printf '%s\n' "$r"; return;; esac; done; echo "rate limited"; }
 ```
 
 ## 1. Token already there?
 
-`[ -s $S/$SLUG-agent-token ] && echo have`. If yes, go to 5.
+`[ -s $S/$SLUG-agent-token ] && echo have`. If yes, read its agent id (step 3 decode) and go to 5.
 
 ## 2. Find your agent
 
 Admin calls use `ht` (Valentin's saved CLI login; it can manage agents). Setup only. Board writes never use it.
 
 ```bash
-ht GET "/mcp/admin/agents?limit=200" | python3 -c "import json,sys,os
-w=os.environ['NAME'].lower().replace(' lead','')
+h GET "/mcp/admin/agents?limit=200" | python3 -c "import json,sys,os
+w=os.environ['NAME'].lower().replace(' lead',''); B={int(x) for x in os.environ['BOARDS'].split()}
 for a in json.load(sys.stdin)['agents']:
-  if not a['revoked'] and a['display_name'].lower().replace(' lead','')==w: print(a['id'],a['display_name'],[b['id'] for b in a['boards']])"
+  if a['revoked'] or a['display_name'].lower().replace(' lead','')!=w: continue
+  b={x['id'] for x in a['boards']}; print(a['id'],a['display_name'],sorted(b),'MINE' if b&B or not b else 'OTHER BOARDS')"
 ```
 
-Run it with `NAME` exported. "HT Finance" matches "HT Finance Lead". Several matches: take the oldest one with boards, and say so. No match: go to 4.
+"HT Finance" matches "HT Finance Lead". Use only a `MINE` row (it already has one of your boards, or no boards). An `OTHER BOARDS` row belongs to another team or session: leave it alone, do not rename it, do not reuse its token. No `MINE` row: go to 4 and create.
 
 ## 3. Reuse a token file you already have
 
-Look for a token file for that agent id. This prints file names only:
+Look for a token file for your agent id. This prints file names only:
 
 ```bash
-ID=<agent id>; for f in $C/*-agent-token $S/*-agent-token; do python3 - "$f" "$ID" <<'P'
+ID=<agent id>; for f in $C/*-agent-token $S/*-agent-token $S/*/*-agent-token; do python3 - "$f" "$ID" <<'P'
 import sys,json,base64
 t=open(sys.argv[1]).read().strip(); p=t.split('.')[1]; p+='='*(-len(p)%4)
 if json.loads(base64.urlsafe_b64decode(p)).get('agentId')==sys.argv[2]: print(sys.argv[1])
@@ -57,29 +59,29 @@ Found one: `mkdir -p $S/<role> && ln -sfn <that file> $S/<role>/$SLUG-agent-toke
 
 ## 4. Mint (no token file anywhere)
 
-Existing agent, no token file: rotate.
-`ht POST /mcp/admin/agents/$ID/token '{}'`
-
-No agent at all: create.
-`ht POST /mcp/admin/agents "{\"display_name\":\"$NAME\",\"project_ids\":[${BOARDS// /,}]}"`
-
-Never let the token reach the screen. Pipe the response straight into the file:
+Never let the token reach the screen. Both commands write it straight into a chmod 600 file and print only the agent id.
 
 ```bash
-umask 077; mkdir -p $S/<role>; ht POST ... | python3 -c "import json,sys;d=json.load(sys.stdin);t=d.get('token') or d.get('agent',{}).get('token');open('$S/<role>/$SLUG-agent-token','w').write(t);print('saved',d.get('agent',{}).get('id',''))"
-chmod 600 $S/<role>/$SLUG-agent-token
+umask 077; mkdir -p $S/<role>; F=$S/<role>/$SLUG-agent-token
+save(){ python3 -c "import json,sys
+d=json.load(sys.stdin); a=d.get('agent') or {}
+t=d.get('token') or d.get('bearer_token') or a.get('token') or a.get('bearer_token')
+if not t: print('no token in reply, keys:',list(d)); sys.exit(1)
+open('$F','w').write(t); print('saved',a.get('id') or d.get('id',''))"; chmod 600 $F; }
 ```
 
-## 5. Flat link, name, boards
+- `MINE` agent, no token file: rotate. `h POST /mcp/admin/agents/$ID/token '{}' | save`
+- No `MINE` agent: create it on your boards (repeat `--project` per board):
+  `hypertask --json agents create --name "$NAME" --project 2462 | save`
+
+## 5. Flat link, boards, name
 
 - ship-identity reads only the flat file `$S/$SLUG-agent-token`:
   `[ -e $S/$SLUG-agent-token ] || ln -sfn <role>/$SLUG-agent-token $S/$SLUG-agent-token`
-- Rename to `$NAME` if the agent has another name:
-  `ht PATCH /mcp/agents/$ID "{\"display_name\":\"$NAME\"}"`
-- Add any board from the map that it lacks:
-  `ht PATCH /mcp/agents/$ID '{"add_project_ids":[2462]}'`
-
-Do one change per PATCH.
+- Add any board from the map that it lacks, one PATCH each:
+  `h PATCH /mcp/agents/$ID '{"add_project_ids":[2462]}'`
+  "Agents can only belong to boards in one team": this agent is not yours. Remove only the links you made in 3 and 5, then go to 4 and create.
+- Then rename to `$NAME` if needed: `h PATCH /mcp/agents/$ID "{\"display_name\":\"$NAME\"}"`
 
 ## 6. Verify (read and write)
 
@@ -110,6 +112,7 @@ Print one line, for example: `identity: HT Finance Lead, boards 2462, read ok, w
 ## Stop rules
 
 - Never revoke, archive or delete an agent.
+- Never rename or re-board an `OTHER BOARDS` agent.
 - Never copy tokens from Grok Bot or another machine.
 - Never print a token, the key or `ht` output that holds one.
-- A step fails: report the exact error in the identity line, then carry on with the role.
+- A step fails after its retries: report the exact error in the identity line, then carry on with the role. Do not stop to ask.
