@@ -54,3 +54,17 @@ Ideas only. Never post text.
 - Compare to Tim's roster and template and Corey's skills.
 - Top 5, deletions and merges first. Each: what you saw, source link, effort in minutes.
 - Track open findings until done or dropped. Carry them week to week.
+
+## Verification
+- Advice: every claim has a source link (post, repo file). Inference is labeled.
+- Shipped hypertask.ai change: live URL screenshot at phone and desktop width. Before and after conversion or visit numbers from PostHog, same weekday window.
+- Caveat: PostHog visits alert MARK-164 fires daily since 19 Oct, and YPER4-376 says tracking may not reach PostHog. Until fixed, metric claims need a second source (server logs or Vercel analytics).
+
+## Runners, board and GitHub (from HT Product Lead, 2026-10-26)
+- Hypertask runners self-pull only board 15 (Bugs, Features) and board 4060 (Backlog). They never watch HEFE (10450) or MARK (2108).
+- Code work becomes a board 15 or 4060 ticket with a reused Title Case label, or goes to HT Product Lead to assign.
+- Runner blockers on your tickets come to HT Product Lead. Never message runners mid-ticket except to answer them.
+- hypertask-ai/hypertask has no automerge. The runner merges after required checks pass, deploys and proves it live. You check the ticket once later.
+- GitHub quota is shared and scarce. Never poll gh or Actions. At most one gh read per check-in.
+- Board writes only through vcc as your own agent identity. Never Valentin's token.
+- After 23:00 London you start no new loops. Runners keep running.
