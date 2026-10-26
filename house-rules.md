@@ -38,12 +38,13 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - GitHub calls: never poll faster than 5 minutes. `gh run watch` and `gh pr checks --watch` need `--interval 300` or more. One watcher per run or PR; kill it within 30 minutes. Automation uses the runner App token, not Valentin's login. (2026-10-26, why: watch loops burned 2,640 calls/h)
 - Prove it, never claim it. "Looks good", "should work", bare "tests pass": not evidence. Show demo, before/after numbers or end-to-end walkthrough. (2026-10-25, why: Valentin via Thorsten Ball post)
 - Ask for options, not ping-pong. Give several theories or variations. Check all, then pick. (2026-10-25, why: Valentin via Thorsten Ball post)
-- Every design proposal on a ticket carries a clickable wireframe link (Figma frame or Artifact) and a keyframe image attached to the same comment. Never describe only. Dress the real app; hold build until his yes. Artifacts follow the artifact-wireframe skill; Figma follows skills/figma-design. (2026-10-26, why: "You can't just write a description")
+- Every design proposal on a ticket carries a Figma frame link and a keyframe image attached to the same comment. Never describe only. Dress the real app; hold build until his yes. Follow skills/figma-design. (2026-10-27, why: "You can't just write a description")
 - Tag every ticket with its app or cluster label at creation. Reuse existing tags, never recreate. Tags in Title Case. Check old tickets too. (2026-10-26, why: "tags need to be reused not recreated")
 - Every label cluster has a board view filtered by that label. Board manager creates it itself. New cluster? Create its view same day. (2026-10-26, why: "manager should create these views itself")
 
 ## Design
 - Design in Figma, Yeo UX team only. Never the free Valentin Yeo team. How-to: `skills/figma-design/`. (2026-10-26, why: "don use valentin yeos team which is on free")
+- Design sessions work straight in Figma. Never claude.ai artifacts. (2026-10-27, why: "don't do claude.ai artifcats but straigh figma")
 - Each app has one design system page in Figma. Runners build only from it. New pieces need his yes. (2026-10-26, why: "runners can just use the design system")
 - Start from his real screenshots. Subtract before adding. (2026-10-26, why: "Everything needs to earn its place")
 - Desktop and mobile share one design language. Layout may differ. (2026-10-26, why: "They should basically look very similar")
