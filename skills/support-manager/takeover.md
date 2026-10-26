@@ -4,10 +4,7 @@ Old Support bot (Grok Bot) is hibernating. Its loop is paused, its cloud
 agents are cancelled. Do not wake it. Its notes are not on this VPS.
 
 ## 1. Access (ask Valentin in one message, with your recommendation)
-- [ ] Board identity: a Hypertask agent token for session `support` in
-      `~/.config/hypertask-agents/credentials/sessions/` with write on
-      project 10450 and board 15. Check with `ship-identity`.
-      Old identity "Support Poteto Advisor" token lives off the VPS; do not ask for a copy.
+- [x] Board identity: HT Support Lead (was Support Poteto Advisor), boards 10450 + 15. Self-setup: [board-identity](../board-identity/SKILL.md).
 - [ ] `stack-key --list` shows `anthropic`, `cloudflare`, and the
       `Help admin CLI - Support bot` item. Names only.
 - [ ] `git -C ~/projects/ai-chatbot pull` (checkout is months old).
