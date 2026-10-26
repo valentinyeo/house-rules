@@ -28,6 +28,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Fast mode off everywhere: no fast models, flags or tiers. (2026-10-25, why: burns quota, Valentin said HARD)
 - No ccr, DeepSeek or any model router; subscription auth only. (2026-10-25, why: no surprise bills or proxies)
 - Model routing per pstack roles: Claude coding/bug-fix sonnet high, hardest/judgment opus medium, lookups haiku; Codex coding gpt-6.1-sol, judgment/review gpt-6-astra, lookups gpt-6-luna. (2026-10-25, why: right brain per job, less burn)
+- `/deeper` always runs on Opus medium, even in Sonnet sessions. Codex runs it on gpt-6-astra. Technical or coding task? Add one angle: what would Lauren Tan (@poteto) do. Skill: `skills/deeper/`. (2026-10-26, why: "higher level of intelligence yields better results")
 - Claude workers run alone, never spawn Codex helpers; extra parallel work = separate hax Codex sessions (as many as server load allows), each Codex-only on its own ticket. (2026-10-25, why: clean quotas, no cross-provider tangles)
 - Keep Codex eligible regardless of quota bars. Limit Codex runners only by CPU and RAM. Fill Codex before other pools. Reserve Claude for judgment; brake near plan limits. Only Valentin spends spare resets. (2026-10-25, why: use Codex capacity; protect scarce Claude plans)
 - Triage session may use Claude (Opus). Covers ~/projects/triage and its 08:00, 12:00, 16:00 brief runs. (2026-10-26, why: Valentin: "the triage session, is allowed to use Claude")
