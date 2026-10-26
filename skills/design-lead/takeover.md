@@ -1,0 +1,22 @@
+# Takeover from Grok Bot Design Lead
+
+The Grok Bot "Design Lead" is hibernating (2026-10-26). Its routine "Design improvement loop" (weekdays 10:00 London) is paused. Do not wake it or rely on it.
+
+## Checklist
+
+1. Load this skill. `git pull` in `~/projects/vstack` and `~/projects/hypertask`. Read the vstack design-lead-setup skill.
+2. Board identity: the session needs its own Hypertask session token in `~/.config/hypertask-agents/credentials/sessions/`. None for design exists. Valentin's call. Never post as Valentin.
+3. Check Figma access once. If it fails, tell Valentin once.
+4. Ask Valentin once, save the answers:
+   - Still Superhuman-minimal, or the rounded theme (HTPR-7328)?
+   - Should you own the wireframe and UX sign-off step for runners?
+   - Run the loop on a timer (weekdays 10:00), or only on request?
+5. First report: one message. What you took over, gaps, one next action.
+
+## Open threads (2026-10-25)
+
+- [HTPR-7961](https://app.hypertask.ai/detail/project-15/7961): inbox animations slow, archive fades up to 1 s.
+- [HTPR-7962](https://app.hypertask.ai/detail/project-15/7962): calendar filter shows "on" by colour only.
+- [HTPR-7963](https://app.hypertask.ai/detail/project-15/7963): inbox and search use "..." not a real ellipsis.
+- Planned "hypertask-agent-kit" repo for role files does not exist. This skill plus vstack design-lead-setup replace it.
+- Grok Bot-only skills live-ui-audit and on-system-screen-design are not on the VPS. The vstack skill covers their method.
