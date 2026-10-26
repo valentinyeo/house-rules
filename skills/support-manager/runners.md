@@ -4,16 +4,13 @@ You write tickets. Hypertask runners (`ht-runners` Claude panes, `ht-hax-runner-
 ship them with /ship: claim, PR, CI, merge, deploy, live proof, Done.
 No separate Support runners. Same fleet, same guards.
 
-## Why tickets go on board 15, not only HEFE
-`runner-dispatch` picks only board 15 (Bugs, Todo) and 4060 (Backlog).
-It never reads HEFE (10450). So:
-1. HEFE ticket = the customer problem, evidence and eval numbers. You own it.
-2. Code work = one HTPR ticket on board 15 Todo, linked both ways.
-3. When the HTPR ticket is Done, you re-run the eval and close HEFE.
-If Valentin approves routing HEFE directly (see takeover.md, fix B), drop step 2.
+## Tickets stay on HEFE (Valentin, 2026-10-26)
+- Support, help-chat and docs tickets stay on the support board 10450 (HEFE). Never move them to board 15.
+- Runners pull from 10450 too: https://app.hypertask.ai/detail/project-4060/810 . Until it ships, ask HT Product Lead to assign a runner.
+- One HEFE ticket holds the customer problem, evidence, eval numbers and the code work.
 
 ## Every runner ticket must contain
-- Link to the HEFE ticket and the customer evidence.
+- The customer evidence.
 - Repo line and ship prefix, exact:
 
 | Repo | Prefix for `ship-gates` and every `ship-check` |
@@ -36,14 +33,11 @@ If Valentin approves routing HEFE directly (see takeover.md, fix B), drop step 2
 - No pushing a runner mid-ticket. Comment on the ticket instead.
 - astro (hypertask.ai) belongs to HT Growth Lead. Ticket it, tag them.
 
-## Other repos (ai-chatbot, docs)
-- Runners self-pull only hypertask-ai/hypertask work. `runner-dispatch` does not route other repos on its own.
-- File help.hypertask.ai and docs work on board 15 with label "Help" (reuse it if it exists). First line of the ticket: the target repo.
-- Before the first ai-chatbot or docs ticket, agree the runner path with HT Product Lead. HT Product Lead assigns a runner to those tickets.
 
 ## Runners, board and GitHub (from HT Product Lead, 2026-10-26)
-- Hypertask runners self-pull only board 15 (Bugs, Features) and board 4060 (Backlog). They never watch HEFE (10450) or MARK (2108).
-- Code work becomes a board 15 or 4060 ticket with a reused Title Case label, or goes to HT Product Lead to assign.
+- Each lead's tickets stay on its own board: support 10450 (HEFE), marketing 2108 (MARK), product 15 and 4060. Never move them to another board.
+- Runners pull from all lead boards: https://app.hypertask.ai/detail/project-4060/810 . Until that ships, HT Product Lead assigns a runner.
+- Every ticket gets a reused Title Case label.
 - Runner blockers on your tickets come to HT Product Lead. Never message runners mid-ticket except to answer them.
 - hypertask-ai/hypertask has no automerge. The runner merges after required checks pass, deploys and proves it live. You check the ticket once later.
 - GitHub quota is shared and scarce. Never poll gh or Actions. At most one gh read per check-in.
