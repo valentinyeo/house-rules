@@ -1,0 +1,51 @@
+# Handing work to runners
+
+You write tickets. Hypertask runners (`ht-runners` Claude panes, `ht-hax-runner-N`)
+ship them with /ship: claim, PR, CI, merge, deploy, live proof, Done.
+No separate Support runners. Same fleet, same guards.
+
+## Why tickets go on board 15, not only HEFE
+`runner-dispatch` picks only board 15 (Bugs, Todo) and 4060 (Backlog).
+It never reads HEFE (10450). So:
+1. HEFE ticket = the customer problem, evidence and eval numbers. You own it.
+2. Code work = one HTPR ticket on board 15 Todo, linked both ways.
+3. When the HTPR ticket is Done, you re-run the eval and close HEFE.
+If Valentin approves routing HEFE directly (see takeover.md, fix B), drop step 2.
+
+## Every runner ticket must contain
+- Link to the HEFE ticket and the customer evidence.
+- Repo line and ship prefix, exact:
+
+| Repo | Prefix for `ship-gates` and every `ship-check` |
+|---|---|
+| ai-chatbot | `SHIP_REPO=valentinyeo/ai-chatbot SHIP_BASE=master SHIP_CHECKOUT=$HOME/projects/ai-chatbot SHIP_WORKER=.` (worker at repo root; confirm ship-check accepts `.` on the first ticket) |
+| docs | `SHIP_REPO=hypertask-ai/docs SHIP_BASE=main SHIP_CHECKOUT=$HOME/projects/HypertaskDocs` |
+| astro | `SHIP_REPO=hypertask-ai/astro SHIP_BASE=feature/v2-homepage SHIP_CHECKOUT=$HOME/projects/hypertask-astro` |
+
+- ai-chatbot deploy line: "Deploy approved (Valentin 2026-10-25, help chat).
+  Deploy with `npx wrangler deploy --message <full merge sha>` so
+  `ship-check deployed` matches. Token: `stack-key cloudflare CLOUDFLARE_API_TOKEN`."
+- Docs change that the chat must know: "After docs deploy, run the
+  `sync-docs` workflow in ai-chatbot. Snapshot articles first."
+- Acceptance: the exact question, the expected answer, the replay numbers.
+- One root cause per ticket. Small PR.
+
+## What you do not do
+- No coding, no PRs of your own, no cloud agents.
+- No CI polling. ai-chatbot and docs automerge on green; hypertask-ai/hypertask and astro do not (the runner merges after checks). Look once at the next check-in.
+- No pushing a runner mid-ticket. Comment on the ticket instead.
+- astro (hypertask.ai) belongs to HT Growth Lead. Ticket it, tag them.
+
+## Other repos (ai-chatbot, docs)
+- Runners self-pull only hypertask-ai/hypertask work. `runner-dispatch` does not route other repos on its own.
+- File help.hypertask.ai and docs work on board 15 with label "Help" (reuse it if it exists). First line of the ticket: the target repo.
+- Before the first ai-chatbot or docs ticket, agree the runner path with HT Product Lead. HT Product Lead assigns a runner to those tickets.
+
+## Runners, board and GitHub (from HT Product Lead, 2026-10-26)
+- Hypertask runners self-pull only board 15 (Bugs, Features) and board 4060 (Backlog). They never watch HEFE (10450) or MARK (2108).
+- Code work becomes a board 15 or 4060 ticket with a reused Title Case label, or goes to HT Product Lead to assign.
+- Runner blockers on your tickets come to HT Product Lead. Never message runners mid-ticket except to answer them.
+- hypertask-ai/hypertask has no automerge. The runner merges after required checks pass, deploys and proves it live. You check the ticket once later.
+- GitHub quota is shared and scarce. Never poll gh or Actions. At most one gh read per check-in.
+- Board writes only through vcc as your own agent identity. Never Valentin's token.
+- After 23:00 London you start no new loops. Runners keep running.
