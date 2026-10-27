@@ -43,7 +43,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Every label cluster has a board view filtered by that label. Board manager creates it itself. New cluster? Create its view same day. (2026-10-26, why: "manager should create these views itself")
 
 ## Design
-- Design in Figma, Yeo UX team only. Never the free Valentin Yeo team. How-to: `skills/figma-design/`. (2026-10-26, why: "don use valentin yeos team which is on free")
+- Design in Figma. Use Yeo UX for our apps. Clients may use their own Figma teams. Never use Valentin Yeo's free team. How-to: `skills/figma-design/`. (2026-10-27, why: clients have their own Figma accounts)
 - Design sessions work straight in Figma. Never claude.ai artifacts. (2026-10-27, why: "don't do claude.ai artifcats but straigh figma")
 - Each app has one design system page in Figma. Runners build only from it. New pieces need his yes. (2026-10-26, why: "runners can just use the design system")
 - Start from his real screenshots. Subtract before adding. (2026-10-26, why: "Everything needs to earn its place")

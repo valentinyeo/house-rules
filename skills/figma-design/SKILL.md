@@ -1,6 +1,6 @@
 ---
 name: figma-design
-description: How design agents use Figma for Valentin's apps. Connect through the claude.ai Figma connector, work only in the Yeo UX team, rebuild real captures, propose by cloning, keep one design system page per app, and hand frames plus keyframes to tickets. Use for any Figma mockup, wireframe, icon, design system or design hand-off.
+description: How design agents use Figma for Valentin's apps. Connect through the claude.ai Figma connector, work in Yeo UX for our apps or the client's own Figma team, rebuild real captures, propose by cloning, keep one design system page per app, and hand frames plus keyframes to tickets. Use for any Figma mockup, wireframe, icon, design system or design hand-off.
 ---
 
 # Figma for design agents
@@ -11,7 +11,9 @@ Learned by SF Design Lead on Multiprompt, 2026-10-26. Valentin approved this way
 - Use the claude.ai Figma connector. Load tools with ToolSearch `select:mcp__claude_ai_Figma__use_figma,...`.
 - If the tools are missing, restart the session once so claude.ai connectors load. Do not use mcp-remote (403) or a personal access token (401).
 - Before the first `use_figma`, read `skill://figma/figma-use/SKILL.md` (ReadMcpResourceTool, server "claude.ai Figma"). Pass `skillNames: "resource:figma-use"` on every call.
-- Create files only in the **Yeo UX** team (paid, planKey `team::653929828954513812`). Never Valentin Yeo's free team: it allows only one variable mode.
+- For our apps, create files in **Yeo UX** (paid, planKey `team::653929828954513812`).
+- For client work, use the client's own Figma team when provided. Keep client files separate from other clients.
+- Never use Valentin Yeo's free team: it allows only one variable mode.
 - Call `create_session` once per file and reuse the session id.
 - Keep a ledger file of page and node ids next to your notes, so later calls never search blind.
 
