@@ -1,6 +1,6 @@
 ---
 name: runner-update
-description: Runner status and top-up for a project manager. Use when asked for "runner update", "/runner-update" or runner status, and at every manager check-in. Counts your project's Claude Code and hax (Codex) runners, checks the token ladder and server load, fixes gaps, then reports two lines.
+description: Runner status and top-up for a project manager. Use when asked for "runner update", "/runner-update" or runner status, and at every manager check-in. Counts your project's Claude Code and hax (Codex) runners, checks the token ladder and server load, fixes gaps, then reports problems first and green in short lines.
 ---
 
 # /runner-update
@@ -39,13 +39,26 @@ For each runner: active (working a ticket now) or idle. For every idle one, name
 - Time to live: average hours from ticket creation to Done, over the tickets counted above (`createdAt` to the move to Done). Add the median when you have 5 or more. No closed tickets: write `n/a`.
 - PRs live: PRs merged to the production branch whose production deploy finished in the last 2h. Deploy time not readable? Count PRs merged to the production branch in the last 2h, and add `(merged, deploy unverified)`.
 
-## 5. Report: two lines, caveman
+## 5. Report: problems first, green short, caveman
 
-`<project> runners: X/Y claude code runners active, Z idle (reason); X/Y hax runners active -> reason`
-`<project> shipped (2h): N tickets closed, M PRs live, avg time to live Xh`
+Order: problems on top, green at the bottom. Nothing else.
 
-Example:
-`hypertask runners: 5/5 claude code runners active, 0 idle; 9/10 hax runners active -> 1 starting, load green`
-`hypertask shipped (2h): 4 tickets closed, 2 PRs live, avg time to live 6.5h`
+1. One `⚠` line per problem: what is wrong, then what you do or who owns it. Full link.
+2. Green items: one short line each, `✓` plus numbers. No sentences.
+3. Shipped block: one line per item.
+4. Leave out anything he does not act on (machine versions, pane names, script names).
+
+```
+⚠ <problem> -> <what we do / owner> <link>
+✓ house rules
+✓ runners: claude X/Y, hax X/Y
+✓ PRs: none waiting
+shipped (2h):
+- tickets: N closed
+- PRs: M merged, K released
+- time to live: ticket avg Xh, merge to release avg Ym
+```
+
+No problem: write no `⚠` line. Time to live missing? Measure it (Software Factory: `~/projects/ceo/bin/ship-ttl 2`). Never write "not measured".
 
 Never say "0 hax by design". Zero hax is a gap: say why and what you did.
