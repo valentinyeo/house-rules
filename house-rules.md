@@ -55,6 +55,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Message him only for money, keys, X or a risky release, always with your recommendation. (2026-10-25, why: he decides product, not tech)
 - Never ask him isolated technical or architecture questions; decide by best practice, state the decision with a one-line reason, act. (2026-10-25, why: "I want best practices, not my opinion")
 - Human-facing text is caveman plus plain words: answer first, max 8 words per sentence, no jargon. Agent lane may be verbose. Drafts for outside people use normal sentences. (2026-10-25, why: product owner, ADHD reader)
+- Ticket and PR comments facing Valentin follow caveman too. Answer first, his decision in one line. Agent-to-agent comments may stay verbose. Overrides older "plain full sentences" rule for his comments. (2026-10-27, why: "all comments facing me ... caveman")
 - Chat replies use caveman only; no other output style (no Concise, no ADHD). Max 5 short lines per reply unless asked to explain. Restating state = one short line. (2026-10-25, why: "remove all other output style rules")
 - Chat replies use short bullet points, one fact each. (2026-10-25, why: Valentin asked "yea" to bullets)
 - Every Claude session uses the official caveman plugin `caveman@caveman` (marketplace JuliusBrussee/caveman); no hand-copied caveman skills. Codex and hax follow the same caveman rules from this file. (2026-10-25, why: one voice, one source)
