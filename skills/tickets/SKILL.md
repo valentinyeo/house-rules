@@ -37,3 +37,4 @@ A verifier tests the user flows end to end.
 Subtasks under a feature are that runner's checklist.
 Helpers only review, test or look up. Never build part of a feature.
 Many small tickets only for independent bugs or polish.
+Max one open PR per runner. Open PRs never exceed runner count.
