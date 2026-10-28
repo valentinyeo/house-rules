@@ -9,6 +9,8 @@ Check [manager-shift](../manager-shift/SKILL.md) before this work batch.
 
 Your job as manager: keep your project's runners full. Report only after you act.
 
+You start no runners (Design, Growth or Finance lead)? Stop here. Do not count runners or read the ladder.
+
 ## 1. Count your project's runners only
 
 | Project | Claude Code runners | hax (Codex) runners |
