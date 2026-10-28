@@ -4,6 +4,7 @@
 - Boards: 15 Hypertask Product (app work, flag columns are the finish line), 4060 Fleet Infra (runner and CI work).
 - Board writes: `vcc` only. People comments `--kind qa|question|done`; agent talk `vcc activity add`.
 - Runners: Claude panes in tmux `ht-runners`; hax Codex `ht-hax-runner-N` (`ht-hax-runner status`, `top-up`). Codex never braked; load limits only.
+- Each turn: read `~/.local/state/fleet-idle/latest.txt` first; idle fleet is the biggest blocker. Written every 15 min by `fleet-idle-watch` (hypertask-poteto).
 - Pick order: urgent 15, urgent 4060, rest of 15, rest of 4060.
 - Freeze exceptions: `~/.config/fleet/infra-first-allow`, one key per line.
 - Flags: `.claude/skills/ship/scripts/ht-flag`. Switches need Valentin's yes, except the failure Off.
