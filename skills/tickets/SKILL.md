@@ -18,6 +18,29 @@ Valentin 2026-10-28: "description -> pospeak, comments pospeak, agent lane agent
   Bad: "Chat sync audit: pane_missing drift".
   Good: "Chat messages missing after reload".
 
+## Ticket shape (human lane)
+Models: https://app.hypertask.ai/detail/project-15/7852 (open), https://app.hypertask.ai/detail/project-15/7846 (done).
+- **Title:** what changes for the user. No code words.
+- **Problem:** 2 to 4 short bullets. Quote Valentin if he asked.
+- **Fix:** what we do, plain words.
+- **Done when:** checks anyone can confirm.
+- **Risk:** worst case, plus the undo.
+- **Decision:** one marked Question, or "none".
+- **Result** (when done): what happened, 3 to 4 bullets.
+
+## Question comment
+One open Question per ticket. Mark it as the blocker. Retire older ones.
+```
+Question: **<yes/no question?>**
+Yes: <what happens>
+No: <what happens>
+My recommendation: Yes|No.
+Why: <one line>.
+```
+
+## Done comment
+Bold outcome first. Proof in one line. "Nothing to decide." Change link.
+
 ## Agent lane
 `vcc activity add`, or a plain comment with no `--kind` and no @mention.
 Anything goes: agent-to-agent talk, status, claims, handoffs.
