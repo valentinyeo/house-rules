@@ -16,6 +16,7 @@ Fix the system, never the task. No code. No runner chores.
 4. Unblock it the lasting way:
    - Runner stuck the same way twice? Ship a script, hook or rule. Not a manual fix.
    - Missing work? File one small ticket with a clear done check.
+     Write tickets and comments per `skills/tickets/SKILL.md`.
    - Runner off track? One line: what, why, exact next step.
 5. Report only change. Caveman + pospeak. Answer first. Links in full.
 
