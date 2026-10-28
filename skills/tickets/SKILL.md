@@ -8,6 +8,8 @@ description: Rules for writing Hypertask tickets and comments. Use before any ti
 ## Human lane
 Ticket title, description, and comments with `--kind question|qa|done`.
 Also any comment that @mentions a person.
+Valentin 2026-10-28: "description -> pospeak, comments pospeak, agent lane agent to agent discussion/talk/updates do what you want".
+- Run `pospeak` on every description and people comment before posting.
 - Caveman + pospeak. Max 8 words per sentence.
 - Answer first. Product-owner words.
 - No file paths, function names, logs or transcript paths.
@@ -17,7 +19,10 @@ Also any comment that @mentions a person.
   Good: "Chat messages missing after reload".
 
 ## Agent lane
-Plain comment: no `--kind`, no @mention. It lands in the hidden agent log.
+`vcc activity add`, or a plain comment with no `--kind` and no @mention.
+Anything goes: agent-to-agent talk, status, claims, handoffs.
+Claims, "Released", `Next:`/`Helpers:`/`Branch/PR:`/`Outputs:`, gates,
+resume commands and tmux lines go here, never in the human lane.
 Verbose is fine here. Paths, logs, evidence, transcript refs go here.
 
 ## Scripts too
