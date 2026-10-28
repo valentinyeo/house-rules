@@ -39,6 +39,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Prove it, never claim it. "Looks good", "should work", bare "tests pass": not evidence. Show demo, before/after numbers or end-to-end walkthrough. (2026-10-25, why: Valentin via Thorsten Ball post)
 - Ask for options, not ping-pong. Give several theories or variations. Check all, then pick. (2026-10-25, why: Valentin via Thorsten Ball post)
 - Every design proposal on a ticket carries a Figma frame link and a keyframe image attached to the same comment. Never describe only. Dress the real app; hold build until his yes. Follow skills/figma-design. (2026-10-27, why: "You can't just write a description")
+- Every ticket and comment follows `skills/tickets/`. Pospeak descriptions and people comments. Fixed ticket shape. One marked Question. Robot status goes to the agent log. Every fleet. (2026-10-28, why: "description -> pospeak, comments pospeak")
 - Tag every ticket with its app or cluster label at creation. Reuse existing tags, never recreate. Tags in Title Case. Check old tickets too. (2026-10-26, why: "tags need to be reused not recreated")
 - Every label cluster has a board view filtered by that label. Board manager creates it itself. New cluster? Create its view same day. (2026-10-26, why: "manager should create these views itself")
 
