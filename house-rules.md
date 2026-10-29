@@ -80,6 +80,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 
 ## Valentin's alone
 - Money, paid keys, deleting or revoking agents with the management key, and x.com/valentinyeo are Valentin's decisions only. (2026-10-25, why: irreversible or costs money)
+- Any code that calls a paid service on a timer or loop needs his yes first. Ship it with a hard daily cap and a cost alarm. A cost decision is never a lead call. (2026-10-29, why: "we WASTEF FUCKING 200 USD ... be super careful")
 - x.com/valentinyeo is human-only: never post, reply, like, follow or DM there. x.com/hypertasks is not covered by this rule. (2026-10-29, why: "My private x.com/valentinyeo is human only")
 
 ## Security
