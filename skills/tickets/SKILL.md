@@ -38,6 +38,7 @@ Yes: <what happens>
 No: <what happens>
 ```
 - Recommendation sits right under the question, never buried.
+- Blank line between each line. Single line breaks merge into one paragraph.
 - Context above the question: max 3 bullets, plain words.
   Valentin 2026-10-29: "pospeak don't burr your recommendation".
 - He answered? Clear the blocker at once, both parts:
