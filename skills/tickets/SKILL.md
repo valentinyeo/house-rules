@@ -32,11 +32,18 @@ Models: https://app.hypertask.ai/detail/project-15/7852 (open), https://app.hype
 One open Question per ticket. Mark it as the blocker. Retire older ones.
 ```
 Question: **<yes/no question?>**
-Yes: <what happens>
-No: <what happens>
 My recommendation: Yes|No.
 Why: <one line>.
+Yes: <what happens>
+No: <what happens>
 ```
+- Recommendation sits right under the question, never buried.
+- Context above the question: max 3 bullets, plain words.
+  Valentin 2026-10-29: "pospeak don't burr your recommendation".
+- He answered? Clear the blocker at once, both parts:
+  his name (`vcc task waiting-on T --user none`)
+  and the red comment border (blockerCommentId null).
+  Valentin 2026-10-29: "remove th eblocker both from my name and from the comment red border".
 
 ## Done comment
 Bold outcome first. Proof in one line. "Nothing to decide." Change link.
