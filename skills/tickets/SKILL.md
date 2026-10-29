@@ -21,7 +21,7 @@ Valentin 2026-10-28: "description -> pospeak, comments pospeak, agent lane agent
 ## Ticket shape (human lane)
 Models: https://app.hypertask.ai/detail/project-15/7852 (open), https://app.hypertask.ai/detail/project-15/7846 (done).
 - **Title:** what changes for the user. No code words.
-- **Problem:** 2 to 4 short bullets. Quote Valentin if he asked.
+- **Problem:** 2 to 4 short bullets. Quote Valentin if he asked, in a quote block (`> `), never plain quote marks.
 - **Fix:** what we do, plain words.
 - **Done when:** checks anyone can confirm.
 - **Risk:** worst case, plus the undo.
