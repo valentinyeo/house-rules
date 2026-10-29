@@ -41,8 +41,10 @@ No: <what happens>
 - Blank line between each line. Single line breaks merge into one paragraph.
 - No outside links, sources or product precedents in a Question.
   Valentin 2026-10-29 on a 20-line question: "awful comments".
-- His 👍 on the Question counts as yes. Act on it.
-  Valentin 2026-10-29: "thumbs up enough?"
+- His 👍 on the Question confirms your recommendation. Act on it.
+  Valentin 2026-10-29: "thumbs up is enough to confirm if reocmmendation is yes".
+- Waiting on him always points at one marked Question comment.
+  Valentin 2026-10-29: "still have blockers without mention of what comment contains the blocking question".
 - Context above the question: max 3 bullets, plain words.
   Valentin 2026-10-29: "pospeak don't burr your recommendation".
 - He answered? Clear the blocker at once, both parts:
