@@ -26,6 +26,8 @@ Models: https://app.hypertask.ai/detail/project-15/7852 (open), https://app.hype
 - **Done when:** checks anyone can confirm.
 - **Risk:** worst case, plus the undo.
 - **Decision:** one marked Question, or "none".
+- **Now** (top line while he must act): state today plus his one decision. Rewrite it when the state changes.
+  Valentin 2026-10-29: "it took me a long time to fdiguore what was wonated of me".
 - **Result** (when done): what happened, 3 to 4 bullets.
 
 ## Question comment
@@ -44,6 +46,8 @@ No: <what happens>
 - His 👍 on the Question confirms your recommendation. Act on it.
   Valentin 2026-10-29: "thumbs up is enough to confirm if reocmmendation is yes".
 - Waiting on him always points at one marked Question comment.
+- Ask only when his answer can act today. No "once X is live" questions.
+- Need his yes later? Post a fresh Question in that comment. Never link back to an old one.
   Valentin 2026-10-29: "still have blockers without mention of what comment contains the blocking question".
 - Context above the question: max 3 bullets, plain words.
   Valentin 2026-10-29: "pospeak don't burr your recommendation".
@@ -70,6 +74,7 @@ Raw evidence in an agent-lane comment or attachment.
 ## Before posting
 Reread the human-lane text once.
 Sentence over 8 words, or has a path? Rewrite it.
+Dev words out: caret, composer, rail, deploy, commit, branch, flag key. Say what he sees.
 
 ## Guard
 `scripts/ticket-lint` checks human-lane text before it posts.
