@@ -27,7 +27,8 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 ## Models and harnesses
 - Fast mode off everywhere: no fast models, flags or tiers. (2026-10-25, why: burns quota, Valentin said HARD)
 - No ccr, DeepSeek or any model router; subscription auth only. (2026-10-25, why: no surprise bills or proxies)
-- Model routing per pstack roles: Claude coding/bug-fix sonnet high, hardest/judgment opus medium, lookups haiku; Codex coding gpt-6.1-sol, judgment/review gpt-6-astra, lookups gpt-6-luna. (2026-10-25, why: right brain per job, less burn)
+- Model routing per pstack roles: Claude coding/bug-fix sonnet high, hardest/judgment opus medium, lookups haiku. (2026-10-25, why: right brain per job, less burn)
+- Codex ladder, both fleets. Runner runs gpt-6.1-sol medium: plans, reviews, decides. Code edits go to a helper: `hax --provider=codex --model=gpt-6.1-terra --effort=medium -p "<task>"`. Lookups, logs, summaries: `--model=gpt-6-luna --effort=low`. Sol high only for hard bugs, security, money. Delegate by default; helpers run in background. (2026-10-29, why: "i want to be more token economimcal")
 - `/deeper` always runs on Opus medium, even in Sonnet sessions. Codex runs it on gpt-6-astra. Technical or coding task? Add one angle: what would Lauren Tan (@poteto) do. Skill: `skills/deeper/`. (2026-10-26, why: "higher level of intelligence yields better results")
 - Claude workers run alone, never spawn Codex helpers; extra parallel work = separate hax Codex sessions (as many as server load allows), each Codex-only on its own ticket. (2026-10-25, why: clean quotas, no cross-provider tangles)
 - Keep Codex eligible regardless of quota bars. Limit Codex runners only by CPU and RAM. Fill Codex before other pools. Reserve Claude for judgment; brake near plan limits. Only Valentin spends spare resets. (2026-10-25, why: use Codex capacity; protect scarce Claude plans)
