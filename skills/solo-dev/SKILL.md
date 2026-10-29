@@ -13,7 +13,18 @@ Valentin, 2026-10-25: "shipping cadence trumps things within reason".
 
 - The repo is public: `gh api repos/<owner>/<repo> --jq .visibility` prints `public`. Private? Stop. CI would cost money. Ask Valentin one Question.
 - Valentin is the only user. Other users? Stop. Ask one Question; this skill is too loose for them.
-- You have your own board login. Never act as Valentin.
+- You have your own board login. Never act as Valentin. No login yet? Get one first, see "Board login".
+
+## Board login
+
+Do it yourself, before any ticket. Never ask Valentin. Never print a token.
+
+- Follow `board-identity` steps 1 to 7 with your app's row instead of its board map:
+  `NAME="<App> Dev"; SLUG=<app>-dev; BOARDS="2060"` (example: `NAME="Postbox Dev"; SLUG=postbox-dev`).
+- Reuse an existing agent for your app (Multiprompt already has "Multiprompt Dev"). Create one only if none exists.
+- Pass: `context` shows your name and board 2060, and the draft write check works.
+- Every board write uses your token: `hypertask --token "$(cat ~/.config/hypertask-agents/credentials/sessions/$SLUG-agent-token)" ...`.
+- With it you move tickets to Done, comment and tag. That is what drains the view.
 
 ## Model ladder (house rules, Codex)
 
