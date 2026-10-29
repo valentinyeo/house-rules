@@ -11,7 +11,8 @@ import sys
 
 MAX_WORDS = 12  # hard cap; skill target stays 8. Approved model tickets run 9 to 10.
 URL = re.compile(r"https?://\S+|<https?://[^>]+>")
-ROBOT = re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|Claim|Released|Gate|Gates|Resume|Session|tmux|Worktree|Ledger)\s*:", re.I)
+QUOTE = re.compile(r"\"[^\"]+\"|“[^”]+”")  # Valentin's own words stay verbatim
+ROBOT =re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|Claim|Released|Gate|Gates|Resume|Session|tmux|Worktree|Ledger)\s*:", re.I)
 CODE = [
     (re.compile(r"(^|\s)(~|\.{0,2})/[\w.-]+/[\w./-]*"), "file path"),
     (re.compile(r"\b[\w-]+\.(py|sh|zig|ts|tsx|js|mjs|go|kt|json|ya?ml|toml|md|jsonl|log|html)\b"), "file name"),
@@ -39,7 +40,7 @@ def lines_of(text):
 
 
 def sentences(line):
-    bare = URL.sub("LINK", line)
+    bare = QUOTE.sub("LINK", URL.sub("LINK", line))
     return [s for s in re.split(r"(?<=[.!?:;])\s+", bare) if s.strip()]
 
 
