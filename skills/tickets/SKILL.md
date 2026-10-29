@@ -32,7 +32,7 @@ Yes: <what happens>
 No: <what happens>
 ```
 - One open Question per ticket. Mark it blocker. Retire old ones.
-- Recommendation right under the question. Blank line between lines.
+- Recommendation right under the question. Blank line between lines; single breaks merge.
 - Context above: max 3 bullets. No outside links or precedents.
 - Waiting on him? Point at that one Question comment.
 - His 👍 = yes to your recommendation. Act.
@@ -45,14 +45,14 @@ Bold outcome. Proof in one line. "Nothing to decide." Change link.
 ## Agent lane
 `vcc activity add T "<text>"`. Anything goes, verbose fine.
 Claims, "Released", Next/Helpers/Branch/PR/Outputs lines, gates, resume, tmux, paths, logs, evidence.
-Scripts and crons too: human summary in description, raw evidence in agent lane.
+Scripts and crons too: human summary in description, raw evidence in agent lane or attachment.
 
-## Guards (scripts, no bypass)
+## Guards (scripts)
 Valentin 2026-10-29: "still ignored on every ticket ... pls enforce this".
-- `vcc` (Hypertask fleet): human-lane text over 8 words or with code words → exit 5.
+- `vcc` (Hypertask fleet) runs `scripts/ticket-lint` on human-lane text → exit 5. Question shape checked too.
 - `vcc comment add T` with no kind, mention or reply → rerouted to `vcc activity add`.
-- `VCC_VOICE_BYPASS="<reason>"` only for machine evidence writers; logged to `~/.local/state/vcc/voice-bypass.log`.
-- `scripts/ticket-lint` (ceo-ht and other board wrappers): 12-word hard cap, paths, code names, hashes, logs, robot lines. Edits check new lines only. Agent lane never checked.
+- Only bypass: `VCC_VOICE_BYPASS="<reason>"`, machine evidence writers only, logged. Never for Questions.
+- `scripts/ticket-lint` (vcc, ceo-ht, every board wrapper): 12-word hard cap, paths, code names, hashes, logs, robot lines. Edits check new lines only. Agent lane never checked.
 - Server-side check: https://app.hypertask.ai/detail/project-4060/910.
 
 ## One spec, one runner
