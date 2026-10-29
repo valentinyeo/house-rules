@@ -58,7 +58,10 @@ Do this once per repo, as its own commit, before the first ticket.
 
 ## Talking on the board
 
-Follow the `tickets` skill.
+Behave on the board exactly like a fleet runner, just alone. Follow the `tickets` skill.
+
+- Same columns as the fleet: Doing while you work, Done with proof, Valentin Review for his decisions.
+- No ticket sits in Doing overnight.
 
 - Comments for Valentin: caveman, short bullets, full https:// links.
 - Quote Valentin with `> `, never plain quote marks.
