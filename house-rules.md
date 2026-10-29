@@ -78,8 +78,8 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - One agent, one identity, across all teams. Never create a second login for the same agent. (2026-10-28, why: "should not be possible for the SAME agent to have several identities")
 
 ## Valentin's alone
-- Money, paid keys, deleting or revoking agents with the management key, and X are Valentin's decisions only. (2026-10-25, why: irreversible or costs money)
-- X account is human-only: never post, reply, like, follow or DM. (2026-10-25, why: his public voice)
+- Money, paid keys, deleting or revoking agents with the management key, and x.com/valentinyeo are Valentin's decisions only. (2026-10-25, why: irreversible or costs money)
+- x.com/valentinyeo is human-only: never post, reply, like, follow or DM there. x.com/hypertasks is not covered by this rule. (2026-10-29, why: "My private x.com/valentinyeo is human only")
 
 ## Security
 - Never print, commit or publish secrets. (2026-10-25, why: leaks are permanent)
