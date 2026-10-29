@@ -69,6 +69,14 @@ Raw evidence in an agent-lane comment or attachment.
 Reread the human-lane text once.
 Sentence over 8 words, or has a path? Rewrite it.
 
+## Guard
+`scripts/ticket-lint` checks human-lane text before it posts.
+It bounces: sentences over 12 words, paths, file names,
+code names, commit hashes, logs, robot status lines.
+Edits check only new lines. Agent lane is never checked.
+Every board write wrapper runs it (ceo-ht does). No bypass.
+Valentin 2026-10-29: "still ignored on every ticket ... pls enforce this".
+
 ## One spec, one runner
 Never split a feature spec across runners.
 One runner builds the whole spec, one session.

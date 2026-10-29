@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Human-lane lint for Hypertask titles, descriptions and people comments.
+
+Usage: ticket-lint [--old FILE] FILE|-
+Exit 0 = ok. Exit 1 = rejected; reasons on stderr.
+--old: only lines not already in FILE are checked (edits keep old text).
+"""
+import html
+import re
+import sys
+
+MAX_WORDS = 12  # hard cap; skill target stays 8. Approved model tickets run 9 to 10.
+URL = re.compile(r"https?://\S+|<https?://[^>]+>")
+ROBOT = re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|Claim|Released|Gate|Gates|Resume|Session|tmux|Worktree|Ledger)\s*:", re.I)
+CODE = [
+    (re.compile(r"(^|\s)(~|\.{0,2})/[\w.-]+/[\w./-]*"), "file path"),
+    (re.compile(r"\b[\w-]+\.(py|sh|zig|ts|tsx|js|mjs|go|kt|json|ya?ml|toml|md|jsonl|log|html)\b"), "file name"),
+    (re.compile(r"\b[A-Za-z_][\w.]*\(\)"), "function name"),
+    (re.compile(r"\b[a-z]+(_[a-z0-9]+)+\b"), "code identifier"),
+    (re.compile(r"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b"), "commit hash"),
+    (re.compile(r"`[^`]+`"), "code span"),
+    (re.compile(r"\b(Traceback|stderr|stdout|exit code|stack trace|tmux|--[a-z][\w-]+)\b"), "log or command"),
+]
+
+
+def plain(text):
+    text = re.sub(r"(?i)<\s*(br|/p|/li|/h\d|/div|/tr)\s*/?>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return html.unescape(text)
+
+
+def lines_of(text):
+    out = []
+    for line in plain(text).splitlines():
+        line = line.strip(" \t-*•>#|")
+        if line:
+            out.append(line)
+    return out
+
+
+def sentences(line):
+    bare = URL.sub("LINK", line)
+    return [s for s in re.split(r"(?<=[.!?:;])\s+", bare) if s.strip()]
+
+
+def words(sentence):
+    return [w for w in re.findall(r"[A-Za-zÀ-ÿ0-9][\w'’/-]*", sentence) if w != "LINK"]
+
+
+def lint(text, old=""):
+    seen = set(lines_of(old))
+    bad = []
+    for line in lines_of(text):
+        if line in seen:
+            continue
+        if ROBOT.search(line):
+            bad.append(f"robot status line, use the agent lane: {line[:80]}")
+            continue
+        noref = URL.sub(" ", line)
+        for rx, what in CODE:
+            m = rx.search(noref)
+            if m:
+                bad.append(f"{what} '{m.group(0).strip()}' belongs in the agent lane: {line[:80]}")
+                break
+        for s in sentences(line):
+            n = len(words(s))
+            if n > MAX_WORDS:
+                bad.append(f"{n} words, max {MAX_WORDS}: {s[:100]}")
+    return bad
+
+
+def main(argv):
+    old, path = "", None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--old":
+            old = open(argv[i + 1], encoding="utf-8").read()
+            i += 2
+        else:
+            path = argv[i]
+            i += 1
+    if not path:
+        sys.exit(__doc__)
+    text = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()
+    bad = lint(text, old)
+    if bad:
+        print("ticket-lint: rejected. Human lane is pospeak + caveman (skills/tickets).", file=sys.stderr)
+        for b in bad[:15]:
+            print("  - " + b, file=sys.stderr)
+        if len(bad) > 15:
+            print(f"  ... {len(bad) - 15} more", file=sys.stderr)
+        print("Fix: short plain sentences. Paths, logs, status: plain comment with no --kind (agent lane).", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
