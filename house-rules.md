@@ -54,7 +54,8 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Each app has one design system page in Figma. Runners build only from it. New pieces need his yes. (2026-10-26, why: "runners can just use the design system")
 - Start from his real screenshots. Subtract before adding. (2026-10-26, why: "Everything needs to earn its place")
 - Desktop and mobile share one design language. Layout may differ. (2026-10-26, why: "They should basically look very similar")
-- Show design work as an image with SendUserFile, plus the link. (2026-10-26, why: "I haven't seen them")
+- One Figma file for our apps. One page per ticket, named "<ID> <short what>". Newest worked page on top. (2026-10-29, why: "one big file with loads of pages")
+- Show design work as a screencast2.com image link in chat. Make it with `sc2-upload <png>`. It embeds; no Figma load. (2026-10-29, why: "i can see them right away in the chat")
 
 ## Talking to Valentin
 - No status messages, Telegram, briefings or digests to Valentin. Only new releases reaching his desktop matter. (2026-10-25, why: he never asked for them)
