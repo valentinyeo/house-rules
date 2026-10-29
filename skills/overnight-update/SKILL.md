@@ -22,12 +22,7 @@ Read-only. Never write to the board, GitHub, servers or sessions while gathering
 3. Releases that reached the owner's devices. Failed deploys.
 4. Your runners: active, idle, died. Quota hits. Any model id with "fast".
 
-## Output: caveman, very little text, mostly numbers
-- Use /caveman voice. Max about 10 lines. No prose paragraphs, no per-manager lines.
-- Line 1: window.
-- Then numbers, one per line: Done, merges, releases (with latest version), runners, CI.
-- One highlight block (a `>` quote) with the single most important thing.
-- Broke: one line per item, each with its full https ticket link. Skip if nothing broke.
-- Needs you: one line per item, full https ticket link plus a pick. Or "nothing waits on you".
+## Output
+- Use the [shipping-update](../shipping-update/SKILL.md) shape. Window replaces "last 3 hours"; compare with the same window on the last 3 nights.
+- Add "Needs you": one line per item, full https ticket link plus a pick. Or "nothing waits on you".
 - No ticket for a broken item yet? File one first, then link it. (2026-10-26, Valentin: "each item needs ticket links")
-- Never invent numbers. Mark a guess as a guess. Name a source that failed.
