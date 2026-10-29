@@ -39,6 +39,10 @@ No: <what happens>
 ```
 - Recommendation sits right under the question, never buried.
 - Blank line between each line. Single line breaks merge into one paragraph.
+- No outside links, sources or product precedents in a Question.
+  Valentin 2026-10-29 on a 20-line question: "awful comments".
+- His 👍 on the Question counts as yes. Act on it.
+  Valentin 2026-10-29: "thumbs up enough?"
 - Context above the question: max 3 bullets, plain words.
   Valentin 2026-10-29: "pospeak don't burr your recommendation".
 - He answered? Clear the blocker at once, both parts:
