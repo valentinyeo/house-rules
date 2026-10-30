@@ -43,6 +43,8 @@ Do it yourself, before any ticket. Never ask Valentin. Never print a token.
 
 ## The loop
 
+Run the board check below before this loop.
+
 1. Move the ticket to Doing. Read it and its screenshots.
 2. One small change per commit, straight to the default branch. No new PRs.
 3. Put the one-line undo in the commit message.
@@ -73,6 +75,27 @@ Behave on the board exactly like a fleet runner, just alone. Follow the `tickets
 
 - Same columns as the fleet: Doing while you work, Done with proof, Valentin Review for his decisions.
 - No ticket sits in Doing overnight.
+
+## Board check
+
+Use this at startup and after resuming context.
+Repeat every 30 minutes during long fixes.
+Repeat after releases, before replies and before stopping.
+
+- Read the saved view's current filters. Follow renames; never guess its labels.
+- Read every open ticket in that view. Include all pages and review columns.
+- Check your agent UUID, not merely `me`. Human ownership can hide agent assignment mistakes.
+- Claim your current ticket using your own identity. Keep it in Doing during active work.
+- Rewrite its Now line when progress changes. Keep evidence and next steps in agent activity.
+- Close completed tickets that have release proof. Match every acceptance condition before marking Done.
+- Record release tag, link and elapsed minutes. A partial release never completes unfinished acceptance.
+- Reconcile old Doing tickets before taking more work. Resume them or return inactive work to Todo. Record the reason; preserve another active owner's work.
+- Keep umbrellas linked to their current child ticket. Preserve cross-app ownership and outstanding release requirements.
+- Clear answered blockers through the tickets skill. Ask only for decisions Valentin must make.
+- Re-read changed tickets after writing. Verify column, ownership, labels and current Now text.
+
+The board holds current state between session resumes.
+Chat and handoff notes cannot replace board maintenance.
 
 - Comments for Valentin: caveman, short bullets, full https:// links.
 - Quote Valentin with `> `, never plain quote marks.
