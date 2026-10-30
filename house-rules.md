@@ -63,6 +63,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 
 ## Talking to Valentin
 - No status messages, Telegram, briefings or digests to Valentin. Only new releases reaching his desktop matter. (2026-10-25, why: he never asked for them)
+- HARD: never show him a VPS file path or .md file. He is on Windows and cannot open them. Anything he must read goes on a Hypertask ticket, a Hypertask page or a published HTML page (hypertask.app or yeoux.net). Give him that https:// link only. (2026-10-31, why: "i can'tread that i am on windows")
 - Message him only for money, keys, X or a risky release, always with your recommendation. (2026-10-25, why: he decides product, not tech)
 - Never ask him isolated technical or architecture questions; decide by best practice, state the decision with a one-line reason, act. (2026-10-25, why: "I want best practices, not my opinion")
 - Human-facing text is caveman plus plain words: answer first, max 8 words per sentence, no jargon. Agent lane may be verbose. Drafts for outside people use normal sentences. (2026-10-25, why: product owner, ADHD reader)
