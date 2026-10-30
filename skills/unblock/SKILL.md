@@ -18,6 +18,7 @@ Valentin, 2026-10-30: "the whole skill of /unblock should start with /pstack:pot
 `python3 ~/.local/share/house-rules/skills/tickets/scripts/blocker-sweep.py 15 4060 2060`
 Add any board in the inbox Decisions split: https://app.hypertask.ai/inbox?split=Decisions
 Write the count. It is the "before" number.
+STALE lines are already decided by the sweep: clear them without a full read.
 
 ## 2. Read each one
 Ticket, marked Question, last 5 comments, bound PR state (`gh pr view`).
@@ -26,7 +27,7 @@ Owner lead: boards 15 and 4060 HT Product Lead; 2060 and SF boards Mini Boss CEO
 ## 3. Classify (first match wins)
 | Class | Test | Do |
 |---|---|---|
-| Stale | PR merged, already live, premise gone, or ANSWERED/NO-QUESTION in the sweep | Clear it. Tell the runner the next step. |
+| Stale | PR merged, already live, premise gone, or ANSWERED/STALE/NO-QUESTION in the sweep | Clear it. Tell the runner the next step. |
 | Not his | House rule "Never block Valentin on non-decisions", or a line in `learned.md` | Decide per the recommendation. Clear it. |
 | His | Money, paid calls, keys, going public, prod data deletion, needs him at his PC | Keep. Go to step 5. |
 
@@ -52,6 +53,7 @@ Question:
 - One yes/no. Recommendation right under it. Why in one line.
 - Yes and No each say what happens next.
 - Money asks state the amount.
+- After his yes, the next comment says the one step he does, if any.
 - He can answer without research. Every term known. Max 3 context bullets.
 Fails and you can fix the facts in under 5 minutes? Research it yourself. Give him the answer in the report.
 Otherwise press the lead to rewrite (step 6). Never rewrite runner tickets yourself past that.

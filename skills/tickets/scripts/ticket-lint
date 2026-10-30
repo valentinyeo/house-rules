@@ -13,6 +13,9 @@ MAX_WORDS = 12  # hard cap; skill target stays 8. Approved model tickets run 9 t
 URL = re.compile(r"https?://\S+|<https?://[^>]+>")
 QUOTE = re.compile(r"\"[^\"]+\"|“[^”]+”")  # Valentin's own words stay verbatim
 ROBOT =re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|Claim|Released|Gate|Gates|Resume|Session|tmux|Worktree|Ledger)\s*:", re.I)
+MONEY = re.compile(r"\b(money|cost|costs|pay|pays|paid|paying|payment|spend|spending|price|pricing|billing|charge|charges|budget|invoice|subscription|dollars?|usd|gbp|euros?|pounds?)\b|[£$€]", re.I)
+AMOUNT = re.compile(r"[£$€]\s?\d|\b\d+(\.\d+)?\s?(k\b|dollars?|usd|gbp|pounds?|euros?|cents?|a month|a year|per month|per year)|\b(free|no cost|no charge|nothing to pay|at no cost|zero cost)\b", re.I)
+ONCE = re.compile(r"\bonce\b", re.I)
 CODE = [
     (re.compile(r"(^|\s)(~|\.{0,2})/[\w.-]+/[\w./-]*"), "file path"),
     (re.compile(r"\b[\w-]+\.(py|sh|zig|ts|tsx|js|mjs|go|kt|json|ya?ml|toml|md|jsonl|log|html)\b"), "file name"),
@@ -49,9 +52,21 @@ def words(sentence):
     return [w for w in re.findall(r"[A-Za-zÀ-ÿ0-9][\w'’/-]*", sentence) if w != "LINK"]
 
 
+def question_rules(text):
+    if not re.search(r"Question:", text, re.I):
+        return []
+    ours = QUOTE.sub(" ", plain(text))
+    bad = []
+    if MONEY.search(ours) and not AMOUNT.search(ours):
+        bad.append("money ask with no amount: say what it costs him")
+    if ONCE.search(ours):
+        bad.append("'once X' ask he cannot answer today: ask only what he can decide now")
+    return bad
+
+
 def lint(text, old=""):
     seen = set(lines_of(old))
-    bad = []
+    bad = question_rules(text)
     for line in lines_of(text):
         if line in seen:
             continue
@@ -92,6 +107,7 @@ def main(argv):
         if len(bad) > 15:
             print(f"  ... {len(bad) - 15} more", file=sys.stderr)
         print("Fix: short plain sentences. Paths, logs, status: plain comment with no --kind (agent lane).", file=sys.stderr)
+        print("     A Question states its amount when it costs money, and only what he can decide today.", file=sys.stderr)
         return 1
     return 0
 
