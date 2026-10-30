@@ -29,6 +29,9 @@ Models: https://app.hypertask.ai/detail/project-15/7852 (open), https://app.hype
 - **Now** (top line while he must act): state today plus his one decision. Rewrite it when the state changes.
   Valentin 2026-10-29: "it took me a long time to fdiguore what was wonated of me".
 - **Result** (when done): what happened, 3 to 4 bullets.
+- **One problem per ticket.** Two bugs that can be fixed apart? Two tickets. Link them under "Not in this ticket".
+- **Every noun is something he sees.** Name the app and the screen. No hub, server, setup, checks, exception, delivery.
+  Valentin 2026-10-30 on IGSH-1169: "ticket is badly written".
 
 ## Question comment
 One open Question per ticket. Mark it as the blocker. Retire older ones.
@@ -47,6 +50,7 @@ No: <what happens>
   Valentin 2026-10-29: "thumbs up is enough to confirm if reocmmendation is yes".
 - Waiting on him always points at one marked Question comment.
 - Ask only when his answer can act today. No "once X is live" questions.
+- Never ask him for a rule exception, a test place or a tool permission. That goes to your own lead.
 - Need his yes later? Post a fresh Question in that comment. Never link back to an old one.
   Valentin 2026-10-29: "still have blockers without mention of what comment contains the blocking question".
 - Context above the question: max 3 bullets, plain words.
@@ -82,6 +86,7 @@ It bounces: sentences over 12 words, paths, file names,
 code names, commit hashes, logs, robot status lines.
 Edits check only new lines. Agent lane is never checked.
 Every board write wrapper runs it (ceo-ht does). No bypass.
+No wrapper? Raw `hypertask` writes too: run `ticket-lint <file>` first, by hand.
 Valentin 2026-10-29: "still ignored on every ticket ... pls enforce this".
 
 ## One spec, one runner
