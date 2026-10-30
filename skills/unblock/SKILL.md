@@ -8,6 +8,10 @@ description: Assisted unblock of Valentin's Hypertask blockers. Clears what agen
 Valentin, 2026-10-30: "I want basically an assisted unblock".
 Goal: every ticket left on him is a real decision he can take in one read.
 
+## 0. Poteto mode first
+Invoke `/pstack:poteto-mode` before any other step. Every run, no exceptions.
+Valentin, 2026-10-30: "the whole skill of /unblock should start with /pstack:poteto-mode".
+
 ## 1. List
 `python3 ~/.local/share/house-rules/skills/tickets/scripts/blocker-sweep.py 15 4060 2060`
 Add any board in the inbox Decisions split: https://app.hypertask.ai/inbox?split=Decisions
