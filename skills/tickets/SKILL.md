@@ -51,6 +51,7 @@ No: <what happens>
 - Waiting on him always points at one marked Question comment.
 - Ask only when his answer can act today. No "once X is live" questions.
 - Never ask him for a rule exception, a test place or a tool permission. That goes to your own lead.
+- Before any Question, check `skills/unblock/learned.md`. Listed there? Decide it yourself.
 - Need his yes later? Post a fresh Question in that comment. Never link back to an old one.
   Valentin 2026-10-29: "still have blockers without mention of what comment contains the blocking question".
 - Context above the question: max 3 bullets, plain words.
