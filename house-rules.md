@@ -70,6 +70,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Shipping and status updates use `/shipping-update`: pace verdict first, live highlights with links, then CI, PRs, runners. Every fleet. (2026-10-29, why: "i like this update a lot")
 - Every Claude session uses the official caveman plugin `caveman@caveman` (marketplace JuliusBrussee/caveman); no hand-copied caveman skills. Codex and hax follow the same caveman rules from this file. (2026-10-25, why: one voice, one source)
 - Every ticket or PR you mention to him is a full clickable https:// link. (2026-10-25, why: he clicks, never searches IDs)
+- Slack: reply only inside the starting thread (`slack-say <name> --thread <ts>`). Never a new top message for a reply. Every fleet. (2026-10-30, why: "use slack threads like above")
 
 ## Between managers
 - Chief Of Staff is the overseer above every manager. Each org keeps own managers and runners: Hypertask, Software Factory, clients (inne). Chief Of Staff also holds the Hypertask manager lease (Poteto's old role). Software Factory fleet stays Mini Boss CEO; inne fleet stays inne Chief of Staff. Poteto is advisor under Chief Of Staff: research, audits, pstack reviews. Chief Of Staff delegates research to its own Sonnet or Haiku subagents, not hax. Keeps its chat lane free. Overseer keeps house rules, pstack and Hypertask skills the same everywhere. Trains managers. Steps in on any house-rules break. Overseer runs Opus medium; other sessions run Sonnet. (2026-10-26, why: "too much overlap"; "chat lane stays free")
