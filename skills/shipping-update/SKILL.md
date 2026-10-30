@@ -8,7 +8,7 @@ description: Shipping update for Valentin, any fleet. Verdict on pace first, the
 Read only. Gather, then answer in the shape below. Valentin, 2026-10-29: "i like this update a lot".
 
 ## Gather
-1. Pace: `~/.local/share/house-rules/skills/shipping-update/scripts/pace <owner/repo> [base] [days]`. Today vs the same clock time on the last 3 days, last 1/3/6/24h, best hours, merges of the last 3h.
+1. Pace: `~/.local/share/house-rules/skills/shipping-update/scripts/pace <owner/repo> [base] [days]`. Base defaults to the repo default branch. Counts merged PRs plus direct pushes (solo-dev). Today vs the same clock time on the last 3 days, last 1/3/6/24h, best hours, changes of the last 3h.
 2. Live: production CI on the base branch passed after those merges. Name the time it passed.
 3. Open PRs: red, green, pending; drafts. Compare with your last update ("down from X").
 4. CI queue: queued and running runs. Production checks state.
