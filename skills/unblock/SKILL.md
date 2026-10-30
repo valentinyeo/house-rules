@@ -26,6 +26,8 @@ Owner lead: boards 15 and 4060 HT Product Lead; 2060 and SF boards Mini Boss CEO
 
 Clear = agent-lane comment with the reason, then `vcc task waiting-on T --user none` (boards 15, 4060) or plain `hypertask` (2060).
 The red border (blockerCommentId) has no CLI yet. Note it in the agent lane.
+Until https://app.hypertask.ai/detail/project-15/8200 ships, cleared tickets stay in his Decisions inbox. Only his own reply removes them. Say so in the report.
+ANSWERED with a question from him? It waits on the lead now. Point the lead at it.
 
 ## 4. Stop it coming back
 For every Stale or Not his ticket, name the cause in one line:
