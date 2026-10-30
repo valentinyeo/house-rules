@@ -9,7 +9,9 @@ Valentin, 2026-10-30: "I want basically an assisted unblock".
 Goal: every ticket left on him is a real decision he can take in one read.
 
 ## 0. Poteto mode first
-Invoke `/pstack:poteto-mode` before any other step. Every run, no exceptions.
+Run only in a session started with `/pstack:poteto-mode`. Every run, no exceptions.
+The model cannot invoke it (disable-model-invocation). Leads put it first in their launch prompt.
+Not in poteto mode? Stop and tell the owner lead to restart the session with it.
 Valentin, 2026-10-30: "the whole skill of /unblock should start with /pstack:poteto-mode".
 
 ## 1. List
