@@ -16,14 +16,14 @@ Read only. Gather, then answer in the shape below. Valentin, 2026-10-29: "i like
 
 ## Shape
 ```
-**<Verdict: on track or not to beat PRs/day of the last 3 days.>**
+**<Verdict: on track or not to beat changes/day of the last 3 days.>**
 
 **Highlights shipped in the last 3 hours** (all live; production checks passed at HH:MM your time)
 - <what users notice, plain words>: <full ticket link>
 - <infra only when it unblocks something he asked for; say what it unblocks>
 
 **Pace**
-- N PRs merged so far today. By this hour on previous days:
+- N changes shipped so far today (merged PRs plus solo-dev direct pushes). By this hour on previous days:
   - <day>: N, finished at M
 - Last 3h rate vs today's average.
 - Projection for today vs the best day.
@@ -42,6 +42,7 @@ Read only. Gather, then answer in the shape below. Valentin, 2026-10-29: "i like
 ```
 
 ## Rules
+- Solo-dev repos push straight to main. Count their pushes; a PR-only count reads 0 there.
 - Answer first. One fact per bullet. Numbers always with a comparison.
 - Highlights: max 7, user-facing first. Every item a full https ticket link.
 - Problems are bullets starting "Not good:". No separate problem block.
