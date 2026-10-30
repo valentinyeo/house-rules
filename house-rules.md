@@ -28,7 +28,8 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 ## Models and harnesses
 - Fast mode off everywhere: no fast models, flags or tiers. (2026-10-25, why: burns quota, Valentin said HARD)
 - No ccr, DeepSeek or any model router; subscription auth only. (2026-10-25, why: no surprise bills or proxies)
-- Exception, trial only: 5 hax runners `ht-or-runner-1..5` use the OpenRouter ladder (free, DeepSeek V4.1 Flash, Grok 4.7, then Sol). Only key "OpenRouter Ladder Runners", hard cap 20 USD. Nobody else. Ticket YPER4-920. (2026-10-29, why: "i wan tto try adding cheap open router")
+- Exception: 5 hax runners `ht-or-runner-1..5` run DeepSeek on the OpenCode Go subscription (hax provider opencode-go, presets go-deepseek, go-deepseek-pro). Only key "opencode go". No OpenRouter. Nobody else. Ticket YPER4-920. (2026-10-31, why: "move all deepseek runenrs there")
+- 1Password reads are cached. A missing item is probably stale cache. stack-key refreshes it on a miss and on --list. (2026-10-31, why: "1pass is cached")
 - Model routing per pstack roles: Claude coding/bug-fix sonnet high, hardest/judgment opus medium, lookups haiku. (2026-10-25, why: right brain per job, less burn)
 - Codex ladder, both fleets. Runner runs gpt-6.1-sol medium: plans, reviews, decides. Code edits go to a helper: `hax --provider=codex --model=gpt-6.1-terra --effort=medium -p "<task>"`. Lookups, logs, summaries: `--model=gpt-6-luna --effort=low`. Sol high only for hard bugs, security, money. Delegate by default; helpers run in background. (2026-10-29, why: "i want to be more token economimcal")
 - `/deeper` always runs on Opus medium, even in Sonnet sessions. Codex runs it on gpt-6-astra. Technical or coding task? Add one angle: what would Lauren Tan (@poteto) do. Skill: `skills/deeper/`. (2026-10-26, why: "higher level of intelligence yields better results")
