@@ -3,7 +3,8 @@
 Single source of standing rules for every agent on this box. If it isn't here, it isn't a rule.
 
 Scope: person-level rules only. Project rules live in each project's own repo.
-Precedence: these rules win over any other rules file. Newest dated rule wins.
+Covers every fleet: Hypertask, Software Factory and inne (Hetzner, user inne). (2026-10-30, why: "inne as a whole is not on our house rules")
+Precedence: these rules win over any other rules file. Newest dated rule wins. Exception: for inne work, inne's own CLAUDE.md wins on confidentiality, publishing, consent and tickets.
 Path: `~/.local/share/house-rules/house-rules.md` (synced from private repo valentinyeo/house-rules every 5 min). Shared skills in `skills/` are linked into every harness skill dir by the same sync.
 
 ## Start here: new session
