@@ -111,6 +111,8 @@ Chat and handoff notes cannot replace board maintenance.
 - Comments for Valentin: caveman, short bullets, full https:// links.
 - Quote Valentin with `> `, never plain quote marks.
 - Product decision needed: one marked yes/no Question, ticket to Valentin Review, take the next ticket.
+- Before any Question, read `skills/unblock/learned.md`. Listed class? Decide it yourself. (2026-10-30, why: IGSH-1229 asked him to confirm an update)
+- Now line, Decision section and open Question say the same thing. Never "GO" and "awaits your yes" at once. (2026-10-30, why: IGSH-1121)
 - Robot status goes in the agent lane, not in people comments.
 - Prove it: release tag, run link, before and after screenshot for UI. Never "should work".
 
