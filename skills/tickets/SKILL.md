@@ -50,6 +50,10 @@ No: <what happens>
   Valentin 2026-10-29: "thumbs up is enough to confirm if reocmmendation is yes".
 - Waiting on him always points at one marked Question comment.
 - Ask only when his answer can act today. No "once X is live" questions.
+- Money asks state the amount. "Saves money" alone is not a question he can answer.
+- Retire a Question when the work moves on: PR merged, already live, premise gone.
+  Clear his name and the red border, then post a fresh Question only if he must decide again.
+- After his yes, say the one step he does, if any. "Nothing to do" is a step.
 - Never ask him for a rule exception, a test place or a tool permission. That goes to your own lead.
 - Before any Question, check `skills/unblock/learned.md`. Listed there? Decide it yourself.
 - Need his yes later? Post a fresh Question in that comment. Never link back to an old one.
@@ -86,6 +90,9 @@ Dev words out: caret, composer, rail, deploy, commit, branch, flag key. Say what
 `scripts/ticket-lint` checks human-lane text before it posts.
 It bounces: sentences over 12 words, paths, file names,
 code names, commit hashes, logs, robot status lines.
+A Question also bounces when it costs money and names no amount,
+or when it only matters "once" something else happens.
+`blocker-sweep.py` reports STALE when a marked Question outlived its work.
 Edits check only new lines. Agent lane is never checked.
 Every board write wrapper runs it (ceo-ht does). No bypass.
 No wrapper? Raw `hypertask` writes too: run `ticket-lint <file>` first, by hand.
