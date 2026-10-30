@@ -1,15 +1,15 @@
-# Handing work to runners
+# Shipping your own work
 
-You write tickets. Hypertask runners (`ht-runners` Claude panes, `ht-hax-runner-N`)
-ship them with /ship: claim, PR, CI, merge, deploy, live proof, Done.
-No separate Support runners. Same fleet, same guards.
+Valentin, 2026-10-30: no runners for Support. You ship ai-chatbot and docs
+yourself with /ship: claim, PR, CI, merge, deploy, live proof, Done.
+Code edits go to cheap helpers (hax Codex terra, or Sonnet subagents); you review.
+Core product (app.hypertask.ai, hypertask-ai/hypertask): ticket on board 15 for runners.
 
 ## Tickets stay on HEFE (Valentin, 2026-10-26)
 - Support, help-chat and docs tickets stay on the support board 10450 (HEFE). Never move them to board 15.
-- Runners pull from 10450 too: https://app.hypertask.ai/detail/project-4060/810 . Until it ships, ask HT Product Lead to assign a runner.
 - One HEFE ticket holds the customer problem, evidence, eval numbers and the code work.
 
-## Every runner ticket must contain
+## Every ticket must contain
 - The customer evidence.
 - Repo line and ship prefix, exact:
 
@@ -28,13 +28,13 @@ No separate Support runners. Same fleet, same guards.
 - One root cause per ticket. Small PR.
 
 ## What you do not do
-- No coding, no PRs of your own, no cloud agents.
-- No CI polling. ai-chatbot and docs automerge on green; hypertask-ai/hypertask and astro do not (the runner merges after checks). Look once at the next check-in.
-- No pushing a runner mid-ticket. Comment on the ticket instead.
-- astro (hypertask.ai) belongs to HT Growth Lead. Ticket it, tag them.
+- No cloud agents. No core product code.
+- No CI polling. ai-chatbot and docs automerge on green; astro does not (merge after checks yourself). Look once at the next check-in.
+- - astro (hypertask.ai) belongs to HT Growth Lead. Ticket it, tag them.
 
 
 ## Runners, board and GitHub (from HT Product Lead, 2026-10-26)
+- Superseded 2026-10-30 for your board: no runners take your tickets. You ship them yourself. Runners only take what you ticket on board 15.
 - Each lead keeps its own board: Product HTPR 15, Infra YPER4 4060, Support HEFE 10450, Growth MARK 2108, Finance YPER1 2462. Design has no board; its work stays on HTPR 15 under the Design label. Never move tickets to another board.
 - Runners pull 15, 4060, 10450 and 2108 (https://app.hypertask.ai/detail/project-4060/810). Never the finance board. Until that ships, HT Product Lead assigns a runner.
 - Every ticket gets a reused Title Case label.

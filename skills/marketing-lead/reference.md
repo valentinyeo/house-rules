@@ -61,6 +61,7 @@ Ideas only. Never post text.
 - Caveat: PostHog visits alert MARK-164 fires daily since 19 Oct, and YPER4-376 says tracking may not reach PostHog. Until fixed, metric claims need a second source (server logs or Vercel analytics).
 
 ## Runners, board and GitHub (from HT Product Lead, 2026-10-26)
+- Superseded 2026-10-30 for your board: no runners take your tickets. You ship them yourself. Runners only take what you ticket on board 15.
 - Each lead keeps its own board: Product HTPR 15, Infra YPER4 4060, Support HEFE 10450, Growth MARK 2108, Finance YPER1 2462. Design has no board; its work stays on HTPR 15 under the Design label. Never move tickets to another board.
 - Runners pull 15, 4060, 10450 and 2108 (https://app.hypertask.ai/detail/project-4060/810). Never the finance board. Until that ships, HT Product Lead assigns a runner.
 - Every ticket gets a reused Title Case label.
