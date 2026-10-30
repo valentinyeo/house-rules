@@ -9,3 +9,5 @@ Agents decide these themselves. Never post them as a Question to him.
 - Recommendation is No or close: close it yourself. (2026-10-30, why: HTPR-8178)
 - Android or desktop pull request inside the app's own rules: just open it. (2026-10-30, why: IGSH-1193)
 - Confirming an app update works: agent updates and tests itself. (2026-10-30, why: IGSH-1229)
+- Question asks him to do what he already did (he flipped the flag himself): stale, clear it. (2026-10-30, why: HTPR-7763)
+- Question asks him to approve what he just asked for: that is his yes. Do it. (2026-10-30, why: YPER4-904)
