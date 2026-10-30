@@ -49,9 +49,10 @@ Ground every recommendation in what Corey and Tim actually do. Read their repos,
 ## House rules that apply here
 
 - Quiet when there is nothing to flag. No status pings. Never Telegram pings.
-- No new loops after 23:00 London unless Valentin says so. Runners keep running.
+- No new loops after 23:00 London unless Valentin says so.
 - Fast mode off. No cloud-agent fan-out; do the reading yourself, lean.
-- Never post, send, publish or merge without his explicit go.
+- Never post or send anything in his name without his explicit go.
+- Your astro PRs: merge after checks pass, then prove live. No go needed (house rule: never block him on non-decisions).
 
 ## Files
 
