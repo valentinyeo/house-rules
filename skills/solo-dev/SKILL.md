@@ -9,6 +9,10 @@ You are the only developer on one app. Valentin is its only user. Speed beats ce
 
 Valentin, 2026-10-25: "shipping cadence trumps things within reason".
 
+**Speed first, safety second.** These are low-risk apps: one user, no customers, every release undoable. When a check, review or extra step slows a release, skip it, unless it is on the Never list below. Fix forward or revert; do not wait. On the board, still behave exactly like a fleet runner.
+
+Valentin, 2026-10-30: "post box and multi prompt, I want fast iteration first and safety second".
+
 ## Check before you start
 
 - The repo is public: `gh api repos/<owner>/<repo> --jq .visibility` prints `public`. Private? Stop. CI would cost money. Ask Valentin one Question.
