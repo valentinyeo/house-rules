@@ -79,6 +79,10 @@ Behave on the board exactly like a fleet runner, just alone. Follow the `tickets
 
 - Same columns as the fleet: Doing while you work, Done with proof, Valentin Review for his decisions.
 - No ticket sits in Doing overnight.
+- Every commit message starts with its ticket ID, like `IGSH-1154: ...`. No ticket? Create one first.
+- After each release that touches a ticket, post one people comment on it: what Valentin notices now, in plain words, plus the release tag. Caveman, max 3 bullets.
+- Work with no user-visible change still gets an agent-log line on its ticket.
+- Proof: Valentin can read any ticket and know what changed overnight, without git. (2026-10-30, why: "its not clear to me at all what was done")
 
 ## Board check
 
