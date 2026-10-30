@@ -76,6 +76,7 @@ Do this once per repo, as its own commit, before the first ticket.
 ## Talking on the board
 
 Behave on the board exactly like a fleet runner, just alone. Follow the `tickets` skill.
+Run `~/.local/share/house-rules/skills/tickets/scripts/ticket-lint <file>` before every description or people comment; raw `hypertask --token` writes skip no check. (2026-10-30, why: IGSH-1169 passed jargon to Valentin)
 
 - Same columns as the fleet: Doing while you work, Done with proof, Valentin Review for his decisions.
 - No ticket sits in Doing overnight.
