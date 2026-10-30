@@ -9,22 +9,17 @@ agents are cancelled. Do not wake it. Its notes are not on this VPS.
       `Help admin CLI - Support bot` item. Names only.
 - [ ] `git -C ~/projects/ai-chatbot pull` (checkout is months old).
 
-## 2. Runner gaps (fix A now, fix B needs Valentin)
-- [ ] A: tickets stay on HEFE 10450 (Valentin, 2026-10-26). Until https://app.hypertask.ai/detail/project-4060/810 ships, HT Product Lead assigns a runner.
-- [ ] B (optional): YPER4 ticket on board 4060: add HEFE 10450 "Ticketed"
-      to `runner-dispatch` COLUMNS and accept the HEFE prefix in
-      ship-claim/ship-check. Only if Valentin wants one board.
+## 2. Shipping gaps (you ship yourself, Valentin 2026-10-30)
 - [ ] ai-chatbot `CLAUDE.md` says "ask before deploying" and tells agents
       to send Telegram deploy pings. Both clash with house rules. Ticket a
-      small CLAUDE.md fix so runners do not stall or ping.
-- [ ] ai-chatbot has no deploy on merge. Until a ticket adds it, the runner deploys by hand.
-- [ ] astro: automerge off; deploy proof path for Cloudflare Pages unverified. Check before the first astro ticket.
+      small CLAUDE.md fix so helpers do not stall or ping.
+- [ ] ai-chatbot has no deploy on merge. Until a ticket adds it, you deploy by hand.
 
 ## 3. Open threads to pick up (read each ticket fresh first)
 - [ ] astro PR 33: floating chat icon on hypertask.ai instead of the docked
       chat. Valentin asked 26 Oct 08:08. Built, screenshot-verified, NOT
       merged: https://github.com/hypertask-ai/astro/pull/33. Get it merged
-      through HT Growth Lead or a runner; verify live.
+      through HT Growth Lead; verify live.
 - [ ] Nudge bubble (agent cancelled, no PR): opt-in, timed question after
       ~20 s, once per visit. Re-ticket.
 - [ ] Docked chat "New conversation" button bug (agent cancelled). Re-ticket.
@@ -36,7 +31,7 @@ agents are cancelled. Do not wake it. Its notes are not on this VPS.
 - [ ] PWA article 10895425 waits on Valentin.
 - [ ] Human handoff lead: CRM card, plus leads-from-support automation idea.
 - [ ] HEFE-65 help admin CLI and inbox.
-- [ ] HEFE tickets last seen in flight (status unknown): 1, 22, 39, 51, 53, 54, 69, 70, 72, 73. Read each; Done with evidence, or re-ticket for runners.
+- [ ] HEFE tickets last seen in flight (status unknown): 1, 22, 39, 51, 53, 54, 69, 70, 72, 73. Read each; Done with evidence, or re-ticket.
 - [ ] Approved deeper plan in eval.md. Ticket it in order.
 
 ## 4. Baseline

@@ -122,9 +122,9 @@ It checks these checkouts without changing them:
 
 | Lead | Repos under `~/projects/` | Runner path |
 |---|---|---|
-| Support | `ai-chatbot`, `HypertaskDocs`, `hypertask` | Hypertask fleet, HEFE 10450; [contract](../support-manager/runners.md) |
+| Support | `ai-chatbot`, `HypertaskDocs`, `hypertask` | No runners; ships itself, HEFE 10450; core product via HTPR 15; [contract](../support-manager/runners.md) |
 | Design | `hypertask` | Hypertask fleet, HTPR 15; [contract](../design-lead/runners.md) |
-| Growth | `hypertask-astro` | Hypertask fleet, MARK 2108; [contract](../marketing-lead/SKILL.md) |
+| Growth | `hypertask-astro` | No runners; ships itself, MARK 2108; core product via HTPR 15; [contract](../marketing-lead/SKILL.md) |
 | Finance | `pecunia` | No finance runners; code through HT Product Lead |
 
 Clean means no tracked or untracked changes.
