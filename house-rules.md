@@ -41,6 +41,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 ## Doing the work
 - GitHub calls: never poll faster than 5 minutes. `gh run watch` and `gh pr checks --watch` need `--interval 300` or more. One watcher per run or PR; kill it within 30 minutes. Automation uses the runner App token, not Valentin's login. (2026-10-26, why: watch loops burned 2,640 calls/h)
 - PR queue first, both fleets. No runner takes a new ticket while draft or stalled PRs wait. Finish, rebase or close those first. Only urgent bugs and errors jump ahead. Hypertask runners pick via `pr-drain-pick`. (2026-10-29, why: "the primary objective right now is to clear the draft PRs")
+- Move your tickets on the board live. Start work: In Progress. PR open: review column. Shipped: Done. Every fleet. (2026-10-31, why: "working on it goes to inprogress")
 - Prove it, never claim it. "Looks good", "should work", bare "tests pass": not evidence. Show demo, before/after numbers or end-to-end walkthrough. (2026-10-25, why: Valentin via Thorsten Ball post)
 - Ask for options, not ping-pong. Give several theories or variations. Check all, then pick. (2026-10-25, why: Valentin via Thorsten Ball post)
 - Every design proposal on a ticket carries a Figma frame link and a keyframe image attached to the same comment. Never describe only. Dress the real app; hold build until his yes. Follow skills/figma-design. (2026-10-27, why: "You can't just write a description")
