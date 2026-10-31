@@ -14,6 +14,13 @@ DONE_SECTIONS = {
     '15': ['No Flag', 'Flag: Everyone', 'Done'],
 }
 DEFAULT_DONE = ['Done']
+# Boards whose titles carry no [FEATURE] tag: anything not plainly upkeep counts as a feature he sees.
+UNTAGGED = {'2060'}
+UPKEEP_LABELS = {'bug', 'ci', 'infra'}
+UPKEEP_TITLE = re.compile(
+    r'broken|crash|stopped working|stuck|fails?\b|cannot|can.t|missing|falls behind|steals|lost|'
+    r'leaves|never|proof|prove|measure|audit|ticket quality|fixture|^\[INFRA\]', re.I)
+WRITER = {'2060': 'ceo-ht'}
 FEATURE = re.compile(r'\[(FEATURE|IMPROVE(MENT)?)\]|^(FEATURE|IMPROVEMENT)\b', re.I)
 FEATURE_KINDS = {'feature', 'improvement'}
 HIGH_RISK = re.compile(
@@ -47,7 +54,7 @@ def flag_kinds():
         return {}
 
 
-def verdict(t, kinds):
+def verdict(t, kinds, board):
     names = [l['name'] for l in t.get('labels') or []]
     text = f"{t['title']} {' '.join(names)}"
     if t.get('blockerCommentId'):
@@ -55,6 +62,9 @@ def verdict(t, kinds):
     upkeep = re.search(r'\[dep-pr-\d+\]|^stack upgrade|^\[(INFRA|BUGFIX|BUG)\]', t['title'], re.I)
     if not upkeep and (FEATURE.search(t['title']) or any(FEATURE.search(n) for n in names)
             or kinds.get(str(t['uniqueIndex'])) in FEATURE_KINDS):
+        return 'keep', 'new or changed feature'
+    if board in UNTAGGED and not upkeep and not ({n.lower() for n in names} & UPKEEP_LABELS) \
+            and not UPKEEP_TITLE.search(t['title']):
         return 'keep', 'new or changed feature'
     risk = HIGH_RISK.search(text)
     if risk:
@@ -73,20 +83,21 @@ def main():
     rows = []
     for s in sections:
         for t in tickets(a.board, s):
-            v, why = verdict(t, kinds)
+            v, why = verdict(t, kinds, a.board)
             rows.append((v, why, t))
+    writer = WRITER.get(a.board, 'vcc')
     archived = failed = 0
     for v, why, t in rows:
         print(f"{v.upper():7} {t['ticketNumber']:11} {t['section'][:16]:16} {why:32} {t['title'][:70]}")
         if v != 'archive' or not a.apply:
             continue
-        r = subprocess.run(['vcc', 'task', 'update', t['ticketNumber'], '--status', 'Archive'], capture_output=True, text=True)
+        r = subprocess.run([writer, 'task', 'update', t['ticketNumber'], '--status', 'Archive', '--project', a.board], capture_output=True, text=True)
         if r.returncode:
             failed += 1
             print(f"  FAILED {t['ticketNumber']}: {r.stderr.strip()[:200]}", file=sys.stderr)
             continue
         archived += 1
-        subprocess.run(['vcc', 'activity', 'add', t['ticketNumber'],
+        subprocess.run([writer, 'activity', 'add', t['ticketNumber'],
                         f'Archived by hypertask-triage: {why}. Undo: set status Normal.'], capture_output=True, text=True)
     keep = sum(1 for v, _, _ in rows if v == 'keep')
     would = sum(1 for v, _, _ in rows if v == 'archive')
