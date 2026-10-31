@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""CI wait per pushed commit: from the first check run queued to the last one finished.
+
+One sample = one commit SHA that got push or pull request checks in the window.
+Wait = latest finish minus earliest queue time over its first-attempt runs.
+Skipped: commits still running, and commits with a cancelled run (superseded pushes).
+Reruns are counted as a flake signal; their wait uses attempt 1 only.
+
+KPI: share of commits whose checks finish within the target (default 10 min).
+
+Usage: ci-wait [--days N] [--target MIN] [--json PATH] <owner/repo> [...]
+Read only. Uses gh with whatever login GH_TOKEN or gh auth provides.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import statistics
+import subprocess
+import sys
+from collections import defaultdict
+
+EVENTS = {"push", "pull_request", "pull_request_target", "merge_group"}
+
+
+def gh(path, retry=True):
+    out = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    if out.returncode and retry and "Bad credentials" in out.stderr and os.environ.get("GH_TOKEN"):
+        fresh = subprocess.run(["gh-app-token"], capture_output=True, text=True)  # app tokens last 1 hour
+        if fresh.returncode == 0:
+            os.environ["GH_TOKEN"] = fresh.stdout.strip()
+            return gh(path, retry=False)
+    if out.returncode:
+        raise RuntimeError(out.stderr.strip() or f"gh api {path} failed")
+    return json.loads(out.stdout)
+
+
+def ts(s):
+    return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def iso(t):
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def runs_between(repo, start, end):
+    """The runs API caps a filtered query at 1000 results, so split the window until each part fits."""
+    q = f"repos/{repo}/actions/runs?per_page=100&exclude_pull_requests=true&created={iso(start)}..{iso(end)}"
+    first = gh(q + "&page=1")
+    if first["total_count"] > 1000 and end - start > dt.timedelta(minutes=10):
+        mid = start + (end - start) / 2
+        return runs_between(repo, start, mid) + runs_between(repo, mid + dt.timedelta(seconds=1), end)
+    runs = first["workflow_runs"]
+    page = 1
+    while len(runs) < first["total_count"]:
+        page += 1
+        more = gh(q + f"&page={page}")["workflow_runs"]
+        if not more:
+            break
+        runs += more
+    return runs
+
+
+def first_attempt(repo, run):
+    if run.get("run_attempt", 1) == 1:
+        return run
+    return gh(f"repos/{repo}/actions/runs/{run['id']}/attempts/1")
+
+
+def measure(repo, days, target, now):
+    runs = [r for r in runs_between(repo, now - dt.timedelta(days=days), now) if r["event"] in EVENTS]
+    by_sha = defaultdict(list)
+    for r in runs:
+        by_sha[r["head_sha"]].append(r)
+    samples, reruns, skipped = [], 0, 0
+    for sha, group in by_sha.items():
+        if any(r["status"] != "completed" or r["conclusion"] == "cancelled" for r in group):
+            skipped += 1
+            continue
+        reran = any(r.get("run_attempt", 1) > 1 for r in group)
+        reruns += reran
+        group = [first_attempt(repo, r) for r in group]
+        start = min(ts(r["created_at"]) for r in group)
+        end = max(ts(r["updated_at"]) for r in group)
+        samples.append({
+            "sha": sha[:7], "branch": group[0]["head_branch"], "event": group[0]["event"],
+            "queued": iso(start), "wait_min": round((end - start).total_seconds() / 60, 1),
+            "red": any(r["conclusion"] not in ("success", "skipped", "neutral") for r in group),
+            "reran": reran,
+        })
+    return summarize(repo, samples, target, now, reruns, skipped)
+
+
+def summarize(repo, samples, target, now, reruns=0, skipped=0):
+    def stats(rows):
+        w = sorted(s["wait_min"] for s in rows)
+        if not w:
+            return {"n": 0}
+        return {"n": len(w), "within": sum(x <= target for x in w),
+                "ratio": round(sum(x <= target for x in w) / len(w), 3),
+                "median": round(statistics.median(w), 1), "p90": w[min(len(w) - 1, int(len(w) * 0.9))]}
+    day = [s for s in samples if ts(s["queued"]) > now - dt.timedelta(days=1)]
+    return {"repo": repo, "target_min": target, "week": stats(samples), "day": stats(day),
+            "reran": reruns, "skipped": skipped, "red": sum(s["red"] for s in samples), "samples": samples}
+
+
+def line(r):
+    w, d = r["week"], r["day"]
+    if not w["n"]:
+        return f"{r['repo']}: no finished checks in window"
+    day = f"24h {d['ratio']:.0%} of {d['n']}, median {d['median']} min" if d["n"] else "24h none"
+    return (f"{r['repo']}: {w['ratio']:.0%} within {r['target_min']} min ({w['within']}/{w['n']}), "
+            f"median {w['median']} min, p90 {w['p90']} min; {day}; reran {r['reran']}, red {r['red']}")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("repos", nargs="+")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--target", type=float, default=10)
+    p.add_argument("--json")
+    a = p.parse_args()
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    results = []
+    for repo in a.repos:
+        try:
+            r = measure(repo, a.days, a.target, now)
+        except RuntimeError as e:
+            r = {"repo": repo, "error": str(e).splitlines()[0]}
+            print(f"{repo}: unreadable ({r['error']})")
+        else:
+            print(line(r))
+        results.append(r)
+    if a.json:
+        with open(a.json, "w") as f:
+            json.dump({"at": iso(now), "days": a.days, "target_min": a.target, "repos": results}, f)
+    if all("error" in r for r in results):
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
