@@ -59,6 +59,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Each app has one design system page in Figma. Runners build only from it. New pieces need his yes. (2026-10-26, why: "runners can just use the design system")
 - Start from his real screenshots. Subtract before adding. (2026-10-26, why: "Everything needs to earn its place")
 - Desktop and mobile share one design language. Layout may differ. (2026-10-26, why: "They should basically look very similar")
+- One platform per ticket and per image. Desktop and Android get separate tickets and keyframes. Never one combined screen. (2026-10-31, why: "its android or desktop not both")
 - One Figma file for our apps. One page per ticket, named "<ID> <short what>". Newest worked page on top. (2026-10-29, why: "one big file with loads of pages")
 - Show design work as a screencast2.com image link in chat. Make it with `sc2-upload <png>`. It embeds; no Figma load. (2026-10-29, why: "i can see them right away in the chat")
 
