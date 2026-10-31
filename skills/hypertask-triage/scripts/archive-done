@@ -52,7 +52,7 @@ def verdict(t, kinds):
     text = f"{t['title']} {' '.join(names)}"
     if t.get('blockerCommentId'):
         return 'keep', 'open blocking question'
-    upkeep = re.search(r'\[dep-pr-\d+\]|^stack upgrade', t['title'], re.I)
+    upkeep = re.search(r'\[dep-pr-\d+\]|^stack upgrade|^\[(INFRA|BUGFIX|BUG)\]', t['title'], re.I)
     if not upkeep and (FEATURE.search(t['title']) or any(FEATURE.search(n) for n in names)
             or kinds.get(str(t['uniqueIndex'])) in FEATURE_KINDS):
         return 'keep', 'new or changed feature'
