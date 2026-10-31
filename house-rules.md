@@ -105,6 +105,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 ## Security
 - Never print, commit or publish secrets. (2026-10-25, why: leaks are permanent)
 - Every public repo has secret scanning and push protection on, from creation. (2026-10-25, why: leaked keys visible to anyone)
+- Keys are cached 24 hours. Just run `stack-key <name>` or `yeo-key <name>`. A cache read costs nothing. Key seems missing? Run `stack-key --list` (or `yeo-key --list`) first. Retry once. Never tell Valentin a key is missing unless it is absent from the list. (2026-10-31, why: "all agents forget that 1pass is cahced for 24 hours")
 
 ## Releases
 - Releases reach his desktop through the app's in-app update; never hand-replace a running exe. (2026-10-25, why: updater is the tested path)
