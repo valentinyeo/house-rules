@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Archive finished Hypertask tickets that need no product owner attention.
+
+Dry run by default. --apply archives through vcc (agent identity) and logs
+the reason in each ticket's agent lane. Archive is reversible: status Normal.
+"""
+import argparse
+import json
+import re
+import subprocess
+import sys
+
+DONE_SECTIONS = {
+    '15': ['No Flag', 'Flag: Everyone', 'Done'],
+}
+DEFAULT_DONE = ['Done']
+FEATURE = re.compile(r'\[(FEATURE|IMPROVE(MENT)?)\]|^(FEATURE|IMPROVEMENT)\b', re.I)
+FEATURE_KINDS = {'feature', 'improvement'}
+HIGH_RISK = re.compile(
+    r'billing|stripe|payment|invoice|pric|money|cost|refund|subscription|'
+    r'auth|login|log in|sign.?in|sign.?up|password|access|permission|security|privacy|'
+    r'delet|data loss|lost data|gdpr|customer email|email to|token|api key|secret', re.I)
+
+
+def ht(*args):
+    out = subprocess.run(['hypertask', '--json', *args], capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+def tickets(board, section):
+    offset, page = 0, 200
+    while True:
+        batch = ht('task', 'list', '--project', board, '--section', section, '--status', 'Normal',
+                   '--limit', str(page), '--offset', str(offset)).get('tasks', [])
+        yield from batch
+        if len(batch) < page:
+            return
+        offset += page
+
+
+def flag_kinds():
+    try:
+        out = subprocess.run(['bash', '-c', '~/projects/hypertask/.claude/skills/ship/scripts/ht-flag get'],
+                             capture_output=True, text=True, timeout=60).stdout
+        return {f['ticketUrl'].rsplit('/', 1)[-1]: f.get('kind') for f in json.loads(out)['flags'] if f.get('ticketUrl')}
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        return {}
+
+
+def verdict(t, kinds):
+    names = [l['name'] for l in t.get('labels') or []]
+    text = f"{t['title']} {' '.join(names)}"
+    if t.get('blockerCommentId'):
+        return 'keep', 'open blocking question'
+    upkeep = re.search(r'\[dep-pr-\d+\]|^stack upgrade', t['title'], re.I)
+    if not upkeep and (FEATURE.search(t['title']) or any(FEATURE.search(n) for n in names)
+            or kinds.get(str(t['uniqueIndex'])) in FEATURE_KINDS):
+        return 'keep', 'new or changed feature'
+    risk = HIGH_RISK.search(text)
+    if risk:
+        return 'keep', f'risky area ({risk.group(0).lower()})'
+    return 'archive', 'done, low risk, not a feature'
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--board', required=True)
+    p.add_argument('--sections', help='comma list; default per board')
+    p.add_argument('--apply', action='store_true')
+    a = p.parse_args()
+    sections = a.sections.split(',') if a.sections else DONE_SECTIONS.get(a.board, DEFAULT_DONE)
+    kinds = flag_kinds() if a.board == '15' else {}
+    rows = []
+    for s in sections:
+        for t in tickets(a.board, s):
+            v, why = verdict(t, kinds)
+            rows.append((v, why, t))
+    archived = failed = 0
+    for v, why, t in rows:
+        print(f"{v.upper():7} {t['ticketNumber']:11} {t['section'][:16]:16} {why:32} {t['title'][:70]}")
+        if v != 'archive' or not a.apply:
+            continue
+        r = subprocess.run(['vcc', 'task', 'update', t['ticketNumber'], '--status', 'Archive'], capture_output=True, text=True)
+        if r.returncode:
+            failed += 1
+            print(f"  FAILED {t['ticketNumber']}: {r.stderr.strip()[:200]}", file=sys.stderr)
+            continue
+        archived += 1
+        subprocess.run(['vcc', 'activity', 'add', t['ticketNumber'],
+                        f'Archived by hypertask-triage: {why}. Undo: set status Normal.'], capture_output=True, text=True)
+    keep = sum(1 for v, _, _ in rows if v == 'keep')
+    would = sum(1 for v, _, _ in rows if v == 'archive')
+    mode = f'archived {archived}, failed {failed}' if a.apply else f'would archive {would}'
+    print(f"SUMMARY board {a.board}: {len(rows)} done tickets, {mode}, kept {keep}")
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
