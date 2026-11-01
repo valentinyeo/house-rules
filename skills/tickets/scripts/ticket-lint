@@ -17,6 +17,8 @@ ROBOT =re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|C
 MONEY = re.compile(r"\b(money|cost|costs|pay|pays|paid|paying|payment|spend|spending|price|pricing|billing|charge|charges|budget|invoice|subscription|dollars?|usd|gbp|euros?|pounds?)\b|[£$€]", re.I)
 AMOUNT = re.compile(r"[£$€]\s?\d|\b\d+(\.\d+)?\s?(k\b|dollars?|usd|gbp|pounds?|euros?|cents?|a month|a year|per month|per year)|\b(free|no cost|no charge|nothing to pay|at no cost|zero cost)\b", re.I)
 ONCE = re.compile(r"\bonce\b", re.I)
+SECRET_ASK = re.compile(r"\b(paste|post|send|share)\b[^.?]{0,40}\b(key|token|secret|password)\b[^.?]{0,30}\b(here|in (this|the) (ticket|comment|chat))\b"
+                        r"|\b(paste|post|send)\b[^.?]{0,10}\b(key|it|them)\b[^.?]{0,6}\bhere\b", re.I)
 CODE = [
     (re.compile(r"(^|\s)(~|\.{0,2})/[\w.-]+/[\w./-]*"), "file path"),
     (re.compile(r"\b[\w-]+\.(py|sh|zig|ts|tsx|js|mjs|go|kt|json|ya?ml|toml|md|jsonl|log|html)\b"), "file name"),
@@ -65,6 +67,13 @@ def question_rules(text):
         bad.append("money ask with no amount: say what it costs him")
     if ONCE.search(ours):
         bad.append("'once X' ask he cannot answer today: ask only what he can decide now")
+    ctx = re.search(r"What this is:(.*?)Question:", ours, re.I | re.S)
+    if not ctx:
+        bad.append('no "What this is:" part above the Question: say what it is, why it reached him, what each answer changes')
+    elif len(words(ctx.group(1))) < 25:
+        bad.append('"What this is:" too thin to decide on: name the thing as he sees it, why it reached him, what each answer changes')
+    if SECRET_ASK.search(ours):
+        bad.append("asks him to paste a key into the ticket: keys go only in 1Password, name the item instead")
     return bad
 
 

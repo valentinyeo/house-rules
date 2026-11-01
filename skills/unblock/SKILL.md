@@ -54,7 +54,7 @@ Question:
 - Yes and No each say what happens next.
 - Money asks state the amount.
 - After his yes, the next comment says the one step he does, if any.
-- He can answer without research. Every term known. Max 3 context bullets.
+- He can answer without research. "What this is:" explains every term.
 Fails and you can fix the facts in under 5 minutes? Research it yourself. Give him the answer in the report.
 Otherwise press the lead to rewrite (step 6). Never rewrite runner tickets yourself past that.
 

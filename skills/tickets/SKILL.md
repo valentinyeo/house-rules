@@ -36,6 +36,7 @@ Models: https://app.hypertask.ai/detail/project-15/7852 (open), https://app.hype
 ## Question comment
 One open Question per ticket. Mark it as the blocker. Retire older ones.
 ```
+What this is: <4 to 8 short pospeak lines>
 Question: **<yes/no question?>**
 My recommendation: Yes|No.
 Why: <one line>.
@@ -58,8 +59,12 @@ No: <what happens>
 - Before any Question, check `skills/unblock/learned.md`. Listed there? Decide it yourself.
 - Need his yes later? Post a fresh Question in that comment. Never link back to an old one.
   Valentin 2026-10-29: "still have blockers without mention of what comment contains the blocking question".
-- Context above the question: max 3 bullets, plain words.
-  Valentin 2026-10-29: "pospeak don't burr your recommendation".
+- "What this is:" comes first, in pospeak. He decides from it alone.
+  Say what the thing is, as he sees it in the app.
+  Say why it reached him: which of his calls (money, key, going public).
+  Say what Yes and No each change for him. Explain every term once.
+  Valentin 2026-11-02:
+  > my problem is that i dont understand waht the tickets want from me most of the time i need to be spoken to in /pospeak with enough context to make the decisoin
 - He answered? Clear the blocker at once, both parts:
   his name (`vcc task waiting-on T --user none`)
   and the red comment border (blockerCommentId null).
