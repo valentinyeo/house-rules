@@ -46,7 +46,8 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Move your tickets on the board live. Start work: In Progress. PR open: review column. Shipped: Done. Every fleet. (2026-10-31, why: "working on it goes to inprogress")
 - Prove it, never claim it. "Looks good", "should work", bare "tests pass": not evidence. Show demo, before/after numbers or end-to-end walkthrough. (2026-10-25, why: Valentin via Thorsten Ball post)
 - Ask for options, not ping-pong. Give several theories or variations. Check all, then pick. (2026-10-25, why: Valentin via Thorsten Ball post)
-- Every design proposal on a ticket carries a Figma frame link and a keyframe image attached to the same comment. Never describe only. Dress the real app; hold build until his yes. Follow skills/figma-design. (2026-10-27, why: "You can't just write a description")
+- Every design proposal on a ticket carries a Figma frame link and a keyframe image attached to the same comment. Never describe only. Dress the real app. Follow skills/figma-design. (2026-10-27, why: "You can't just write a description")
+- His own ticket asking for a change is his yes. Build it. Post the Figma frame as FYI, never wait on it. Ask again only for money or new scope. (2026-11-02, why: "i dont need to be asedk again")
 - Every ticket and comment follows `skills/tickets/`. Pospeak descriptions and people comments. Fixed ticket shape. One marked Question. Robot status goes to the agent log. Every fleet. (2026-10-28, why: "description -> pospeak, comments pospeak")
 - HARD: quote Valentin with the quote block (`> `), in descriptions and comments. Never plain quote marks. Both fleets. (2026-10-29, why: "use the quote function we have")
 - Block Valentin only with one marked Question. He replies or 👍: clear his name and the red border that turn. Every lead turn, run `skills/tickets/scripts/blocker-sweep.py <boards>`; clear ANSWERED and NO-QUESTION rows. Both fleets. (2026-10-29, why: "if i reply you have to remove the blockage")
@@ -59,7 +60,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 ## Design
 - Design in Figma. Use Yeo UX for our apps. Clients may use their own Figma teams. Never use Valentin Yeo's free team. How-to: `skills/figma-design/`. (2026-10-27, why: clients have their own Figma accounts)
 - Design sessions work straight in Figma. Never claude.ai artifacts. (2026-10-27, why: "don't do claude.ai artifcats but straigh figma")
-- Each app has one design system page in Figma. Runners build only from it. New pieces need his yes. (2026-10-26, why: "runners can just use the design system")
+- Each app has one design system page in Figma. Runners build only from it. New pieces need his yes, unless his own ticket asked for them. (2026-10-26, why: "runners can just use the design system")
 - Start from his real screenshots. Subtract before adding. (2026-10-26, why: "Everything needs to earn its place")
 - Desktop and mobile share one design language. Layout may differ. (2026-10-26, why: "They should basically look very similar")
 - One platform per ticket and per image. Desktop and Android get separate tickets and keyframes. Never one combined screen. (2026-10-31, why: "its android or desktop not both")
