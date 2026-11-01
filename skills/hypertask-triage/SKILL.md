@@ -45,7 +45,8 @@ Per ticket it prints a verdict and the broken rules:
 - HIS-OK: leave it.
 
 The verdict is a regex guess. Read each NOT-HIS ticket before clearing it.
-Then rerun with `--apply`: every flagged ticket gets one agent-lane note for its agent and lead.
+Then rerun with `--apply`: every flagged ticket on your own boards gets one agent-lane note for its agent.
+Tickets on another lead's board are listed as "left for <lead>". That lead runs this step on its turn.
 The note asks for a rewrite, one proper Question, and a fix at the origin (skill, wrapper, prompt).
 A rerun posts nothing new until the defects change.
 Same cause on several tickets? Fix that origin yourself, or file it for the owning lead.
