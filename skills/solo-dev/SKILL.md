@@ -43,7 +43,7 @@ Do it yourself, before any ticket. Never ask Valentin. Never print a token.
 
 1. **PR queue first.** Every open PR on the repo, drafts too, plus every ticket in the board view's PR column. Rebase, fix if red, merge, see it released. Dead or duplicate? Close it and say why on the ticket. Anything merged since the last release tag must reach a release.
 2. **Then the board view, top down.** The ticket text is the spec. Never ask Valentin to restate it. One ticket at a time.
-3. **Done** when every ticket in the view is in Done or waiting in Valentin Review.
+3. **Done** when every ticket in the view is in Done, or in Valentin Review with one marked Question that only he can answer.
 
 ## The loop
 
@@ -71,14 +71,14 @@ Do this once per repo, as its own commit, before the first ticket.
 
 - Release does not launch: revert that commit right away. Releasing again beats debugging.
 - Same failure twice: add the smallest check that would have caught it, and nothing more.
-- Stuck after two tries: hand it to `gpt-6.1-sol` high once. Still stuck? Move the ticket to Valentin Review with one Question, take the next.
+- Stuck after two tries: hand it to `gpt-6.1-sol` high once. Still stuck? Write why in the agent lane, mark it blocked on your own lead, take the next. Never park tech trouble on Valentin. (2026-11-02, why: IGSH-1410 reverted fix sat in his review)
 
 ## Talking on the board
 
 Behave on the board exactly like a fleet runner, just alone. Follow the `tickets` skill.
 Run `~/.local/share/house-rules/skills/tickets/scripts/ticket-lint <file>` before every description or people comment; raw `hypertask --token` writes skip no check. (2026-10-30, why: IGSH-1169 passed jargon to Valentin)
 
-- Same columns as the fleet: Doing while you work, Done with proof, Valentin Review for his decisions.
+- Same columns as the fleet: Doing while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; `blocker-sweep.py` flags it. (2026-11-02, why: IGSH-1353 sat there with "Decision: None")
 - No ticket sits in Doing overnight.
 - Every ticket runs through pstack `poteto-mode`: its Bug fix or Feature playbook, `how` before nontrivial changes, `architect` across function boundaries. Name the playbook in your first ticket comment. (2026-10-30, why: Valentin asked "are the agents using pstack?")
 - A question from Valentin is not a stop. Answer it, then go back to the queue in the same turn. Never end a turn while the view has open tickets. (2026-10-30, why: answering his question left the session idle)
