@@ -222,7 +222,7 @@ def main():
         print(f"{kind:17} {number:11} {who[:18]:18} {'; '.join(calls) or '-':28} {len(defects)} defects  {url}  {t['title'][:50]}")
         for d in defects:
             print(f"    - {d}")
-            kinds[re.split(r"[:,(]", d)[0].strip()] += 1
+            kinds[re.sub(r"\d+", "N", re.split(r"[:,(]", d)[0].strip())] += 1
         if kind == "HIS-OK" or not a.apply:
             continue
         tag = "[" + hashlib.sha1("|".join([kind] + defects).encode()).hexdigest()[:8] + "]"
