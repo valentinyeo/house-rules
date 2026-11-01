@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Human-lane lint for Hypertask titles, descriptions and people comments.
 
-Usage: ticket-lint [--old FILE] FILE|-
+Usage: ticket-lint [--old FILE] [--shape] FILE|-
 Exit 0 = ok. Exit 1 = rejected; reasons on stderr.
 --old: only lines not already in FILE are checked (edits keep old text).
+--shape: a ticket description must have the house parts (skills/tickets).
 """
 import html
 import re
@@ -16,6 +17,8 @@ ROBOT =re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|C
 MONEY = re.compile(r"\b(money|cost|costs|pay|pays|paid|paying|payment|spend|spending|price|pricing|billing|charge|charges|budget|invoice|subscription|dollars?|usd|gbp|euros?|pounds?)\b|[£$€]", re.I)
 AMOUNT = re.compile(r"[£$€]\s?\d|\b\d+(\.\d+)?\s?(k\b|dollars?|usd|gbp|pounds?|euros?|cents?|a month|a year|per month|per year)|\b(free|no cost|no charge|nothing to pay|at no cost|zero cost)\b", re.I)
 ONCE = re.compile(r"\bonce\b", re.I)
+SECRET_ASK = re.compile(r"\b(paste|post|send|share)\b[^.?]{0,40}\b(key|token|secret|password)\b[^.?]{0,30}\b(here|in (this|the) (ticket|comment|chat))\b"
+                        r"|\b(paste|post|send)\b[^.?]{0,10}\b(key|it|them)\b[^.?]{0,6}\bhere\b", re.I)
 CODE = [
     (re.compile(r"(^|\s)(~|\.{0,2})/[\w.-]+/[\w./-]*"), "file path"),
     (re.compile(r"\b[\w-]+\.(py|sh|zig|ts|tsx|js|mjs|go|kt|json|ya?ml|toml|md|jsonl|log|html)\b"), "file name"),
@@ -36,7 +39,10 @@ def plain(text):
 
 def lines_of(text):
     out = []
+    text = re.sub(r"(?is)<blockquote\b.*?</blockquote>", "\n", text)
     for line in plain(text).splitlines():
+        if line.lstrip().startswith(">"):
+            continue  # house rule: Valentin is quoted in a > block, verbatim
         line = line.strip(" \t-*•>#|")
         if line:
             out.append(line)
@@ -61,7 +67,23 @@ def question_rules(text):
         bad.append("money ask with no amount: say what it costs him")
     if ONCE.search(ours):
         bad.append("'once X' ask he cannot answer today: ask only what he can decide now")
+    ctx = re.search(r"What this is:(.*?)Question:", ours, re.I | re.S)
+    if not ctx:
+        bad.append('no "What this is:" part above the Question: say what it is, why it reached him, what each answer changes')
+    elif len(words(ctx.group(1))) < 25:
+        bad.append('"What this is:" too thin to decide on: name the thing as he sees it, why it reached him, what each answer changes')
+    if SECRET_ASK.search(ours):
+        bad.append("asks him to paste a key into the ticket: keys go only in 1Password, name the item instead")
     return bad
+
+
+SHAPE = ["Problem", "Fix", "Done when", "Risk", "Decision"]
+
+
+def shape_rules(text):
+    heads = {l.strip().strip("#*: ").lower() for l in plain(text).splitlines()}
+    missing = [s for s in SHAPE if not any(h == s.lower() or h.startswith(s.lower() + ":") for h in heads)]
+    return [f"ticket shape misses: {', '.join(missing)} (each its own heading)"] if missing else []
 
 
 def lint(text, old=""):
@@ -87,10 +109,13 @@ def lint(text, old=""):
 
 
 def main(argv):
-    old, path = "", None
+    old, path, shape = "", None, False
     i = 0
     while i < len(argv):
-        if argv[i] == "--old":
+        if argv[i] == "--shape":
+            shape = True
+            i += 1
+        elif argv[i] == "--old":
             old = open(argv[i + 1], encoding="utf-8").read()
             i += 2
         else:
@@ -99,7 +124,7 @@ def main(argv):
     if not path:
         sys.exit(__doc__)
     text = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()
-    bad = lint(text, old)
+    bad = (shape_rules(text) if shape else []) + lint(text, old)
     if bad:
         print("ticket-lint: rejected. Human lane is pospeak + caveman (skills/tickets).", file=sys.stderr)
         for b in bad[:15]:

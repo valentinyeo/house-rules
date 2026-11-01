@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Review every ticket that waits on Valentin.
+
+Source: his inbox tab "Blocked by you" (what he sees), plus tickets parked in
+Valentin Review on the boards given (they block him without showing up there).
+
+Per ticket: is it his call (house rules: money, keys, going public, prod data
+deletion, needs him at his PC or phone, product decision), and is it written
+per skills/tickets (shape, one marked Question, plain words).
+
+Dry run prints the table. --apply posts one agent-lane note per flagged ticket
+asking its agent and lead to rewrite it, and to find and fix what made it bad.
+A note is posted once per distinct set of defects (marker in the agent log).
+
+usage: blocker-review [--boards 15,4060,2060] [--apply] [--self-test]
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from collections import Counter
+from pathlib import Path
+
+OWNER_ID = 6
+LEADS = {15: "HT Product Lead", 4060: "HT Product Lead", 2060: "Mini Boss CEO", 11514: "CI Boss"}
+SHAPE = ["Now", "Problem", "Fix", "Done when", "Risk", "Decision"]
+MARK = "blocker-review"
+
+LINT_PATH = Path(__file__).resolve().parents[2] / "tickets/scripts/ticket-lint"
+lint = importlib.machinery.SourceFileLoader("ticket_lint", str(LINT_PATH)).load_module()
+
+# House rules, "Never block Valentin on non-decisions": his calls only.
+HIS_CALLS = [
+    ("money", re.compile(r"[£$€]\s?\d|\b(cost|costs|pay|paid|price|pricing|billing|subscription|spend|budget|per month|a month|a year)\b", re.I)),
+    ("keys", re.compile(r"\b(api key|key|keys|token|secret|credential|client id|login client|oauth)\b", re.I)),
+    ("going public", re.compile(r"\b(public|publish|launch|play store|app store|store listing|announce|x\.com)\b", re.I)),
+    ("prod data deletion", re.compile(r"\b(delete|deletion|wipe|purge)\b[^.]{0,60}\b(prod|production|customer|real|user)\b", re.I)),
+    ("needs him at his PC or phone", re.compile(r"\b(your (pc|computer|desktop|laptop|phone|machine|windows|account)|at your pc|real slack|only you can)\b", re.I)),
+    ("product decision", re.compile(r"\b(scope|which (option|design|version|one)|option [ab12]|new (button|screen|element|feature|page)|wireframe|figma)\b", re.I)),
+]
+
+
+def ht(*args):
+    r = subprocess.run(["hypertask", *args, "--json"], capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def plain(html_text):
+    return lint.plain(html_text or "")
+
+
+def blocked_tickets(boards):
+    inbox = ht("inbox", "list")
+    notes = inbox.get("user_notifications") or []
+    tabs = (inbox.get("structuredData") or {}).get("tabs") or []
+    data = (inbox.get("structuredData") or {}).get("data") or []
+    found, inbox_set = {}, set()
+    for tab in tabs:
+        if tab.get("project") == "Blocked by you":
+            for i in data[tab["idx"]]:
+                t = notes[i].get("task") or {}
+                if t.get("ticketNumber"):
+                    found[t["ticketNumber"]] = t.get("projectId")
+                    inbox_set.add(t["ticketNumber"])
+    for board in boards:
+        offset = 0
+        while True:
+            page = ht("task", "list", "--project", str(board), "--section", "Valentin Review",
+                      "--status", "Normal", "--limit", "100", "--offset", str(offset)).get("tasks", [])
+            for t in page:
+                found.setdefault(t["ticketNumber"], board)
+            if not page:
+                break
+            offset += len(page)
+    return found, inbox_set
+
+
+def his_call(text):
+    return [f"{name} ({rx.search(text).group(0)})" for name, rx in HIS_CALLS if rx.search(text)]
+
+
+def question_defects(q):
+    if not q:
+        return ["no marked Question: he cannot see what you ask him"]
+    body = plain(q)
+    bad = []
+    if not re.search(r"Question:", body):
+        bad.append('marked comment has no "Question:" line')
+    if not re.search(r"recommendation", body, re.I):
+        bad.append("no recommendation right under the Question")
+    if not (re.search(r"^\s*Yes:", body, re.M | re.I) and re.search(r"^\s*No:", body, re.M | re.I)):
+        bad.append('no "Yes:" and "No:" lines saying what happens next')
+    if len([l for l in body.splitlines() if l.strip()]) > 20:
+        bad.append("Question is too long to answer in one read (over 20 lines)")
+    bad += [f"Question text: {b}" for b in lint.lint(q)[:4]]
+    return bad
+
+
+def description_defects(desc, waiting_on_him):
+    body = plain(desc)
+    heads = {l.strip().rstrip(":").lower() for l in body.splitlines() if l.strip()}
+    bad = []
+    missing = [s for s in SHAPE if not any(h == s.lower() or h.startswith(s.lower() + ":") for h in heads)]
+    if missing:
+        bad.append("description misses the ticket shape parts: " + ", ".join(missing))
+    if waiting_on_him and re.search(r"Decision\W{0,3}\s*None\b", body, re.I):
+        bad.append('description says "Decision: None" but the ticket waits on him')
+    lints = lint.lint(desc or "")
+    if lints:
+        bad.append(f"description breaks plain-words rules {len(lints)} times, first: {lints[0][:90]}")
+    return bad
+
+
+def review(t, q_text, waiting_on_him):
+    defects = description_defects(t.get("description"), waiting_on_him)
+    if waiting_on_him or t.get("section") == "Valentin Review":
+        defects += question_defects(q_text)
+    if t.get("section") == "Valentin Review" and not waiting_on_him:
+        defects.append("parked in Valentin Review but not waiting on him: invisible in his inbox")
+    if waiting_on_him and t.get("section") not in ("Valentin Review", None):
+        defects.append(f"waits on him but sits in {t.get('section')}")
+    calls = his_call((t.get("title") or "") + "\n" + plain(q_text))
+    return calls, defects
+
+
+def author(t, log):
+    for a in t.get("assignees") or []:
+        if a.get("agent"):
+            return a["agent"]["displayName"]
+    for e in log:
+        if e.get("agentName") and MARK not in (e.get("text") or ""):
+            return e["agentName"]
+    return "unknown agent"
+
+
+def note(t, calls, defects, who, lead, tag):
+    verdict = (f"words hint at his call: {', '.join(calls)}. Check them against the house rules list of his calls."
+               if calls else
+               "no house rules his-call class found.")
+    verdict += (" Not his call? Take it off him: clear waiting-on, move it out of Valentin Review, "
+                f"decide it yourself or block on {lead}.")
+    lines = [f"{MARK} {tag} for {who}, lead {lead}.",
+             f"This ticket waits on Valentin. Verdict: {verdict}",
+             "Broken against the house ticket rules (skills/tickets):"]
+    lines += [f"- {d}" for d in defects]
+    lines += ["Do:",
+              "1. Rewrite the description in the shape Now, Problem, Fix, Done when, Risk, Decision. Plain words he sees in the app.",
+              "2. If he must decide: one marked Question per the template (Question, My recommendation, Why, Yes, No). Retire older ones.",
+              "3. Find what made you write it this way (skill line, wrapper, prompt, missing lint) and fix that origin. Name the fix here.",
+              f"{lead}: check 1 to 3 are done on your next turn."]
+    return "\n".join(lines)
+
+
+def post(t, board, text):
+    if board != 2060:
+        return subprocess.run(["vcc", "activity", "add", t["ticketNumber"], text], capture_output=True, text=True)
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(text.replace("\n- ", "\n\n- ", 1).replace("\nDo:", "\n\nDo:"))
+    try:
+        return subprocess.run([str(Path.home() / "projects/ceo/bin/ceo-ht"), "comment", "add", str(t["uniqueIndex"]),
+                               "--project", "2060", "--markdown", "--file", f.name], capture_output=True, text=True)
+    finally:
+        os.unlink(f.name)
+
+
+def self_test():
+    good_desc = ("<h2>Now</h2><p>Waiting on your yes.</p><h2>Problem</h2><p>Login breaks.</p><h2>Fix</h2><p>New key.</p>"
+                 "<h2>Done when</h2><p>Login works.</p><h2>Risk</h2><p>Low.</p><h2>Decision</h2><p>One Question below.</p>")
+    t0 = {"title": "Login key"}
+    good_q = ("<p>What this is: people cannot log in to the app today.</p>"
+              "<p>The login service wants a paid key before it works again.</p>"
+              "<p>It reached you because it costs money every month.</p>"
+              "<p>Question:<strong>Buy the login key for $5 a month?</strong></p><p>My recommendation: Yes.</p>"
+              "<p>Why: login stays up.</p><p>Yes: we buy it today.</p><p>No: login stays broken.</p>")
+    bad_desc = "<p>Watch ~/runs/x.log after the deploy and report back.</p><p>Decision: None.</p>"
+    t = {**t0, "description": good_desc, "section": "Valentin Review", "blockerCommentId": 1}
+    calls, defects = review(t, good_q, True)
+    assert calls and not defects, ("good ticket flagged", calls, defects)
+    t = {"description": bad_desc, "section": "Valentin Review", "blockerCommentId": None}
+    calls, defects = review(t, None, True)
+    assert not calls and len(defects) >= 4, ("bad ticket passed", calls, defects)
+    paste_q = good_q.replace("Buy the login key for $5 a month?", "Make a free login key and paste it here?")
+    _, defects = review({**t0, "description": good_desc, "section": "Valentin Review"}, paste_q, True)
+    assert any("1Password" in d for d in defects), ("key paste passed", defects)
+    print("SELF_TEST_OK")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--boards", default="15,4060,2060")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--self-test", action="store_true")
+    p.add_argument("--only", default="", help="comma list of ticket numbers, for a canary run")
+    a = p.parse_args()
+    if a.self_test:
+        return self_test()
+    boards = [int(b) for b in a.boards.split(",") if b]
+    found, inbox_set = blocked_tickets(boards)
+    only = {x for x in a.only.split(",") if x}
+    if only:
+        found = {k: v for k, v in found.items() if k in only}
+    kinds = Counter()
+    counts = {"HIS-OK": 0, "HIS-BADLY-WRITTEN": 0, "NOT-HIS": 0}
+    posted = skipped = failed = others = 0
+    me = subprocess.run([str(Path.home() / ".agents/skills/ship/scripts/ship-identity")],
+                        capture_output=True, text=True).stdout.split("\t")[0].strip()
+    for number, board in sorted(found.items()):
+        t = (ht("task", "get", number, "--project", str(board)).get("tasks") or [{}])[0]
+        if not t:
+            continue
+        board = t.get("projectId") or board
+        waiting = number in inbox_set
+        cs = ht("comment", "list", number, "--limit", "200").get("comments") or []
+        q = next((c.get("text") or c.get("commentText") for c in cs if c.get("id") == t.get("blockerCommentId")), None)
+        if not q:
+            q = next((c.get("text") or c.get("commentText")
+                      for c in sorted(cs, key=lambda c: c.get("createdAt") or "", reverse=True)
+                      if "Question:" in plain(c.get("text") or c.get("commentText"))), None)
+        calls, defects = review(t, q, waiting)
+        kind = "NOT-HIS" if not calls else ("HIS-BADLY-WRITTEN" if defects else "HIS-OK")
+        counts[kind] += 1
+        log = ht("task", "agent-log", number).get("activities") or []
+        who, lead = author(t, log), LEADS.get(board, "the board lead")
+        url = f"https://app.hypertask.ai/detail/project-{board}/{t['uniqueIndex']}"
+        print(f"{kind:17} {number:11} {who[:18]:18} {'; '.join(calls) or '-':28} {len(defects)} defects  {url}  {t['title'][:50]}")
+        for d in defects:
+            print(f"    - {d}")
+            kinds[re.sub(r"\d+", "N", re.split(r"[:,(]", d)[0].strip())] += 1
+        if kind == "HIS-OK" or not a.apply:
+            continue
+        if lead != me:
+            others += 1
+            print(f"    left for {lead}: only a board's own lead notes its tickets")
+            continue
+        tag = "[" + hashlib.sha1("|".join([kind] + defects).encode()).hexdigest()[:8] + "]"
+        if any(MARK in (e.get("text") or "") and tag in (e.get("text") or "") for e in log):
+            skipped += 1
+            continue
+        r = post(t, board, note(t, calls, defects, who, lead, tag))
+        if r.returncode:
+            failed += 1
+            print(f"    POST FAILED: {(r.stderr or r.stdout).strip()[:200]}", file=sys.stderr)
+        else:
+            posted += 1
+    for k, v in kinds.most_common():
+        print(f"DEFECT {v:3} {k}")
+    summary = " ".join(f"{k}={v}" for k, v in counts.items())
+    extra = (f" notes posted={posted} already-noted={skipped} failed={failed} left-for-other-leads={others}"
+             if a.apply else "")
+    print(f"SUMMARY {len(found)} tickets wait on Valentin: {summary}{extra}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
