@@ -36,7 +36,10 @@ def plain(text):
 
 def lines_of(text):
     out = []
+    text = re.sub(r"(?is)<blockquote\b.*?</blockquote>", "\n", text)
     for line in plain(text).splitlines():
+        if line.lstrip().startswith(">"):
+            continue  # house rule: Valentin is quoted in a > block, verbatim
         line = line.strip(" \t-*•>#|")
         if line:
             out.append(line)
