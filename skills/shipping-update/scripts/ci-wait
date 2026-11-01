@@ -80,8 +80,9 @@ def measure(repo, days, target, now):
         reran = any(r.get("run_attempt", 1) > 1 for r in group)
         reruns += reran
         group = [first_attempt(repo, r) for r in group]
-        start = min(ts(r["created_at"]) for r in group)
-        end = max(ts(r["updated_at"]) for r in group)
+        timed = [r for r in group if r["conclusion"] != "skipped"] or group
+        start = min(ts(r["created_at"]) for r in timed)
+        end = max(ts(r["updated_at"]) for r in timed)
         samples.append({
             "sha": sha[:7], "branch": group[0]["head_branch"], "event": group[0]["event"],
             "queued": iso(start), "wait_min": round((end - start).total_seconds() / 60, 1),
