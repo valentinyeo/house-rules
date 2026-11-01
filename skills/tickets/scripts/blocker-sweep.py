@@ -77,12 +77,15 @@ def main(argv):
         while True:
             page = cli("task", "list", "--project", board, "--limit", "200", "--offset", str(offset)).get("tasks", [])
             tasks += page
-            if len(page) < 200:
+            if not page:
                 break
-            offset += 200
+            offset += len(page)
         for t in tasks:
             marked = t.get("blockerCommentId")
             if not marked:
+                if t.get("section") == "Valentin Review":
+                    counts["NO-QUESTION"] += 1
+                    print(f"NO-QUESTION\t{t['ticketNumber']}\t{t.get('id')}\tno blocker comment\t{t.get('title', '')[:60]}\tin Valentin Review without a marked Question")
                 continue
             cs = cli("comments", "list", t["ticketNumber"])
             cs = sorted(cs.get("comments", []) if isinstance(cs, dict) else cs, key=lambda c: c.get("createdAt", ""))
