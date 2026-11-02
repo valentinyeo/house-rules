@@ -14,6 +14,12 @@ Valentin 2026-10-28: "description -> pospeak, comments pospeak, agent lane agent
 - Answer first. Product-owner words.
 - No file paths, function names, logs or transcript paths.
 - Links in full and clickable.
+- Mention a person with a real mention, never a plain name. A plain name sends no notification.
+  The CLI has no mention option yet (https://app.hypertask.ai/detail/project-15/8268). Until then put this in the comment text:
+  `<span data-type="mention" class="mention" data-id="Full Name" data-label="name-<userId>" data-mention-suggestion-char="@">Full Name</span>`
+  Get `<userId>` from `creatorId` in `hypertask comments list <ticket>`, or from an existing mention on the ticket.
+  Read the comment back; `name-<userId>` must be in it.
+  Valentin 2026-11-02: "why hast he cli no guidance and toosl for mentioning".
 - Title says the user-visible problem or outcome.
   Bad: "Chat sync audit: pane_missing drift".
   Good: "Chat messages missing after reload".
