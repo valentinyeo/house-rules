@@ -32,30 +32,49 @@ Read the list. A wrong call? Fix the rule in the script, not by hand. Rerun.
 Same command plus `--apply`. Writes go through vcc as your agent, never Valentin's login.
 Each archived ticket gets an agent lane note with the reason. Undo: set status back to Normal.
 
-## 4. Review Valentin's blockers
+## 4. Take blockers off Valentin
 Valentin, 2026-11-02:
 > it should include a review of the tickets that i am the blocker on and evaluate if the blocker is justified and if it is is the blocker sticking to hteh /house-rules for ticket wrigint and if it isn't place the comment in the ticket to ask the lead or agent to write thet icket properly and to review what caused this ticket to be written badly and ideally fix the origin
 
-`~/.local/share/house-rules/skills/hypertask-triage/scripts/blocker-review [--boards 15,4060,2060]`
+> rewrite /hypertask-triage so it does this next time by itself?
+
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/blocker-review --boards 15,4060 --apply`
 
 It reads his inbox tab "Blocked by you" plus every Valentin Review column.
-Per ticket it prints a verdict and the broken rules:
-- NOT-HIS: no house-rules "his call" class (money, keys, going public, prod data deletion, at his PC, product). Clear it per `/unblock`.
-- HIS-BADLY-WRITTEN: his call, but the shape, the marked Question or the plain words break `skills/tickets/`.
+It also runs by itself daily at 07:30 Berlin (timer `blocker-review`, log `~/.local/state/blocker-review.log`). Run it by hand on every triage too.
+
+Verdicts, from the newest Question on the ticket:
+- CLEAR: the script clears it itself. He answered and it is not money, keys or his hands. Or no Question exists. Or it asks him to switch a flag Off.
+- ANSWERED: he replied, but it is money, keys or his hands. A note tells the lead to act on his reply.
+- NOT-HIS: no his-call words. A regex guess: read the ticket, then clear it yourself.
+- HIS-BADLY-WRITTEN: his call, but breaks `skills/tickets/`. A note asks for a rewrite and an origin fix.
 - HIS-OK: leave it.
 
-The verdict is a regex guess. Read each NOT-HIS ticket before clearing it.
-Then rerun with `--apply`: every flagged ticket on your own boards gets one agent-lane note for its agent.
+Clear = agent-lane note, his name off, ticket back to its home column (board 15: Bugs, Features or Improvements by title and label; 4060: Backlog).
 Tickets on another lead's board are listed as "left for <lead>". That lead runs this step on its turn.
-The note asks for a rewrite, one proper Question, and a fix at the origin (skill, wrapper, prompt).
-A rerun posts nothing new until the defects change.
-Same cause on several tickets? Fix that origin yourself, or file it for the owning lead.
 
-## 5. Report to Valentin
-Caveman, four lines:
+## 5. Read every NOT-HIS and ANSWERED row
+Do not stop at the script. Read each one:
+- His own ticket asked for it? That is his yes. Clear it.
+- He said Yes already, or the runner's own advice is No? Clear or close it.
+- Waits on other work, not on him? Clear it.
+- Old, and he said he does not know what it is? Archive it.
+- Real money, keys, going public, deleting customer data, his hands? Keep.
+
+Clear by hand: `blocker-review --clear <ticket> --to home|archive|<section id> --why "<reason>"`.
+Same reason twice? Add the class to `skills/unblock/learned.md`. When a script can see it, add it to `drift()` in blocker-review too.
+
+## 6. Look for levers
+Group what stays with him by class: keys, money, publishing, at his PC.
+Several in one class? Propose one fix that ends the class. Examples: one page with every key step for one sitting, a one-time setup, a standing small budget.
+Only money, keys and going public need his yes. Build the rest.
+
+## 7. Report to Valentin
+Caveman:
 - Archived N of M done tickets.
 - Kept K, grouped by reason, each a full https link.
-- Blockers: N wait on you, X not your call, Y badly written, notes posted.
+- Blockers: N wait on you, X cleared, Y badly written, notes posted.
+- Levers found, each with what it ends.
 - Wrong calls fixed in the rule, if any.
 
-Auto-archive on a timer comes later, after Valentin trusts the manual runs.
+Auto-archive of done tickets on a timer comes later, after Valentin trusts the manual runs.
