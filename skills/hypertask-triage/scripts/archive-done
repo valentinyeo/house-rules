@@ -17,10 +17,14 @@ DEFAULT_DONE = ['Done']
 # Boards whose titles carry no [FEATURE] tag: anything not plainly upkeep counts as a feature he sees.
 UNTAGGED = {'2060'}
 UPKEEP_LABELS = {'bug', 'ci', 'infra'}
+# Check and runner tooling: a [FEATURE] tag there is still nothing he sees in the app.
+PIPELINE_LABELS = {'ci', 'hypertask ci'}
 UPKEEP_TITLE = re.compile(
     r'broken|crash|stopped working|stuck|fails?\b|cannot|can.t|missing|falls behind|steals|lost|'
     r'leaves|never|proof|prove|measure|audit|ticket quality|fixture|^\[INFRA\]', re.I)
 WRITER = {'2060': 'ceo-ht'}
+# Auto-made platform mirrors and closed duplicates: the original ticket carries the feature.
+COPY_TITLE = re.compile(r'^match the linked request|^duplicate\b|stays on android$', re.I)
 FEATURE = re.compile(r'\[(FEATURE|IMPROVE(MENT)?)\]|^(FEATURE|IMPROVEMENT)\b', re.I)
 FEATURE_KINDS = {'feature', 'improvement'}
 HIGH_RISK = re.compile(
@@ -59,7 +63,10 @@ def verdict(t, kinds, board):
     text = f"{t['title']} {' '.join(names)}"
     if t.get('blockerCommentId'):
         return 'keep', 'open blocking question'
-    upkeep = re.search(r'\[dep-pr-\d+\]|^stack upgrade|^\[(INFRA|BUGFIX|BUG)\]', t['title'], re.I)
+    if COPY_TITLE.search(t['title']) or 'MP-PAIR:' in (t.get('description') or ''):
+        return 'archive', 'mirror or duplicate of another ticket'
+    upkeep = re.search(r'\[dep-pr-\d+\]|^stack upgrade|^\[(INFRA|BUGFIX|BUG)\]', t['title'], re.I) \
+        or {n.lower() for n in names} & PIPELINE_LABELS
     if not upkeep and (FEATURE.search(t['title']) or any(FEATURE.search(n) for n in names)
             or kinds.get(str(t['uniqueIndex'])) in FEATURE_KINDS):
         return 'keep', 'new or changed feature'
