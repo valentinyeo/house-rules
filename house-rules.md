@@ -28,7 +28,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 ## Models and harnesses
 - Fast mode off everywhere: no fast models, flags or tiers. (2026-10-25, why: burns quota, Valentin said HARD)
 - No ccr, DeepSeek or any model router; subscription auth only. (2026-10-25, why: no surprise bills or proxies)
-- Exception: 5 hax runners `ht-or-runner-1..5` run DeepSeek on the OpenCode Go subscription (hax provider opencode-go, presets go-deepseek, go-deepseek-pro). Only key "opencode go". No OpenRouter. Also CI Boss runners `ht-ci-runner-N`. Nobody else. Ticket YPER4-920. (2026-10-31, why: "move all deepseek runenrs there")
+- Exception: 10 hax runners `ht-or-runner-1..10` run DeepSeek on the OpenCode Go subscription (hax provider opencode-go, presets go-deepseek, go-deepseek-pro). Only key "opencode go". No OpenRouter. Also CI Boss runners `ht-ci-runner-N`. Nobody else. Ticket YPER4-920. (2026-10-31, why: "move all deepseek runenrs there")
 - SF solo sessions `postbox` and `multiprompt-android` also run hax DeepSeek 4.1 Flash on OpenCode Go. Desktop `multiprompt` stays Codex. (2026-10-31, why: "mutlibot codex leave alone")
 - Say "DeepSeek 4.1 Flash" for their flagship. Never "V4.1": the V trips models. (2026-10-31, why: "the v trips the model up")
 - 1Password reads are cached. A missing item is probably stale cache. stack-key refreshes it on a miss and on --list. (2026-10-31, why: "1pass is cached")
@@ -94,6 +94,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Managers use `/manager-shift` at every check-in. Board plus handover holds all durable memory. Read one digest every 30–60 minutes. (2026-10-26, why: bound context, avoid repeated manager wakes)
 - No agent-to-agent messaging. Only on Valentin's request, per case; then it closes again. Agents talk only on tickets. Runners do the job end to end. Stuck after two tries? Mark the ticket blocked on HT Product Lead, write why, take the next ticket. His decision, money or keys? Valentin Review plus a Question. (2026-10-27, why: "they should only talk on tickets")
 - CI Boss is the CI service for both fleets. One agent "CI Boss" on boards 15, 4060, 2060. It owns all CI work, the CI label and CI views. It runs its own hax DeepSeek runners `ht-ci-runner-N`. It never takes product runners `ht-or-runner-1..5`. App runners do no CI work. They file CI tickets with the CI label. (2026-10-31, why: "your own software factory service ... doing everytrhing CI")
+- Runner split: CI Boss runs 5 runners, CI only. HT Product Lead runs 10 runners, app features only. CI banned for app runners. (2026-11-03, why: "ci boss 5 runners ci only")
 - Hypertask CI tickets live on board Hypertask CI (11514, HYCI), never 15 or 4060. Labels CI and Hypertask CI. CI Boss owns it. Only CI Runners work there. (2026-10-31, why: "otherwise we are still mixing prod/ci")
 - Leads with runners empower, never do runner work. Every block fix ships as a skill, tool or script. No agent gets blocked twice for one reason. (2026-10-27, why: "empowerment, not helping them and you do it")
 - Report blockers to your own project's lead, never another project's manager. (2026-10-25, why: SF runners pinged Poteto instead of Mini Boss)
