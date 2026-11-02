@@ -72,20 +72,50 @@ def same(note, title):
     return difflib.SequenceMatcher(None, want, gist).ratio()
 
 
-def where(tool):
-    words = [w for w in re.sub(r"--\S+", " ", tool.lower()).split() if w not in ("hypertask", "the")]
-    return " ".join(words)
+STOP = {"hypertask", "the", "a", "an", "for", "of", "on", "in", "to", "command", "cli", "board", "my"}
 
 
-def recorded_where(ticket):
+def stems(text):
+    return {w.rstrip("s") for w in re.findall(r"[a-z0-9_]+", re.sub(r"--\S+", " ", text.lower())) if w not in STOP}
+
+
+def cli_commands():
+    r = run("hypertask", "capabilities", "--json")
+    try:
+        tree = json.loads(r.stdout)
+    except ValueError:
+        return []
+    paths = []
+
+    def walk(node, prefix):
+        for c in node.get("commands") or []:
+            for name in [c["name"], *(c.get("aliases") or [])]:
+                path = f"{prefix} {name}".strip()
+                paths.append((path if name == c["name"] else f"{prefix} {c['name']}".strip(), stems(path)))
+            walk(c, f"{prefix} {c['name']}".strip())
+    walk(tree, "")
+    return paths
+
+
+def where(tool, catalog=None):
+    # Agents name one command many ways ("section list for a board"); snap it to the CLI's own catalog.
+    words = stems(tool)
+    if catalog and not tool.strip().startswith(("hypertask_", "vcc")):
+        score, path = max(((len(words & s) / len(words | s), p) for p, s in catalog if s), default=(0, ""))
+        if score >= 0.5:
+            return path
+    return " ".join(sorted(words))
+
+
+def recorded_where(ticket, catalog):
     m = re.search(r"It happened in ([^<]*?)\.<", ticket.get("description") or "")
-    return where(m.group(1)) if m else ""
+    return where(m.group(1), catalog) if m else ""
 
 
-def duplicate(kind, tool, note, tickets):
+def duplicate(kind, place, note, tickets, catalog):
     # Agents word one problem many ways; like the app's fingerprint, kind plus place decides.
     for t in tickets:
-        if t.get("title", "").startswith(f"Agent feedback, {kind}:") and recorded_where(t) == where(tool):
+        if t.get("title", "").startswith(f"Agent feedback, {kind}:") and recorded_where(t, catalog) == place:
             return t
     best = max(tickets, key=lambda t: same(note, t.get("title", "")), default=None)
     return best if best and same(note, best.get("title", "")) >= 0.8 else None
@@ -118,11 +148,13 @@ def main():
     if len(note) < 12:
         sys.exit("agent-feedback: say what happened in a short sentence")
     tool = clean(a.tool)[:40]
-    if where(tool) in ("", "cli", "app", "mcp", "api", "web"):
+    if not stems(tool) - {"app", "mcp", "api", "web"}:
         sys.exit("agent-feedback: --tool must name the exact command, MCP tool or screen, like 'sections list' or 'inbox'")
     detail = clean(a.detail)
     lane = f"{note} Detail: {detail}" if detail else note
-    found = duplicate(a.kind, tool, note, open_feedback())
+    catalog = cli_commands()
+    place = where(tool, catalog)
+    found = duplicate(a.kind, place, note, open_feedback(), catalog)
     if found:
         url = f"https://app.hypertask.ai/detail/project-{BOARD}/{found['uniqueIndex']}"
         if not a.dry_run:
@@ -136,7 +168,7 @@ def main():
         print(f"would file on board {BOARD} section {SECTION[a.kind]}: {title}")
         return
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
-        f.write(description(a.kind, tool))
+        f.write(description(a.kind, place))
     r = run("vcc", "task", "create", "--project", str(BOARD), "--section", SECTION[a.kind],
             "--priority", "medium", "--labels", LABEL, "--title", title, "--description-file", f.name, "--markdown")
     try:
