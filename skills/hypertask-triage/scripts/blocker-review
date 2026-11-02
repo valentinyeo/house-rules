@@ -21,6 +21,7 @@ usage: blocker-review [--boards 15,4060,2060] [--apply] [--self-test]
        blocker-review --clear HTPR-1 --to home --why "reason"
 """
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import importlib.machinery
 import json
@@ -90,6 +91,39 @@ def blocked_tickets(boards):
                 break
             offset += len(page)
     return found, inbox_set
+
+
+PARKED_COLUMNS = ("Agent Blocked (Infra)", "Agent Blocked")
+PARKED_CLASSES = [
+    ("design: UX needed", re.compile(r"\b(figma|wireframe|design (approval|hold|handoff)|approved design)\b", re.I)),
+    ("merged: QA", re.compile(r"\b(merged|PASS|QA pass\w*)\b")),
+    ("waits on a ticket or date: home column", re.compile(r"\b(prerequisite|waits? (on|for|until)|after .{0,40} ships|start after)\b", re.I)),
+]
+
+
+def parked(boards, min_age_days=1):
+    """Lists tickets parked in an Agent Blocked column for over a day, with the column they belong in."""
+    now = datetime.now(timezone.utc)
+    rows = []
+    for board in boards:
+        for column in PARKED_COLUMNS:
+            for t in ht("task", "list", "--project", str(board), "--section", column, "--limit", "200").get("tasks", []):
+                stamp = t.get("updatedAt") or t.get("createdAt") or ""
+                try:
+                    age = (now - datetime.fromisoformat(stamp.replace("Z", "+00:00"))).days
+                except ValueError:
+                    age = 0
+                if age < min_age_days:
+                    continue
+                cs = ht("comment", "list", t["ticketNumber"], "--limit", "5").get("comments") or []
+                last = plain(max(cs, key=lambda c: c.get("createdAt") or "").get("text") if cs else "")
+                where = next((name for name, rx in PARKED_CLASSES if rx.search(last)), None)
+                where = where or ("his call: Valentin Review with one Question" if his_call(last) else "real infra: stays")
+                rows.append((where, t["ticketNumber"], age, f"https://app.hypertask.ai/detail/project-{board}/{t['uniqueIndex']}"))
+    for where, number, age, url in sorted(rows):
+        print(f"PARKED {number:11} {age:3}d  {where:42} {url}")
+    misplaced = sum(1 for r in rows if not r[0].startswith("real infra"))
+    print(f"PARKED SUMMARY {len(rows)} parked over {min_age_days}d, {misplaced} belong in another column")
 
 
 def his_call(text):
@@ -338,6 +372,7 @@ def main():
     extra = (f" cleared={cleared} notes posted={posted} already-noted={skipped} failed={failed} left-for-other-leads={others}"
              if a.apply else "")
     print(f"SUMMARY {len(found)} tickets wait on Valentin: {summary}{extra}")
+    parked(boards)
     return 1 if failed else 0
 
 
