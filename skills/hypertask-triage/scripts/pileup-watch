@@ -164,7 +164,11 @@ def main():
                 vcc("activity", "add", alarm["ticketNumber"],
                     f"pileup-watch {now:%Y-%m-%d}: back under cap ({len(tickets)}/{cap}). Closing.")
                 r = vcc("task", "update", alarm["ticketNumber"], "--section", a.done_section)
+                if r.returncode:
+                    # The ship guard refuses Done for tickets without a PR (YPER4-993); an alarm has no code.
+                    r = vcc("task", "update", alarm["ticketNumber"], "--status", "Archive")
                 failed += r.returncode != 0
+                print(f"    alarm {alarm['ticketNumber']} {'close FAILED: ' + (r.stderr or r.stdout).strip()[:200] if r.returncode else 'closed'}")
     print(f"SUMMARY {over} column(s) over cap")
     return 1 if failed else 0
 
