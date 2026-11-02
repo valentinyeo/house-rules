@@ -59,9 +59,9 @@ def words(sentence):
 
 
 def question_rules(text):
-    if not re.search(r"Question:", text, re.I):
-        return []
     ours = QUOTE.sub(" ", plain(text))
+    if not re.search(r"(?im)^[\s*_-]*Question:", ours):
+        return []
     bad = []
     if MONEY.search(ours) and not AMOUNT.search(ours):
         bad.append("money ask with no amount: say what it costs him")
