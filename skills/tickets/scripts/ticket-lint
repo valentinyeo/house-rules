@@ -105,6 +105,13 @@ def lint(text, old=""):
             n = len(words(s))
             if n > MAX_WORDS:
                 bad.append(f"{n} words, max {MAX_WORDS}: {s[:100]}")
+    # The server also counts quoted words. Keep his words verbatim, split across > lines.
+    for line in plain(text).splitlines():
+        if line.lstrip().startswith(">"):
+            for s in sentences(line.lstrip(" >")):
+                n = len(words(s))
+                if n > MAX_WORDS:
+                    bad.append(f"quote line {n} words, max {MAX_WORDS}: split his words across > lines: {s[:80]}")
     return bad
 
 
