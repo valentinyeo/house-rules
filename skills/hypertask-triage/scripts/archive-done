@@ -6,6 +6,7 @@ the reason in each ticket's agent lane. Archive is reversible: status Normal.
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -22,7 +23,7 @@ PIPELINE_LABELS = {'ci', 'hypertask ci'}
 UPKEEP_TITLE = re.compile(
     r'broken|crash|stopped working|stuck|fails?\b|cannot|can.t|missing|falls behind|steals|lost|'
     r'leaves|never|proof|prove|measure|audit|ticket quality|fixture|^\[INFRA\]', re.I)
-WRITER = {'2060': 'ceo-ht'}
+WRITER = {'2060': os.path.expanduser('~/projects/ceo/bin/ceo-ht')}
 # Auto-made platform mirrors and closed duplicates: the original ticket carries the feature.
 COPY_TITLE = re.compile(r'^match the linked request|^duplicate\b|stays on android$', re.I)
 FEATURE = re.compile(r'\[(FEATURE|IMPROVE(MENT)?)\]|^(FEATURE|IMPROVEMENT)\b', re.I)
