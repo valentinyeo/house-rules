@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Catch board pile-ups before they grow.
+
+Every waiting column has a cap. Over the cap, one urgent alarm ticket goes to
+the alarm board, naming the column, the count, the oldest tickets and the
+owner who must clear it. A rerun adds a count note to the open alarm instead
+of filing a second one. Back under the cap: the alarm gets a note and goes to
+Done.
+
+Valentin, 2026-11-02: "this type of pile up is not acceptable".
+
+usage: pileup-watch [--caps 15:QA=15,4060:Agent Blocked=5] [--alarm-board 4060]
+                    [--alarm-section 10414] [--done-section 10412] [--apply]
+Without --caps it uses the Hypertask caps below. Other fleets pass their own.
+"""
+import argparse
+import json
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+# board: {column: (cap, owner)}. Columns where work waits on someone; home columns are not capped.
+HT_CAPS = {
+    15: {
+        "Agent Blocked (Infra)": (5, "HT Product Lead"),
+        "QA": (15, "runners via HT Product Lead"),
+        "AI Review": (10, "HT Product Lead"),
+        "Valentin Review": (10, "HT Product Lead"),
+        "UX needed": (20, "HT Design Lead"),
+        "UX Sign-off": (10, "HT Design Lead"),
+        "Flag: Only Me + QA": (10, "HT Product Lead"),
+        "In Progress": (15, "HT Product Lead"),
+    },
+    4060: {
+        "Agent Blocked": (5, "HT Product Lead"),
+        "AI Review": (10, "HT Product Lead"),
+        "Valentin Review": (10, "HT Product Lead"),
+        "In Progress": (15, "HT Product Lead"),
+    },
+}
+STALE_DAYS = 3
+TITLE = "Pile-up: {column} on board {board}"
+
+
+def ht(*args):
+    r = subprocess.run(["hypertask", *args, "--json"], capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def vcc(*args):
+    return subprocess.run(["vcc", *args], capture_output=True, text=True)
+
+
+def parse_caps(text):
+    caps = {}
+    for item in filter(None, (x.strip() for x in text.split(","))):
+        board, rest = item.split(":", 1)
+        column, cap = rest.rsplit("=", 1)
+        caps.setdefault(int(board), {})[column] = (int(cap), "the board lead")
+    return caps
+
+
+def age_days(t, now):
+    stamp = t.get("updatedAt") or t.get("createdAt") or ""
+    try:
+        return (now - datetime.fromisoformat(stamp.replace("Z", "+00:00"))).days
+    except ValueError:
+        return 0
+
+
+def column_tickets(board, column):
+    tickets, offset = [], 0
+    while True:
+        page = ht("task", "list", "--project", str(board), "--section", column, "--status", "Normal",
+                  "--limit", "100", "--offset", str(offset)).get("tasks", [])
+        tickets += page
+        if len(page) < 100:
+            return tickets
+        offset += len(page)
+
+
+def open_alarm(alarm_board, done_section, title):
+    found = ht("task", "search", title, "--project", str(alarm_board)).get("tasks", [])
+    return next((t for t in found if t.get("title") == title and t.get("section") not in ("Done", "Archive")), None)
+
+
+def description(board, column, count, cap, stale, owner):
+    board_url = f"https://app.hypertask.ai/project?id={board}"
+    lines = [
+        "> this type of pile up is not acceptable",
+        "",
+        f"Valentin, 2026-11-02. Board: {board_url}",
+        "",
+        "**Now**",
+        f"- {column} holds {count} tickets. The cap is {cap}.",
+        f"- {len(stale)} of them waited over {STALE_DAYS} days.",
+        "",
+        "**Problem**",
+        "- Work piles up there instead of moving.",
+        "",
+        "**Fix**",
+        f"- Owner: {owner}.",
+        "- Move each ticket to where it belongs, with a note.",
+        "- Merged work gets a live check, then Done.",
+        "- Design goes to UX needed. His call gets one Question.",
+        "- Waiting on a ticket or date goes home, with a link.",
+        "",
+        "**Done when**",
+        f"- The column holds {cap} tickets or fewer.",
+        "",
+        "**Risk:** a ticket lands in the wrong column. Undo: move it back.",
+        "",
+        "**Decision:** none.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def oldest(stale, board, n=10):
+    return ", ".join(f"https://app.hypertask.ai/detail/project-{board}/{t['uniqueIndex']} ({d}d)" for d, t in stale[:n])
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--caps", default="")
+    p.add_argument("--alarm-board", type=int, default=4060)
+    p.add_argument("--alarm-section", default="10414")
+    p.add_argument("--done-section", default="10412")
+    p.add_argument("--labels", default="Infra")
+    p.add_argument("--apply", action="store_true")
+    a = p.parse_args()
+    caps = parse_caps(a.caps) if a.caps else HT_CAPS
+    now = datetime.now(timezone.utc)
+    over = failed = 0
+    for board, columns in caps.items():
+        for column, (cap, owner) in columns.items():
+            tickets = column_tickets(board, column)
+            stale = sorted(((age_days(t, now), t) for t in tickets if age_days(t, now) > STALE_DAYS),
+                           key=lambda x: -x[0])
+            title = TITLE.format(column=column, board=board)
+            pile = len(tickets) > cap
+            over += pile
+            print(f"{'PILEUP' if pile else 'ok':6} board {board:5} {column:24} {len(tickets):3}/{cap:<3} stale>{STALE_DAYS}d: {len(stale)}")
+            if not a.apply:
+                continue
+            alarm = open_alarm(a.alarm_board, a.done_section, title)
+            if pile and not alarm:
+                with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+                    f.write(description(board, column, len(tickets), cap, stale, owner))
+                r = vcc("task", "create", "--project", str(a.alarm_board), "--section", a.alarm_section,
+                        "--priority", "urgent", "--labels", a.labels, "--title", title,
+                        "--description-file", f.name, "--markdown")
+                failed += r.returncode != 0
+                print(f"    alarm {'FAILED: ' + (r.stderr or r.stdout).strip()[:200] if r.returncode else 'filed'}")
+            elif pile and alarm:
+                r = vcc("activity", "add", alarm["ticketNumber"],
+                        f"pileup-watch {now:%Y-%m-%d}: {column} on board {board} holds {len(tickets)} (cap {cap}); "
+                        f"{len(stale)} stale over {STALE_DAYS}d. Oldest: {oldest(stale, board)}")
+                failed += r.returncode != 0
+            elif alarm:
+                vcc("activity", "add", alarm["ticketNumber"],
+                    f"pileup-watch {now:%Y-%m-%d}: back under cap ({len(tickets)}/{cap}). Closing.")
+                r = vcc("task", "update", alarm["ticketNumber"], "--section", a.done_section)
+                failed += r.returncode != 0
+    print(f"SUMMARY {over} column(s) over cap")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -69,7 +69,8 @@ Group what stays with him by class: keys, money, publishing, at his PC.
 Several in one class? Propose one fix that ends the class. Examples: one page with every key step for one sitting, a one-time setup, a standing small budget.
 Only money, keys and going public need his yes. Build the rest.
 
-## 6b. Sweep the Agent Blocked columns
+## 6b. Sweep the Agent Blocked columns and cap every waiting column
+`pileup-watch --apply` runs daily after blocker-review. Over a cap it files one urgent alarm ticket on board 4060. Clear the column that day.
 Valentin, 2026-11-02:
 > 99 tickets in agent blocked infrA? wtf is going ion there?
 
