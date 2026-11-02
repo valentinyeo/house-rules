@@ -11,3 +11,6 @@ Agents decide these themselves. Never post them as a Question to him.
 - Confirming an app update works: agent updates and tests itself. (2026-10-30, why: IGSH-1229)
 - Question asks him to do what he already did (he flipped the flag himself): stale, clear it. (2026-10-30, why: HTPR-7763)
 - Question asks him to approve what he just asked for: that is his yes. Do it. (2026-10-30, why: YPER4-904)
+- Asking him to switch a flag Off: never. Off is his safety switch. Repair instead. (2026-11-02, why: HTPR-8149; "you are not allowed to post to off")
+- Question waits on prerequisite work, not on him: move it back, no Question. (2026-11-02, why: HTPR-7979)
+- Agents deleting only empty tags, merges keep every ticket: agent decides. Not prod data deletion. (2026-11-02, why: YPER4-918)
