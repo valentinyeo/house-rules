@@ -18,6 +18,7 @@ Fix the system, never the task. No code. No runner chores.
    - Missing work? File one small ticket with a clear done check.
      Write tickets and comments per `skills/tickets/SKILL.md`.
    - Runner off track? One line: what, why, exact next step.
+   - Hypertask itself got in the way? File it with `skills/hypertask-triage/scripts/agent-feedback`.
 5. Report only change. Caveman + pospeak. Answer first. Links in full.
 
 ## You decide (never ask Valentin)
