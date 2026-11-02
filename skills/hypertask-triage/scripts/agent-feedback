@@ -11,7 +11,7 @@ Valentin, 2026-11-02: "agents workign with hypertask cli or otherwise can file
 FEEDBACK for us on board 15". Interim lever until HTPR-8275 makes
 `hypertask feedback --kind` native (YPER4-1001).
 
-usage: agent-feedback --kind bug|friction|missing|idea [--tool NAME] [--detail TEXT] [--dry-run] "plain summary"
+usage: agent-feedback --kind bug|friction|missing|idea --tool NAME [--detail TEXT] [--dry-run] "plain summary"
 
 The summary becomes the ticket title: plain words a product owner reads, no
 flags, field names or code. Technical bits go in --detail (agent lane).
@@ -72,13 +72,27 @@ def same(note, title):
     return difflib.SequenceMatcher(None, want, gist).ratio()
 
 
-def duplicate(note, tickets):
+def where(tool):
+    words = [w for w in re.sub(r"--\S+", " ", tool.lower()).split() if w not in ("hypertask", "the")]
+    return " ".join(words)
+
+
+def recorded_where(ticket):
+    m = re.search(r"It happened in ([^<]*?)\.<", ticket.get("description") or "")
+    return where(m.group(1)) if m else ""
+
+
+def duplicate(kind, tool, note, tickets):
+    # Agents word one problem many ways; like the app's fingerprint, kind plus place decides.
+    for t in tickets:
+        if t.get("title", "").startswith(f"Agent feedback, {kind}:") and recorded_where(t) == where(tool):
+            return t
     best = max(tickets, key=lambda t: same(note, t.get("title", "")), default=None)
     return best if best and same(note, best.get("title", "")) >= 0.8 else None
 
 
 def description(kind, tool):
-    where = f"It happened in {tool}." if tool else "The agent note says where."
+    where = f"It happened in {tool}."
     return "\n".join([
         "**Now**", f"- {WHAT[kind]}", f"- {where}",
         "- The agent's note is in the agent log.", "",
@@ -93,7 +107,7 @@ def description(kind, tool):
 def main():
     p = argparse.ArgumentParser(description="File feedback about Hypertask on board 15.")
     p.add_argument("--kind", required=True, choices=sorted(SECTION))
-    p.add_argument("--tool", default="", help="where it happened: cli, mcp, app, api, vcc, or a command name")
+    p.add_argument("--tool", required=True, help="the exact command, MCP tool or screen: 'sections list', 'hypertask_comments', 'inbox'")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--detail", default="", help="technical detail for the agent lane: command, field, error")
     p.add_argument("note", metavar="summary")
@@ -104,9 +118,11 @@ def main():
     if len(note) < 12:
         sys.exit("agent-feedback: say what happened in a short sentence")
     tool = clean(a.tool)[:40]
+    if where(tool) in ("", "cli", "app", "mcp", "api", "web"):
+        sys.exit("agent-feedback: --tool must name the exact command, MCP tool or screen, like 'sections list' or 'inbox'")
     detail = clean(a.detail)
     lane = f"{note} Detail: {detail}" if detail else note
-    found = duplicate(note, open_feedback())
+    found = duplicate(a.kind, tool, note, open_feedback())
     if found:
         url = f"https://app.hypertask.ai/detail/project-{BOARD}/{found['uniqueIndex']}"
         if not a.dry_run:
