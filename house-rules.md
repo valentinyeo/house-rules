@@ -113,4 +113,5 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 ## Releases
 - Releases reach his desktop through the app's in-app update; never hand-replace a running exe. (2026-10-25, why: updater is the tested path)
 - Runners may read prod logs, health checks and flag state. Read only, for own work. (2026-10-25, why: Valentin via Thorsten Ball post)
-- Agents switch flags themselves. Never ask him. Off is his safety switch: never ask him for Off. Money flags keep the money lock. (2026-11-02, why: "agents should swithc flags")
+- Agents switch flags themselves. Never ask him. (2026-11-02, why: "agents should swithc flags")
+- Every flag goes to Everyone. Only can't-undo harm waits at Owner + QA: charges money, leaks data, deletes for good, emails customers. Failed live check: roll the change back, flag stays on. Never switch Off, never park a flag. (2026-11-02, why: "saftey comes from roll back")
