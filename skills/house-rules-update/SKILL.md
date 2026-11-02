@@ -16,6 +16,7 @@ Any manager or session may contribute. One PR per batch, same day.
 - End with `(YYYY-MM-DD, why: <8 words max>)`; quote Valentin if short.
 - Put it under the right existing section. New section only if none fits.
 - Already covered? Edit that line instead. Never add a duplicate. Contradicts a line? Replace it; newest wins.
+- A rule against something that keeps happening ships with its enforcer in the same PR: a script, timer, lint or tool refusal. Prose alone is not a fix. Name the enforcer in the rule line. Valentin, 2026-11-02: "this type of pile up is not acceptable pls setup processes that prvent that fix the /house-rules-update for it".
 - Keep the file lean. Long procedures become a skill in `skills/<name>/SKILL.md`, with one pointer line in the file.
 
 ## 3. PR
