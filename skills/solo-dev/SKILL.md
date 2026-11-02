@@ -55,6 +55,8 @@ Run the board check below before this loop.
 4. Push. Never build or test on the VPS. CI on GitHub-hosted runners does it (free, public repo).
 5. Green push means a release. Confirm it: `gh release list -R <owner>/<repo> --limit 1`, and check the app's update file points at it.
 6. Ticket to Done the same hour: release tag, link, minutes from start to release.
+   Proof is your own job. Phone: the QA phone over adb. Windows: the release run's launch check and pictures. Never wait for Valentin or anyone to take proof. (2026-11-02, why: 39 released tickets sat in AI Review)
+   Never park a ticket in AI Review. Released and proved: Done. Not finished: back to Todo with one line why.
 7. Watch runs no faster than every 5 minutes (`--interval 300`). One watcher per run.
 
 ## Keep the release path short
@@ -80,6 +82,7 @@ Run `~/.local/share/house-rules/skills/tickets/scripts/ticket-lint <file>` befor
 
 - Same columns as the fleet: Doing while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; `blocker-sweep.py` flags it. (2026-11-02, why: IGSH-1353 sat there with "Decision: None")
 - No ticket sits in Doing overnight.
+- AI Review is not a waiting room. Run `scripts/parked-review --board <id>` at every board check; it must print 0 parked. (2026-11-02, why: "fix the origin of tickets not being moved")
 - Every ticket runs through pstack `poteto-mode`: its Bug fix or Feature playbook, `how` before nontrivial changes, `architect` across function boundaries. Name the playbook in your first ticket comment. (2026-10-30, why: Valentin asked "are the agents using pstack?")
 - A question from Valentin is not a stop. Answer it, then go back to the queue in the same turn. Never end a turn while the view has open tickets. (2026-10-30, why: answering his question left the session idle)
 - Every commit message starts with its ticket ID, like `IGSH-1154: ...`. No ticket? Create one first.
