@@ -69,6 +69,15 @@ Group what stays with him by class: keys, money, publishing, at his PC.
 Several in one class? Propose one fix that ends the class. Examples: one page with every key step for one sitting, a one-time setup, a standing small budget.
 Only money, keys and going public need his yes. Build the rest.
 
+## 6b. Sweep the Agent Blocked columns
+Valentin, 2026-11-02:
+> 99 tickets in agent blocked infrA? wtf is going ion there?
+
+`blocker-review` ends with `PARKED` rows: every ticket parked over a day, and the column it belongs in.
+Only real tool or server failures stay. Design goes to UX needed. Merged work goes to QA.
+Waiting on a ticket or date goes home with a link. His call goes to Valentin Review with one Question.
+The class is a regex guess. Read the ticket, move it with `blocker-review --clear T --to <id> --why "..."`.
+
 ## 7. Report to Valentin
 Caveman:
 - Archived N of M done tickets.
