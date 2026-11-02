@@ -38,7 +38,8 @@ LEADS = {15: "HT Product Lead", 4060: "HT Product Lead", 2060: "Mini Boss CEO", 
 SHAPE = ["Now", "Problem", "Fix", "Done when", "Risk", "Decision"]
 MARK = "blocker-review"
 # Where a cleared ticket goes back to. Board 15: Bugs, Features, Improvements.
-HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}, 4060: {"other": 10414}}
+HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}, 4060: {"other": 10414}, 2060: {"other": 4351}}
+CEO_HT = Path.home() / "projects/ceo/bin/ceo-ht"
 ASKS_OFF = re.compile(r"\bswitch\b[^.?]{0,80}\boff\b|\bto off\b", re.I)
 
 LINT_PATH = Path(__file__).resolve().parents[2] / "tickets/scripts/ticket-lint"
@@ -207,10 +208,17 @@ def clear(number, board, t, to, why):
     dest = home(t, board) if to == "home" else to
     if dest is None:
         return f"no home column known for board {board}"
-    steps = [["vcc", "activity", "add", number, f"{MARK} cleared: not waiting on Valentin. {why} "
-              "Red border has no CLI yet (https://app.hypertask.ai/detail/project-15/8200)."],
-             ["vcc", "task", "waiting-on", number, "--user", "none"],
-             ["vcc", "task", "update", number] + (["--status", "Archive"] if dest == "archive" else ["--section", str(dest)])]
+    text = (f"{MARK} cleared: not waiting on Valentin. {why} "
+            "Red border has no CLI yet (https://app.hypertask.ai/detail/project-15/8200).")
+    move = ["--status", "Archive"] if dest == "archive" else ["--section", str(dest)]
+    if board == 2060:
+        steps = [[str(CEO_HT), "comment", "add", number.split("-")[-1], "--project", "2060", "--markdown", "--text", text],
+                 [str(CEO_HT), "task", "waiting-on", number, "--user", "none"],
+                 [str(CEO_HT), "task", "update", number, "--project", "2060"] + move]
+    else:
+        steps = [["vcc", "activity", "add", number, text],
+                 ["vcc", "task", "waiting-on", number, "--user", "none"],
+                 ["vcc", "task", "update", number] + move]
     for cmd in steps:
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode:
