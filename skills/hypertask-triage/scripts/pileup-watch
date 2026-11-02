@@ -31,6 +31,7 @@ HT_CAPS = {
         "UX Sign-off": (10, "HT Design Lead"),
         "Flag: Only Me + QA": (10, "HT Product Lead"),
         "In Progress": (15, "HT Product Lead"),
+        "label:ai-feedback": (20, "HT Product Lead"),
     },
     4060: {
         "Agent Blocked": (5, "HT Product Lead"),
@@ -73,9 +74,10 @@ def age_days(t, now):
 
 
 def column_tickets(board, column):
+    where = ["--label", column[6:]] if column.startswith("label:") else ["--section", column]
     tickets, offset = [], 0
     while True:
-        page = ht("task", "list", "--project", str(board), "--section", column, "--status", "Normal",
+        page = ht("task", "list", "--project", str(board), *where, "--status", "Normal",
                   "--limit", "100", "--offset", str(offset)).get("tasks", [])
         tickets += page
         if len(page) < 100:

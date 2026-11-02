@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""File feedback about Hypertask itself on board 15, as the agent you are.
+
+Hit something wrong, slow, confusing or missing in Hypertask (app, CLI, MCP,
+API, vcc)? File it, then carry on. One open ticket per problem: a repeat adds a
++1 note instead of a second ticket. Your note is cleaned first (no links,
+emails, keys or long numbers) and lands in the agent lane; the ticket title
+holds its short form.
+
+Valentin, 2026-11-02: "agents workign with hypertask cli or otherwise can file
+FEEDBACK for us on board 15". Interim lever until HTPR-8275 makes
+`hypertask feedback --kind` native (YPER4-1001).
+
+usage: agent-feedback --kind bug|friction|missing|idea [--tool NAME] [--detail TEXT] [--dry-run] "plain summary"
+
+The summary becomes the ticket title: plain words a product owner reads, no
+flags, field names or code. Technical bits go in --detail (agent lane).
+"""
+import argparse
+import difflib
+import json
+import re
+import subprocess
+import sys
+import tempfile
+
+BOARD = 15
+LABEL = "ai-feedback"
+SECTION = {"bug": "4389", "friction": "19734", "missing": "9190", "idea": "9190"}
+WHAT = {
+    "bug": "Something in Hypertask gave a wrong result or failed.",
+    "friction": "Something in Hypertask worked, but slowed the agent down.",
+    "missing": "The agent needed something Hypertask does not offer.",
+    "idea": "The agent has an idea to make Hypertask better.",
+}
+CREDENTIAL = re.compile(r"vck_|httk_|htk_|htmk_|eyJ|ghp_|gho_|github_pat_|xox[abp]-|\bsk[-_]|Bearer\s", re.I)
+
+
+def clean(note):
+    note = re.sub(r"\b[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+", " ", note)
+    note = re.sub(r"\b(?:[a-z][a-z0-9+.-]*://|www\.)\S+", " ", note, flags=re.I)
+    note = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", " ", note, flags=re.I)
+    note = re.sub(r"\d{5,}|\S{40,}", " ", note)
+    return re.sub(r"\s+", " ", note.replace("—", "-")).strip()[:300]
+
+
+def key(text):
+    return re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
+
+
+def title_for(kind, note):
+    short = note if len(note) <= 64 else note[:61].rsplit(" ", 1)[0] + "..."
+    return f"Agent feedback, {kind}: {short}"
+
+
+def run(*args):
+    return subprocess.run(list(args), capture_output=True, text=True)
+
+
+def open_feedback():
+    r = run("hypertask", "task", "list", "--project", str(BOARD), "--label", LABEL,
+            "--status", "Normal", "--limit", "100", "--json")
+    try:
+        return json.loads(r.stdout).get("tasks", [])
+    except ValueError:
+        sys.exit(f"agent-feedback: cannot read board {BOARD}: {(r.stderr or r.stdout).strip()[:200]}")
+
+
+def same(note, title):
+    gist = key(re.sub(r"^Agent feedback, \w+: ", "", title).removesuffix("..."))
+    want = key(note)[:len(gist)] if title.endswith("...") else key(note)
+    return difflib.SequenceMatcher(None, want, gist).ratio()
+
+
+def duplicate(note, tickets):
+    best = max(tickets, key=lambda t: same(note, t.get("title", "")), default=None)
+    return best if best and same(note, best.get("title", "")) >= 0.8 else None
+
+
+def description(kind, tool):
+    where = f"It happened in {tool}." if tool else "The agent note says where."
+    return "\n".join([
+        "**Now**", f"- {WHAT[kind]}", f"- {where}",
+        "- The agent's note is in the agent log.", "",
+        "**Problem**", "- Agents lose time on it. Customer agents will too.", "",
+        "**Fix**", "- Read the note. Reproduce it. Fix the cause.", "",
+        "**Done when**", "- The agent's case works. A test proves it.", "",
+        "**Risk:** low. Undo: roll back the fix.", "",
+        "**Decision:** none.", "",
+    ])
+
+
+def main():
+    p = argparse.ArgumentParser(description="File feedback about Hypertask on board 15.")
+    p.add_argument("--kind", required=True, choices=sorted(SECTION))
+    p.add_argument("--tool", default="", help="where it happened: cli, mcp, app, api, vcc, or a command name")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--detail", default="", help="technical detail for the agent lane: command, field, error")
+    p.add_argument("note", metavar="summary")
+    a = p.parse_args()
+    if CREDENTIAL.search(a.note + " " + a.detail):
+        sys.exit("agent-feedback: the note looks like it holds a key; rewrite it without one")
+    note = clean(a.note)
+    if len(note) < 12:
+        sys.exit("agent-feedback: say what happened in a short sentence")
+    tool = clean(a.tool)[:40]
+    detail = clean(a.detail)
+    lane = f"{note} Detail: {detail}" if detail else note
+    found = duplicate(note, open_feedback())
+    if found:
+        url = f"https://app.hypertask.ai/detail/project-{BOARD}/{found['uniqueIndex']}"
+        if not a.dry_run:
+            r = run("vcc", "activity", "add", found["ticketNumber"], f"agent-feedback +1 ({a.kind}{', ' + tool if tool else ''}): {lane}")
+            if r.returncode:
+                sys.exit(f"agent-feedback: bump failed: {(r.stderr or r.stdout).strip()[:200]}")
+        print(f"{'would bump' if a.dry_run else 'bumped'} {found['ticketNumber']} {url}")
+        return
+    title = title_for(a.kind, note)
+    if a.dry_run:
+        print(f"would file on board {BOARD} section {SECTION[a.kind]}: {title}")
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(description(a.kind, tool))
+    r = run("vcc", "task", "create", "--project", str(BOARD), "--section", SECTION[a.kind],
+            "--priority", "medium", "--labels", LABEL, "--title", title, "--description-file", f.name, "--markdown")
+    try:
+        made = json.loads(r.stdout.splitlines()[0])
+        ticket = (made.get("task") or made.get("tasks", [{}])[0])["ticketNumber"]
+    except (ValueError, IndexError, KeyError, TypeError):
+        why = (r.stdout or r.stderr).strip()[:300]
+        hint = "\nRewrite the summary in plain words; move flags, fields and code to --detail." if "title" in why else ""
+        sys.exit(f"agent-feedback: filing failed: {why}{hint}")
+    run("vcc", "activity", "add", ticket, f"agent-feedback ({a.kind}{', ' + tool if tool else ''}): {lane}")
+    print(f"filed {ticket} https://app.hypertask.ai/detail/project-{BOARD}/{ticket.split('-')[-1]}")
+
+
+if __name__ == "__main__":
+    main()
