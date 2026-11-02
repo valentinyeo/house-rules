@@ -37,10 +37,10 @@ lint = importlib.machinery.SourceFileLoader("ticket_lint", str(LINT_PATH)).load_
 # House rules, "Never block Valentin on non-decisions": his calls only.
 HIS_CALLS = [
     ("money", re.compile(r"[£$€]\s?\d|\b(cost|costs|pay|paid|price|pricing|billing|subscription|spend|budget|per month|a month|a year)\b", re.I)),
-    ("keys", re.compile(r"\b(api key|key|keys|token|secret|credential|client id|login client|oauth)\b", re.I)),
+    ("keys", re.compile(r"\b(api key|key|keys|token|secret|password|vault|credential|client id|login client|oauth)\b", re.I)),
     ("going public", re.compile(r"\b(public|publish|launch|play store|app store|store listing|announce|x\.com)\b", re.I)),
     ("prod data deletion", re.compile(r"\b(delete|deletion|wipe|purge)\b[^.]{0,60}\b(prod|production|customer|real|user)\b", re.I)),
-    ("needs him at his PC or phone", re.compile(r"\b(your (pc|computer|desktop|laptop|phone|machine|windows|account)|at your pc|real slack|only you can)\b", re.I)),
+    ("needs him at his PC or phone", re.compile(r"\b(your (pc|computer|desktop|laptop|phone|machine|windows|account)|at your pc|real slack|only you can|have you secured)\b", re.I)),
     ("product decision", re.compile(r"\b(scope|which (option|design|version|one)|option [ab12]|new (button|screen|element|feature|page)|wireframe|figma)\b", re.I)),
 ]
 
