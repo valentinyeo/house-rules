@@ -27,6 +27,11 @@ import tempfile
 BOARD = 15
 LABEL = "ai-feedback"
 SECTION = {"bug": "4389", "friction": "19734", "missing": "9190", "idea": "9190"}
+# Our own agent tools are not Hypertask: their reports go to the agents board (YPER4-1004).
+OWN_BOARD, OWN_SECTION, OWN_LABEL = 4060, "10414", "Infra"
+OWN_TOOLS = {"vcc", "ship", "ship-check", "ship-claim", "ship-gates", "guard", "pr-drain-pick", "ticket-lint",
+             "ht-flag", "dispatch", "hax", "pileup-watch", "agent-feedback", "blocker-sweep", "gate-check",
+             "token-ladder", "stack-key", "tl-launch", "runner"}
 WHAT = {
     "bug": "Something in Hypertask gave a wrong result or failed.",
     "friction": "Something in Hypertask worked, but slowed the agent down.",
@@ -57,13 +62,17 @@ def run(*args):
     return subprocess.run(list(args), capture_output=True, text=True)
 
 
-def open_feedback():
-    r = run("hypertask", "task", "list", "--project", str(BOARD), "--label", LABEL,
+def own_tool(tool):
+    return tool.strip().split(" ")[0].lower() in OWN_TOOLS
+
+
+def open_feedback(board=BOARD, label=LABEL):
+    r = run("hypertask", "task", "list", "--project", str(board), "--label", label,
             "--status", "Normal", "--limit", "100", "--json")
     try:
         return json.loads(r.stdout).get("tasks", [])
     except ValueError:
-        sys.exit(f"agent-feedback: cannot read board {BOARD}: {(r.stderr or r.stdout).strip()[:200]}")
+        sys.exit(f"agent-feedback: cannot read board {board}: {(r.stderr or r.stdout).strip()[:200]}")
 
 
 def same(note, title):
@@ -153,10 +162,13 @@ def main():
     detail = clean(a.detail)
     lane = f"{note} Detail: {detail}" if detail else note
     catalog = cli_commands()
-    place = where(tool, catalog)
-    found = duplicate(a.kind, place, note, open_feedback(), catalog)
+    own = own_tool(tool)
+    board, section, label = (OWN_BOARD, OWN_SECTION, OWN_LABEL) if own else (BOARD, SECTION[a.kind], LABEL)
+    place = where(tool, None if own else catalog)
+    pool = [t for t in open_feedback(board, label) if t.get("title", "").startswith("Agent feedback")]
+    found = duplicate(a.kind, place, note, pool, catalog)
     if found:
-        url = f"https://app.hypertask.ai/detail/project-{BOARD}/{found['uniqueIndex']}"
+        url = f"https://app.hypertask.ai/detail/project-{board}/{found['uniqueIndex']}"
         if not a.dry_run:
             r = run("vcc", "activity", "add", found["ticketNumber"], f"agent-feedback +1 ({a.kind}{', ' + tool if tool else ''}): {lane}")
             if r.returncode:
@@ -165,12 +177,12 @@ def main():
         return
     title = title_for(a.kind, note)
     if a.dry_run:
-        print(f"would file on board {BOARD} section {SECTION[a.kind]}: {title}")
+        print(f"would file on board {board} section {section}: {title}")
         return
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(description(a.kind, place))
-    r = run("vcc", "task", "create", "--project", str(BOARD), "--section", SECTION[a.kind],
-            "--priority", "medium", "--labels", LABEL, "--title", title, "--description-file", f.name, "--markdown")
+    r = run("vcc", "task", "create", "--project", str(board), "--section", section,
+            "--priority", "medium", "--labels", label, "--title", title, "--description-file", f.name, "--markdown")
     try:
         made = json.loads(r.stdout.splitlines()[0])
         ticket = (made.get("task") or made.get("tasks", [{}])[0])["ticketNumber"]
@@ -179,7 +191,7 @@ def main():
         hint = "\nRewrite the summary in plain words; move flags, fields and code to --detail." if "title" in why else ""
         sys.exit(f"agent-feedback: filing failed: {why}{hint}")
     run("vcc", "activity", "add", ticket, f"agent-feedback ({a.kind}{', ' + tool if tool else ''}): {lane}")
-    print(f"filed {ticket} https://app.hypertask.ai/detail/project-{BOARD}/{ticket.split('-')[-1]}")
+    print(f"filed {ticket} https://app.hypertask.ai/detail/project-{board}/{ticket.split('-')[-1]}")
 
 
 if __name__ == "__main__":
