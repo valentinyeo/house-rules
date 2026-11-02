@@ -41,6 +41,8 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Grok cloud agents: grok-4.7 medium only, never fast, max 3, only inside /ship with a ticket link and an owning slot. (2026-10-25, why: cost cap)
 
 ## Doing the work
+- CI runs only on GitHub-hosted runners. No runner on the VPS or elsewhere without his explicit yes. Overrides older "private repos self-hosted only" rules. (2026-11-03, why: "All runners for ci can only ever be on gihtub")
+- Paid GitHub minutes on private repos are fine when activity is small. A repo using significant minutes: tell Valentin with numbers. (2026-11-03, why: "If a runner uses actual significant minutes i need to be informed")
 - GitHub calls: never poll faster than 5 minutes. `gh run watch` and `gh pr checks --watch` need `--interval 300` or more. One watcher per run or PR; kill it within 30 minutes. Automation uses the runner App token, not Valentin's login. (2026-10-26, why: watch loops burned 2,640 calls/h)
 - PR queue first, both fleets. No runner takes a new ticket while draft or stalled PRs wait. Finish, rebase or close those first. Only urgent bugs and errors jump ahead. Hypertask runners pick via `pr-drain-pick`. (2026-10-29, why: "the primary objective right now is to clear the draft PRs")
 - Move your tickets on the board live. Start work: In Progress. PR open: review column. Shipped: Done. Every fleet. (2026-10-31, why: "working on it goes to inprogress")
