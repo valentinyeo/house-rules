@@ -12,7 +12,13 @@ Dry run prints the table. --apply posts one agent-lane note per flagged ticket
 asking its agent and lead to rewrite it, and to find and fix what made it bad.
 A note is posted once per distinct set of defects (marker in the agent log).
 
+Drift is cleared by the script itself with --apply (own boards only): he already
+answered, there is no Question anywhere, or the Question asks him to switch a
+flag Off. Clear = agent note, his name off, ticket back to its home column.
+Any other ticket: --clear T --to <home|archive|section id> --why "..." does the same.
+
 usage: blocker-review [--boards 15,4060,2060] [--apply] [--self-test]
+       blocker-review --clear HTPR-1 --to home --why "reason"
 """
 import argparse
 import hashlib
@@ -30,6 +36,9 @@ OWNER_ID = 6
 LEADS = {15: "HT Product Lead", 4060: "HT Product Lead", 2060: "Mini Boss CEO", 11514: "CI Boss"}
 SHAPE = ["Now", "Problem", "Fix", "Done when", "Risk", "Decision"]
 MARK = "blocker-review"
+# Where a cleared ticket goes back to. Board 15: Bugs, Features, Improvements.
+HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}, 4060: {"other": 10414}}
+ASKS_OFF = re.compile(r"\bswitch\b[^.?]{0,80}\boff\b|\bto off\b", re.I)
 
 LINT_PATH = Path(__file__).resolve().parents[2] / "tickets/scripts/ticket-lint"
 lint = importlib.machinery.SourceFileLoader("ticket_lint", str(LINT_PATH)).load_module()
@@ -38,7 +47,7 @@ lint = importlib.machinery.SourceFileLoader("ticket_lint", str(LINT_PATH)).load_
 HIS_CALLS = [
     ("money", re.compile(r"[£$€]\s?\d|\b(cost|costs|pay|paid|price|pricing|billing|subscription|spend|budget|per month|a month|a year)\b", re.I)),
     ("keys", re.compile(r"\b(api key|key|keys|token|secret|password|vault|credential|client id|login client|oauth)\b", re.I)),
-    ("going public", re.compile(r"\b(public|publish|launch|play store|app store|store listing|announce|x\.com)\b", re.I)),
+    ("going public", re.compile(r"\b(public|publish\w*|launch|play store|app store|store listing|announce|x\.com)\b", re.I)),
     ("prod data deletion", re.compile(r"\b(delete|deletion|wipe|purge)\b[^.]{0,60}\b(prod|production|customer|real|user)\b", re.I)),
     ("needs him at his PC or phone", re.compile(r"\b(your (pc|computer|desktop|laptop|phone|machine|windows|account)|at your pc|real slack|only you can|have you secured)\b", re.I)),
     ("product decision", re.compile(r"\b(scope|which (option|design|version|one)|option [ab12]|new (button|screen|element|feature|page)|wireframe|figma)\b", re.I)),
@@ -131,6 +140,50 @@ def review(t, q_text, waiting_on_him):
     return calls, defects
 
 
+def is_owner(c):
+    return not c.get("agent") and str(c.get("creatorId") or (c.get("creator") or {}).get("id")) == str(OWNER_ID)
+
+
+def reacted(c):
+    return any(str(r.get("userId") or (r.get("user") or {}).get("id")) == str(OWNER_ID) for r in c.get("reactions") or [])
+
+
+def drift(q_comment, comments):
+    if not q_comment:
+        return "no Question anywhere on the ticket"
+    if reacted(q_comment) or any(is_owner(c) and (c.get("createdAt") or "") > (q_comment.get("createdAt") or "")
+                                 for c in comments):
+        return "he already answered: the lead acts on his reply"
+    if ASKS_OFF.search(plain(q_comment.get("text") or q_comment.get("commentText"))):
+        return "asks him to switch a flag Off: Off is his safety switch, agents never ask for it, repair instead"
+    return None
+
+
+def home(t, board):
+    sections = HOME.get(board, {})
+    names = " ".join([t.get("title") or ""] + [l.get("name", "") for l in t.get("labels") or []])
+    if re.search(r"\bbug", names, re.I) and "bug" in sections:
+        return sections["bug"]
+    if re.search(r"feature", names, re.I) and "feature" in sections:
+        return sections["feature"]
+    return sections.get("other")
+
+
+def clear(number, board, t, to, why):
+    dest = home(t, board) if to == "home" else to
+    if dest is None:
+        return f"no home column known for board {board}"
+    steps = [["vcc", "activity", "add", number, f"{MARK} cleared: not waiting on Valentin. {why} "
+              "Red border has no CLI yet (https://app.hypertask.ai/detail/project-15/8200)."],
+             ["vcc", "task", "waiting-on", number, "--user", "none"],
+             ["vcc", "task", "update", number] + (["--status", "Archive"] if dest == "archive" else ["--section", str(dest)])]
+    for cmd in steps:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode:
+            return f"{' '.join(cmd[:3])} failed: {(r.stderr or r.stdout).strip()[:160]}"
+    return None
+
+
 def author(t, log):
     for a in t.get("assignees") or []:
         if a.get("agent"):
@@ -190,6 +243,13 @@ def self_test():
     paste_q = good_q.replace("Buy the login key for $5 a month?", "Make a free login key and paste it here?")
     _, defects = review({**t0, "description": good_desc, "section": "Valentin Review"}, paste_q, True)
     assert any("1Password" in d for d in defects), ("key paste passed", defects)
+    q = {"createdAt": "2026-10-01", "text": "<p>Question: <b>Build it?</b></p>"}
+    assert drift(None, []) and drift(q, [q]) is None, "drift on a live question"
+    assert drift(q, [q, {"createdAt": "2026-10-02", "creatorId": 6, "text": "Yes"}]), "missed his reply"
+    assert drift(q, [q, {"createdAt": "2026-10-02", "creatorId": 6, "agent": {"id": "x"}, "text": "status"}]) is None, \
+        "agent posting under his login counted as his reply"
+    assert drift({**q, "text": "Question: Switch htpr-1-x to Off?"}, []), "missed an Off ask"
+    assert home({"title": "[BUG] x"}, 15) == 4389 and home({"title": "x"}, 4060) == 10414, "wrong home column"
     print("SELF_TEST_OK")
     return 0
 
@@ -199,18 +259,28 @@ def main():
     p.add_argument("--boards", default="15,4060,2060")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--self-test", action="store_true")
+    p.add_argument("--clear", default="", help="clear one ticket by hand after reading it")
+    p.add_argument("--to", default="home", help="home, archive, or a section id")
+    p.add_argument("--why", default="")
     p.add_argument("--only", default="", help="comma list of ticket numbers, for a canary run")
     a = p.parse_args()
     if a.self_test:
         return self_test()
+    if a.clear:
+        if not a.why:
+            p.error("--clear needs --why: the reason goes in the agent lane")
+        t = (ht("task", "get", a.clear).get("tasks") or [{}])[0]
+        err = t and clear(a.clear, t.get("projectId"), t, a.to, a.why)
+        print(f"CLEAR FAILED {a.clear}: {err or 'ticket not found'}" if err or not t else f"CLEARED {a.clear}")
+        return 1 if err or not t else 0
     boards = [int(b) for b in a.boards.split(",") if b]
     found, inbox_set = blocked_tickets(boards)
     only = {x for x in a.only.split(",") if x}
     if only:
         found = {k: v for k, v in found.items() if k in only}
     kinds = Counter()
-    counts = {"HIS-OK": 0, "HIS-BADLY-WRITTEN": 0, "NOT-HIS": 0}
-    posted = skipped = failed = others = 0
+    counts = {"CLEAR": 0, "ANSWERED": 0, "HIS-OK": 0, "HIS-BADLY-WRITTEN": 0, "NOT-HIS": 0}
+    posted = skipped = failed = others = cleared = 0
     me = subprocess.run([str(Path.home() / ".agents/skills/ship/scripts/ship-identity")],
                         capture_output=True, text=True).stdout.split("\t")[0].strip()
     for number, board in sorted(found.items()):
@@ -220,13 +290,19 @@ def main():
         board = t.get("projectId") or board
         waiting = number in inbox_set
         cs = ht("comment", "list", number, "--limit", "200").get("comments") or []
-        q = next((c.get("text") or c.get("commentText") for c in cs if c.get("id") == t.get("blockerCommentId")), None)
-        if not q:
-            q = next((c.get("text") or c.get("commentText")
-                      for c in sorted(cs, key=lambda c: c.get("createdAt") or "", reverse=True)
-                      if "Question:" in plain(c.get("text") or c.get("commentText"))), None)
+        qc = next((c for c in sorted(cs, key=lambda c: c.get("createdAt") or "", reverse=True)
+                   if "Question:" in plain(c.get("text") or c.get("commentText"))), None)
+        qc = qc or next((c for c in cs if str(c.get("id")) == str(t.get("blockerCommentId"))), None)
+        q = qc and (qc.get("text") or qc.get("commentText"))
         calls, defects = review(t, q, waiting)
-        kind = "NOT-HIS" if not calls else ("HIS-BADLY-WRITTEN" if defects else "HIS-OK")
+        why = drift(qc, cs)
+        # Money, keys or his hands stay in front of him even after a reply: the lead reads it, not the script.
+        if why and (not calls or why.startswith("asks him")):
+            kind, defects = "CLEAR", [why]
+        elif why and why.startswith("he already"):
+            kind, defects = "ANSWERED", [why]
+        else:
+            kind = "NOT-HIS" if not calls else ("HIS-BADLY-WRITTEN" if defects else "HIS-OK")
         counts[kind] += 1
         log = ht("task", "agent-log", number).get("activities") or []
         who, lead = author(t, log), LEADS.get(board, "the board lead")
@@ -241,6 +317,11 @@ def main():
             others += 1
             print(f"    left for {lead}: only a board's own lead notes its tickets")
             continue
+        if kind == "CLEAR":
+            err = clear(number, board, t, "home", why)
+            print(f"    {'CLEAR FAILED: ' + err if err else 'cleared, back to its home column'}")
+            failed, cleared = failed + bool(err), cleared + (not err)
+            continue
         tag = "[" + hashlib.sha1("|".join([kind] + defects).encode()).hexdigest()[:8] + "]"
         if any(MARK in (e.get("text") or "") and tag in (e.get("text") or "") for e in log):
             skipped += 1
@@ -254,7 +335,7 @@ def main():
     for k, v in kinds.most_common():
         print(f"DEFECT {v:3} {k}")
     summary = " ".join(f"{k}={v}" for k, v in counts.items())
-    extra = (f" notes posted={posted} already-noted={skipped} failed={failed} left-for-other-leads={others}"
+    extra = (f" cleared={cleared} notes posted={posted} already-noted={skipped} failed={failed} left-for-other-leads={others}"
              if a.apply else "")
     print(f"SUMMARY {len(found)} tickets wait on Valentin: {summary}{extra}")
     return 1 if failed else 0
