@@ -16,6 +16,7 @@ Get your own board login. Do it yourself. Never ask Valentin: this rule already 
 | marketing-lead | HT Growth Lead | ht-growth-lead | 2108, 15 |
 | finance-lead | HT Finance Lead | ht-finance-lead | 2462 |
 | CI Boss (house rule) | CI Boss | ci-boss | 15, 4060, 2060 |
+| Chief Of Staff | Chief Of Staff | chief-of-staff | 15, 473, 1215, 2060, 2101, 2108, 2128, 2462, 2467, 4060, 8783, 10450, 10958, 11514, 11612 |
 
 Set these for your row, in every shell call below (`h` is `ht` with a retry on "Rate limit"):
 
