@@ -12,7 +12,7 @@ Read only. Gather, then answer in the shape below. Valentin, 2026-10-29: "i like
 2. Live: production CI on the base branch passed after those merges. Name the time it passed.
 3. Open PRs: red, green, pending; drafts. Compare with your last update ("down from X").
 4. CI queue: queued and running runs. Production checks state.
-   CI wait (main KPI, owned by CI Boss): `GH_TOKEN=$(gh-app-token) ~/.local/share/house-rules/skills/shipping-update/scripts/ci-wait --days 2 <owner/repo>`. Share of commits whose checks finish within 10 min, median, p90, 24h. Target 90% within 10 min. App token reads public repos only.
+   CI wait (main KPI, owned by CI Boss): `GH_TOKEN=$(gh-app-token) ~/.local/share/house-rules/skills/shipping-update/scripts/ci-wait --days 2 <owner/repo>`. Share of waits whose checks finish within 10 min, median, p90, 24h. Target 90% within 10 min. A wait is one commit's checks from first start to last finish; a gate that starts again later is its own wait, and a release health watcher is not a check. App token reads public repos only.
 5. Only what is running: runners, trials (spend vs cap via its key), stuck items. Look at panes and logs; don't guess.
 
 ## Shape
