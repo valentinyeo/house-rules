@@ -67,7 +67,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Design in Figma. Use Yeo UX for our apps. Clients may use their own Figma teams. Never use Valentin Yeo's free team. How-to: `skills/figma-design/`. (2026-10-27, why: clients have their own Figma accounts)
 - Design sessions work straight in Figma. Never claude.ai artifacts. (2026-10-27, why: "don't do claude.ai artifcats but straigh figma")
 - Each app has one design system page in Figma. Runners build only from it. New pieces need his yes, unless his own ticket asked for them. (2026-10-26, why: "runners can just use the design system")
-- Start from his real screenshots. Subtract before adding. (2026-10-26, why: "Everything needs to earn its place")
+- Start from his real screenshots. Subtract before adding. Every UI, page, card, reply or ticket: run `skills/reduce-first/`. Cut first, never cut the job. inne-dash page-words check enforces visible text. (2026-11-03, why: "everything earns its place")
 - Desktop and mobile share one design language. Layout may differ. (2026-10-26, why: "They should basically look very similar")
 - One platform per ticket and per image. Desktop and Android get separate tickets and keyframes. Never one combined screen. (2026-10-31, why: "its android or desktop not both")
 - One Figma file for our apps. One page per ticket, named "<ID> <short what>". Newest worked page on top. (2026-10-29, why: "one big file with loads of pages")
