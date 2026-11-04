@@ -5,24 +5,25 @@ description: "/runner-list, \"list all runners\", \"what is every runner on\": o
 
 # /runner-list
 
-Valentin's format (2026-11-05). Nothing else in the reply.
+Valentin's format (2026-11-05). Every runner names its model and effort level. Nothing else in the reply.
 
 ## Get the data
 - Runner names and claims from your fleet's own source. Multiprompt: `~/.local/state/multibot/owners.json`, panes `multibot-runner-<x>`.
+- Model and effort: read the live process, never the plan. `ps -o args= -p <pane_pid>` plus `--ppid <pane_pid>`; take `--model` and `--effort`. Claude panes: the model line in the pane footer.
 - Ticket title: the live Hypertask title, `hypertask task get <ID> --json`. Never paraphrase it.
 - Check each pane first (`tmux capture-pane -p -t <pane> | tail -3`). The claim file can be stale.
 
 ## Format
 - Cluster by topic. Bold headline per cluster, 1 to 3 words.
 - Most urgent cluster first: freezes and crashes on top.
-- One bullet per runner: `<Runner board name>: [<TICKET-ID> <exact ticket title>](<full ticket URL>)`.
+- One bullet per runner: `<Runner board name> (<model> <effort>): [<TICKET-ID> <exact ticket title>](<full ticket URL>)`.
 - The title is the link text. One link per bullet.
 - Idle or stuck runner: append ` (idle: <reason>)`.
 - No intro, no outro, no counts, no extra notes.
 
 ## Example
 **Freezes**
-- Multi Bot Runner C: [IGSH-1170 Multiprompt freezes and I have to close it to keep working](https://app.hypertask.ai/detail/project-2060/1170)
+- Multi Bot Runner C (gpt-6.1-sol medium): [IGSH-1170 Multiprompt freezes and I have to close it to keep working](https://app.hypertask.ai/detail/project-2060/1170)
 
 **Rooms**
-- Multi Bot Runner I: [IGSH-1313 Multi Bot: chat with several agents together](https://app.hypertask.ai/detail/project-2060/1313)
+- Multi Bot Runner I (gpt-6.1-sol medium): [IGSH-1313 Multi Bot: chat with several agents together](https://app.hypertask.ai/detail/project-2060/1313)
