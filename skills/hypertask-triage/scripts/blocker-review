@@ -217,7 +217,7 @@ def clear(number, board, t, to, why):
                  [str(CEO_HT), "task", "update", number, "--project", "2060"] + move]
     else:
         steps = [["vcc", "activity", "add", number, text],
-                 ["vcc", "task", "waiting-on", number, "--user", "none"],
+                 ["vcc", "task", "waiting-on", number, "--user", "none", "--reason", why or text],
                  ["vcc", "task", "update", number] + move]
     for cmd in steps:
         r = subprocess.run(cmd, capture_output=True, text=True)
