@@ -40,7 +40,8 @@ Delivery `none` means you only post, mentions never reach you. Repoint with the 
   No agent can make one: the box has no Slack admin token.
   Every lead bot so far was made by Valentin (2026-10-30/31).
   Do not ask Chief Of Staff or other leads first. Go straight to the Question.
-- Post one Question on your own lead ticket. Paste the block below, your name filled in.
+- Post one Question on your own lead ticket. Use the steps below, your name filled in.
+  The people-comment check refuses the manifest as text: save it as a .yaml file and `--attach` it.
   Ask him to save the token in 1Password as `slack-<slug>` (example `slack-infra-lead`).
 
 ```text
