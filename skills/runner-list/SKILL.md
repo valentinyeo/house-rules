@@ -15,20 +15,19 @@ Valentin's format (2026-11-05). Every runner names its model and effort level. N
 - Check each pane first (`tmux capture-pane -p -t <pane> | tail -3`). The claim file can be stale.
 
 ## Format
-- Cluster by topic. Bold headline per cluster, 1 to 3 words.
+No bullets. Each runner is a two-line block. Blank line between blocks.
+- Cluster by topic. Bold headline per cluster, 1 to 3 words, on its own line.
 - Most urgent cluster first: freezes and crashes on top.
-- One bullet per runner: `<Runner board name> (<model> <effort>, terra <N>, luna <N>)`.
-- Terra 0 on a runner that wrote code? Flag it ` (ladder: no terra)` and tell that runner to delegate.
-- The ticket goes on the next line of the same bullet: a plain line break, indented two spaces, no bullet: `  [<TICKET-ID> <exact ticket title>](<full ticket URL>)`. Never a nested bullet.
-- The title is the link text. One link per bullet.
-- Idle or stuck runner: append ` (idle: <reason>)` to the runner line.
+- Line 1: `Runner <letter> · <Model> <effort> · Terra <N> · Luna <N>`. Short names: Sol, Terra, Luna.
+- Line 2, plain line break, no indent: `[<TICKET-ID> <exact ticket title>](<full ticket URL>)`.
+- Flags go at the end of line 1, after ` · `: `no Terra` when a coding runner has Terra 0, `idle: <reason>` when idle.
 - No intro, no outro, no counts, no extra notes.
 
 ## Example
 **Freezes**
-- Multi Bot Runner C (gpt-6.1-sol medium, terra 1, luna 1)
-  [IGSH-1170 Multiprompt freezes and I have to close it to keep working](https://app.hypertask.ai/detail/project-2060/1170)
 
-**Rooms**
-- Multi Bot Runner I (gpt-6.1-sol medium, terra 3, luna 1)
-  [IGSH-1313 Multi Bot: chat with several agents together](https://app.hypertask.ai/detail/project-2060/1313)
+Runner C · Sol medium · Terra 1 · Luna 1
+[IGSH-1170 Multiprompt freezes and I have to close it to keep working](https://app.hypertask.ai/detail/project-2060/1170)
+
+Runner G · Sol medium · Terra 0 · Luna 0 · no Terra
+[IGSH-1685 App freezes after Alt+Tab while picking a bot picture](https://app.hypertask.ai/detail/project-2060/1685)
