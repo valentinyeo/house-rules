@@ -22,7 +22,7 @@ STALE lines are already decided by the sweep: clear them without a full read.
 
 ## 2. Read each one
 Ticket, marked Question, last 5 comments, bound PR state (`gh pr view`).
-Owner lead: board 15 HT Product Lead; 4060 HT Infra Lead; 2060 and SF boards Mini Boss CEO.
+Owner lead: board 15 HT Product Lead; 4060 Infra Lead; 2060 and SF boards Mini Boss CEO.
 
 ## 3. Classify (first match wins)
 | Class | Test | Do |
