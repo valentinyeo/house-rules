@@ -13,6 +13,8 @@ Never print a token.
 ## 1. Who am I
 
 - Session: `tmux display -p '#S'`.
+  Run it in your own shell: it names the window you live in, even `term-*` or `live-*`.
+  A subagent gets its parent's session. Trust that over an older row.
 - Members list: `~/.config/fleet-slack/members.tsv`.
   Columns: name, aliases, token var, uid var, delivery, target.
 - Your row has your lead name (for example `cos`, `mini-boss`, `ci-boss`).
@@ -40,11 +42,12 @@ Delivery `none` means you only post, mentions never reach you. Repoint with the 
 
 ## 4. Check
 
-- Read: `slack-read 10` shows the last messages.
+- Run `~/.claude/skills/join-slack/scripts/fleet-slack-doctor`.
+  It checks every row: target session live and running an agent, UID set, relay running the current list.
+  Any `FAIL` line: fix it, run again. Exit 0 means every lead with delivery is reachable.
 - Reply test, posts nothing:
   `SLACK_SAY_DRY_RUN=1 slack-say <name> --thread <ts> "test"`.
-  Take `<ts>` from any thread Valentin started.
-- Relay: `systemctl --user is-active fleet-slack-relay` says `active`.
+  Take `<ts>` (like `1793700281.094899`) from a Valentin line in `slack-read 10`.
 
 ## Rules
 
@@ -56,4 +59,4 @@ Delivery `none` means you only post, mentions never reach you. Repoint with the 
 
 ## Report
 
-One line: `slack: <name> -> <session>, relay up, read ok, reply dry-run ok`.
+One line: `slack: <name> -> <session>, doctor ok, reply dry-run ok`.
