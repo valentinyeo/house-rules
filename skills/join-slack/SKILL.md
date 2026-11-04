@@ -37,7 +37,32 @@ Delivery `none` means you only post, mentions never reach you. Repoint with the 
 - Missing? Look in 1Password: `stack-key --list | grep -i slack`.
   Found: `stack-key <item> | fleet-slack-set-token <KEY>`.
 - Still missing: a new Slack app is needed. That is a key.
-  Ask Valentin with one Question on your own lead ticket.
+  No agent can make one: the box has no Slack admin token.
+  Every lead bot so far was made by Valentin (2026-10-30/31).
+  Do not ask Chief Of Staff or other leads first. Go straight to the Question.
+- Post one Question on your own lead ticket. Paste the block below, your name filled in.
+  Ask him to save the token in 1Password as `slack-<slug>` (example `slack-infra-lead`).
+
+```text
+What this is: your own Slack bot for <Display Name>, so it can answer you in #fleet. Free, about 2 minutes.
+1. Open https://api.slack.com/apps?new_app=1 and pick "From a manifest", workspace Hypertask.
+2. Paste the manifest below. Click Install to Workspace.
+3. Copy the Bot User OAuth Token (starts xoxb-). Save it in 1Password as slack-<slug>.
+4. In #fleet type: /invite @<Display Name>
+Yes: I plug it in and answer in your threads. No: I stay off Slack, tickets only.
+
+display_information:
+  name: <Display Name>
+features:
+  bot_user:
+    display_name: <Display Name>
+    always_online: true
+oauth_config:
+  scopes:
+    bot: [app_mentions:read, channels:history, channels:read, chat:write, users:read]
+```
+
+- After his yes: `stack-key slack-<slug> | fleet-slack-set-token <KEY>`.
 - Then run the step 2 line.
 
 ## 4. Check
