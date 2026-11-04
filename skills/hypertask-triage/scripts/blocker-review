@@ -34,7 +34,7 @@ from collections import Counter
 from pathlib import Path
 
 OWNER_ID = 6
-LEADS = {15: "HT Product Lead", 4060: "HT Infra Lead", 2060: "Mini Boss CEO", 11514: "CI Boss"}
+LEADS = {15: "HT Product Lead", 4060: "Infra Lead", 2060: "Mini Boss CEO", 11514: "CI Boss"}
 SHAPE = ["Now", "Problem", "Fix", "Done when", "Risk", "Decision"]
 MARK = "blocker-review"
 # Where a cleared ticket goes back to. Board 15: Bugs, Features, Improvements.
