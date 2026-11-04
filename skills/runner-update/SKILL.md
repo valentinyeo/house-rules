@@ -37,6 +37,6 @@ For each runner: active (working a ticket now) or idle. For every idle one, name
 
 ## 4. Report
 
-Use the [shipping-update](../shipping-update/SKILL.md) shape. Add one "Runners" section: claude X/Y, hax X/Y, each idle one with its reason and what you did.
+Use the [shipping-update](../shipping-update/SKILL.md) shape. Add one "Runners" section: claude X/Y, hax X/Y on one line, then every runner in the [runner-list](../runner-list/SKILL.md) format. Idle ones carry their reason and what you did.
 
 Never say "0 hax by design". Zero hax is a gap: say why and what you did.
