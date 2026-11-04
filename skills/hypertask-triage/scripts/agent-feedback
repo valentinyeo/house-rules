@@ -28,7 +28,19 @@ BOARD = 15
 LABEL = "ai-feedback"
 SECTION = {"bug": "4389", "friction": "19734", "missing": "9190", "idea": "9190"}
 # Our own agent tools are not Hypertask: their reports go to the agents board (YPER4-1004).
-OWN_BOARD, OWN_SECTION, OWN_LABEL = 4060, "10414", "Infra"
+OWN_BOARD, OWN_SECTION, OWN_LABEL = 4060, "10414", "Agent Feedback"
+# One view per cluster on board 4060 (Valentin 2026-11-05). First match wins.
+CLUSTERS = [
+    ("Flag Switch", r"turn.*off|off order|safety switch|thumbs|left off|un-park|ht-flag"),
+    ("Cross-Board Access", r"ci board|ci ticket|ci problem|another board|board 2060|non-member|software factory"),
+    ("Agent Log", r"activity|agent note|agent log|agent lane|--text|help"),
+    ("Design Review Loop", r"design|corner"),
+    ("Claim And Pickup", r"claim|resum|pick|hold|protected|lead merge|ship-claim|pr-drain-pick"),
+    ("Comment Lint", r"comment|lint|voice|sentence|word|robot status|description|validator"),
+    ("Proof Gates", r"proof|gate|deeper|ledger|cleanup"),
+    ("Ship Check And Guards", r"guard|hook|ship-check|bind|deploy|move|release"),
+    ("HTML Pages", r"html|page|report|picture|upload"),
+]
 OWN_TOOLS = {"vcc", "ship", "ship-check", "ship-claim", "ship-gates", "guard", "pr-drain-pick", "ticket-lint",
              "ht-flag", "dispatch", "hax", "pileup-watch", "agent-feedback", "blocker-sweep", "gate-check",
              "token-ladder", "stack-key", "tl-launch", "runner"}
@@ -67,12 +79,17 @@ def own_tool(tool):
 
 
 def open_feedback(board=BOARD, label=LABEL):
-    r = run("hypertask", "task", "list", "--project", str(board), "--label", label,
-            "--status", "Normal", "--limit", "100", "--json")
-    try:
-        return json.loads(r.stdout).get("tasks", [])
-    except ValueError:
-        sys.exit(f"agent-feedback: cannot read board {board}: {(r.stderr or r.stdout).strip()[:200]}")
+    tickets = []
+    while True:
+        r = run("hypertask", "task", "list", "--project", str(board), "--label", label,
+                "--status", "Normal", "--limit", "100", "--offset", str(len(tickets)), "--json")
+        try:
+            page = json.loads(r.stdout).get("tasks", [])
+        except ValueError:
+            sys.exit(f"agent-feedback: cannot read board {board}: {(r.stderr or r.stdout).strip()[:200]}")
+        tickets += page
+        if len(page) < 100:
+            return tickets
 
 
 def same(note, title):
@@ -81,11 +98,17 @@ def same(note, title):
     return difflib.SequenceMatcher(None, want, gist).ratio()
 
 
-STOP = {"hypertask", "the", "a", "an", "for", "of", "on", "in", "to", "command", "cli", "board", "my"}
+STOP = {"hypertask", "the", "a", "an", "for", "of", "on", "in", "to", "command", "cli", "board", "my",
+        "htpr", "yper4", "hyci", "igsh"}
+
+
+def cluster(text):
+    return next((name for name, pat in CLUSTERS if re.search(pat, text.lower())), "CLI Rough Edges")
 
 
 def stems(text):
-    return {w.rstrip("s") for w in re.findall(r"[a-z0-9_]+", re.sub(r"--\S+", " ", text.lower())) if w not in STOP}
+    return {w.rstrip("s") for w in re.findall(r"[a-z0-9_]+", re.sub(r"--\S+", " ", text.lower()))
+            if w not in STOP and not w.isdigit()}
 
 
 def cli_commands():
@@ -179,10 +202,11 @@ def main():
     if a.dry_run:
         print(f"would file on board {board} section {section}: {title}")
         return
+    labels = f"Infra,{label},Feedback: {cluster(tool + ' ' + note)}" if own else label
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(description(a.kind, place))
     r = run("vcc", "task", "create", "--project", str(board), "--section", section,
-            "--priority", "medium", "--labels", label, "--title", title, "--description-file", f.name, "--markdown")
+            "--priority", "medium", "--labels", labels, "--title", title, "--description-file", f.name, "--markdown")
     try:
         made = json.loads(r.stdout.splitlines()[0])
         ticket = (made.get("task") or made.get("tasks", [{}])[0])["ticketNumber"]
