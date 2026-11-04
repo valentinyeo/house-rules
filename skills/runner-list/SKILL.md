@@ -16,14 +16,17 @@ Valentin's format (2026-11-05). Every runner names its model and effort level. N
 ## Format
 - Cluster by topic. Bold headline per cluster, 1 to 3 words.
 - Most urgent cluster first: freezes and crashes on top.
-- One bullet per runner: `<Runner board name> (<model> <effort>): [<TICKET-ID> <exact ticket title>](<full ticket URL>)`.
+- One bullet per runner: `<Runner board name> (<model> <effort>)`.
+- The ticket goes on its own line below, as a nested bullet: `  - [<TICKET-ID> <exact ticket title>](<full ticket URL>)`.
 - The title is the link text. One link per bullet.
-- Idle or stuck runner: append ` (idle: <reason>)`.
+- Idle or stuck runner: append ` (idle: <reason>)` to the runner line.
 - No intro, no outro, no counts, no extra notes.
 
 ## Example
 **Freezes**
-- Multi Bot Runner C (gpt-6.1-sol medium): [IGSH-1170 Multiprompt freezes and I have to close it to keep working](https://app.hypertask.ai/detail/project-2060/1170)
+- Multi Bot Runner C (gpt-6.1-sol medium)
+  - [IGSH-1170 Multiprompt freezes and I have to close it to keep working](https://app.hypertask.ai/detail/project-2060/1170)
 
 **Rooms**
-- Multi Bot Runner I (gpt-6.1-sol medium): [IGSH-1313 Multi Bot: chat with several agents together](https://app.hypertask.ai/detail/project-2060/1313)
+- Multi Bot Runner I (gpt-6.1-sol medium)
+  - [IGSH-1313 Multi Bot: chat with several agents together](https://app.hypertask.ai/detail/project-2060/1313)
