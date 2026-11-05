@@ -153,6 +153,21 @@ def duplicate(kind, place, note, tickets, catalog):
     return best if best and same(note, best.get("title", "")) >= 0.8 else None
 
 
+URGENCY = [(6, "urgent"), (3, "high")]
+
+
+def bump_comment(ticket):
+    # Valentin 2026-11-05: repeats show as comments, so many comments means urgent.
+    number = ticket["ticketNumber"]
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write("**+1. Another agent hit this problem.**\n")
+    run("vcc", "comment", "add", number, "--kind", "qa", "--markdown", "--file", f.name)
+    count = int(ticket.get("totalComments") or 0) + 1
+    level = next((p for n, p in URGENCY if count >= n), None)
+    if level and str((ticket.get("priority") or {}).get("Priority_Value", "")).lower() != level:
+        run("vcc", "task", "update", number, "--priority", level)
+
+
 def description(kind, tool):
     where = f"It happened in {tool}."
     return "\n".join([
@@ -172,6 +187,8 @@ def main():
     p.add_argument("--tool", required=True, help="the exact command, MCP tool or screen: 'sections list', 'hypertask_comments', 'inbox'")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--detail", default="", help="technical detail for the agent lane: command, field, error")
+    p.add_argument("--same", type=int, metavar="N", help="ticket number on the board that already reports this problem")
+    p.add_argument("--new", action="store_true", help="you read the closest open tickets and none is this problem")
     p.add_argument("note", metavar="summary")
     a = p.parse_args()
     if CREDENTIAL.search(a.note + " " + a.detail):
@@ -189,13 +206,29 @@ def main():
     board, section, label = (OWN_BOARD, OWN_SECTION, OWN_LABEL) if own else (BOARD, SECTION[a.kind], LABEL)
     place = where(tool, None if own else catalog)
     pool = [t for t in open_feedback(board, label) if t.get("title", "").startswith("Agent feedback")]
-    found = duplicate(a.kind, place, note, pool, catalog)
+    found = next((t for t in pool if t.get("uniqueIndex") == a.same), None) if a.same else duplicate(a.kind, place, note, pool, catalog)
+    if a.same and not found:
+        sys.exit(f"agent-feedback: no open feedback ticket {a.same} on board {board}")
+    if not found and own and not a.new:
+        topic = f"Feedback: {cluster(tool + ' ' + note)}"
+        words = stems(note)
+        def near(t):
+            title = stems(t.get("title", ""))
+            on_topic = any(l.get("name") == topic for l in t.get("labels", []))
+            return (on_topic, len(words & title) / (len(words | title) or 1))
+        close = sorted(pool, key=near, reverse=True)[:8]
+        print("agent-feedback: check these open tickets first. Same problem? Rerun with --same N. None? Rerun with --new.")
+        for t in close:
+            print(f"  {t['uniqueIndex']}  https://app.hypertask.ai/detail/project-{board}/{t['uniqueIndex']}  {t.get('title', '')[:110]}")
+        sys.exit(2)
     if found:
         url = f"https://app.hypertask.ai/detail/project-{board}/{found['uniqueIndex']}"
         if not a.dry_run:
             r = run("vcc", "activity", "add", found["ticketNumber"], f"agent-feedback +1 ({a.kind}{', ' + tool if tool else ''}): {lane}")
             if r.returncode:
                 sys.exit(f"agent-feedback: bump failed: {(r.stderr or r.stdout).strip()[:200]}")
+            if own:
+                bump_comment(found)
         print(f"{'would bump' if a.dry_run else 'bumped'} {found['ticketNumber']} {url}")
         return
     title = title_for(a.kind, note)
