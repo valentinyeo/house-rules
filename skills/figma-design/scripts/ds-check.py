@@ -18,7 +18,7 @@ THEME_FILES = ["src/themes.zig", "src/app_state.zig", "src/chat_style.zig"]
 RADIUS_LINE = re.compile(r"radius|RoundRect|RADIUS", re.I)
 RADIUS_NUM = re.compile(r"(?:scale|uiScaled|scaled)\((\d+)\)|RADIUS\s*[:=][^=]*?(\d+)\s*;|radius:\s*i32\s*=\s*(\d+)")
 RGB = re.compile(r"RGB\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)")
-HEX = re.compile(r"#([0-9a-fA-F]{6})\b")
+HEX = re.compile(r"(?:#|0x[fF]{2})([0-9a-fA-F]{6})\b")
 
 
 def git(repo, *args):
@@ -74,7 +74,7 @@ def main():
     code_radii = radii(touched) | radii(theme) | {0}
     # Corners are per component, so only the touched files count; colours are app-wide tokens.
     ext = a.files[0].rsplit(".", 1)[-1]
-    app_src = git(a.repo, "grep", "-h", "-E", r"RGB\(|#[0-9a-fA-F]{6}", ref, "--", f"src/*.{ext}")
+    app_src = git(a.repo, "grep", "-h", "-E", r"RGB\(|#[0-9a-fA-F]{6}|0x[fF]{2}[0-9a-fA-F]{6}", ref, "--", f"*.{ext}")
     palette = colours(app_src)
 
     nodes = json.load(open(a.frame))
