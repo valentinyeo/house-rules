@@ -31,7 +31,6 @@ HT_CAPS = {
         "UX Sign-off": (10, "HT Design Lead"),
         "Flag: Only Me + QA": (10, "HT Product Lead"),
         "In Progress": (15, "HT Product Lead"),
-        "label:ai-feedback": (20, "HT Product Lead"),
     },
     4060: {
         "Agent Blocked": (5, "HT Product Lead"),
