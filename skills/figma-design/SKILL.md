@@ -1,6 +1,6 @@
 ---
 name: figma-design
-description: How design agents use Figma for Valentin's apps. Connect through the claude.ai Figma connector, work in Yeo UX for our apps or the client's own Figma team, rebuild real captures, propose by cloning, keep one design system page per app, and hand frames plus keyframes to tickets. Use for any Figma mockup, wireframe, icon, design system or design hand-off.
+description: How design agents use Figma for Valentin's apps. Connect through the claude.ai Figma connector, work in Yeo UX for our apps or the client's own Figma team, rebuild real captures, propose by cloning, read and keep each app's design system page (the living style guide) current, use impeccable to check and refine, and hand frames plus keyframes to tickets. Use for any Figma mockup, wireframe, icon, design system or design hand-off.
 ---
 
 # Figma for design agents
@@ -20,6 +20,15 @@ Learned by SF Design Lead on Multiprompt, 2026-10-26. Valentin approved this way
 ## Structure each app file
 - Pages: Reference captures, Foundations, Components, one page per platform (Desktop, Mobile), App icon, and a **design system page**.
 - Design system page: colours as Figma variables (each names its code constant), type scale, spacing and corners, real components with properties and variants, and the rules in one paragraph. Runners build only from it.
+
+## Before any screen (gate)
+Valentin, 2026-11-05, after a new Multiprompt screen ignored its style guide:
+> the Figma style guide for each app should be a living system, not a dead system
+
+1. Open the app's design system page first. Read its variables (`get_variable_defs`) and components. Put the page link in your ledger.
+2. Build only from those variables and components. Never invent a colour, font, size, corner, shadow or component.
+3. Something missing? Name it in the people comment as a new piece. Wait for his yes, unless his own ticket asked for it.
+4. Cite the design system page link in the agent-lane comment for every proposal.
 
 ## Work
 1. **Capture first.** Rebuild the current screen from his screenshot (screencast2 link) and trace every value to code. Real app colours can differ from the code theme; sample the capture.
@@ -60,6 +69,21 @@ return out;
 - Record his yes on the ticket in his own words before builders start.
 - Split approved work into build tickets, one per repo, under a parent ticket, with the app label.
 - Superseded frames: delete them, so runners never build the wrong one.
+
+## Keep the style guide alive
+- Any approved style change updates the design system page the same turn: variable, component, variant or rules paragraph.
+- A builder who ships a new value or component also adds it there, in the PR's turn.
+- Remove what the app no longer uses. The page shows what live code uses today.
+- Note the change in the agent lane with the page link. The next run builds from the new page.
+
+## Impeccable (allowed and recommended)
+The `impeccable` skill set sharpens work. The style guide stays the brief: "The brief wins", "Refinement preserves".
+- Check: `critique` and `audit` on the live screen or your proposal. Fix what they find.
+- Refine inside the style guide: `polish`, `distill`, `clarify`, `harden`, `adapt`, `layout`, `typeset`, `onboard`.
+- Style guide sync: `document` or `extract` reads live code into DESIGN.md. Mirror any gap into the design system page.
+- Style-changing commands only when his ticket asks: `bolder`, `overdrive`, `colorize`, `delight`, a new visual world or redesign.
+- Results still land as Figma frames and app code. They pass ds-check like any other proposal.
+- Missing for your harness? Install from its official repo https://github.com/pbakaus/impeccable. Never hand-copy it.
 
 ## Gotchas
 - `resize()` on an auto-layout frame fixes both axes. Set `primaryAxisSizingMode` or `counterAxisSizingMode` back to `AUTO` afterwards, or content overlaps.
