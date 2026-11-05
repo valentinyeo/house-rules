@@ -28,6 +28,29 @@ Learned by SF Design Lead on Multiprompt, 2026-10-26. Valentin approved this way
 4. **Screenshot every change** with `get_screenshot` and look at it before you show him. Fix clipping, overlap and colour emoji yourself.
 5. **Keyframe.** Download the screenshots and stitch them into one PNG (Python PIL) for the ticket.
 
+## Check values against live code (gate, before any post)
+Valentin, 2026-11-05:
+> you have to design something that uses the design system and not degrade it or regress it
+
+Failure it prevents: IGSH-1687 dropdown corners set to 4px and 2px. The source was a stale local checkout plus a Hypertask-only corner rule. Live Multiprompt code used 15, 17 and 10.
+1. Read values from the remote default branch after `git fetch`, never a local checkout.
+2. Keep every corner, colour and size the code already uses. A changed or new value needs a named reason and his yes.
+3. Dump the proposal frame with `use_figma` (replace FRAME_ID), save the result as `frame.json`:
+```js
+const root = await figma.getNodeByIdAsync('FRAME_ID');
+const hex = c => [c.r,c.g,c.b].map(v=>Math.round(v*255).toString(16).padStart(2,'0')).join('');
+const out = [];
+root.findAll(() => true).forEach(n => {
+  let a = n, p = []; while (a && a.id !== root.id) { p.unshift(a.name); a = a.parent; }
+  const r = ('cornerRadius' in n && typeof n.cornerRadius === 'number' && n.cornerRadius > 0) ? n.cornerRadius : null;
+  const fills = (n.type !== 'TEXT' && Array.isArray(n.fills)) ? n.fills.filter(f => f.type === 'SOLID' && f.visible !== false && (f.opacity ?? 1) > 0).map(f => hex(f.color)) : [];
+  if (r !== null || fills.length) out.push({ path: p.join('/') + ' [' + n.id + ']', radius: r, fills });
+});
+return out;
+```
+4. Run `scripts/ds-check.py --repo <app repo> --files <source files the design touches> --frame frame.json`. Use `--ignore Today` for "today" columns.
+5. Post only on PASS. Put the PASS line in the agent-lane comment. On FAIL, fix the frame, or name each new value in the people comment and wait for his yes.
+
 ## Show Valentin
 - He is often on his phone. Send the image with SendUserFile, and give the Figma link `https://www.figma.com/design/<fileKey>?node-id=<a-b>`. A link alone gets missed.
 - If he is at the desktop, open the frame with `zsb navigate`.
