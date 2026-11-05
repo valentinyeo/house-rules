@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Flag tickets that sit in a column nobody can be working.
+
+House rules: a runner stays on its one ticket until it is shipped. So the
+work columns can never hold more tickets than there are live runners, and a
+ticket only waits in QA or AI Review for a short while.
+
+Per ticket, from the board and the ticket's own agent log:
+  In Progress  OK only when the last claimer is a live runner, this is that
+               runner's newest claim, and the log moved in the last few hours.
+               Otherwise DEAD-RUNNER, MOVED-ON, STALE or NO-CLAIM.
+  QA           merged work waiting for its live proof. Over a day: the runner
+               left before shipping.
+  AI Review    a PR waiting for review. Over a few hours: nobody drives it.
+  Agent Blocked  only real tool or server failures, cleared fast. Over a day.
+Column totals are checked against the live runner count.
+
+Valentin, 2026-11-05: "20 tickets in progress. That's impossible. We don't
+have that many runners."
+
+usage: flow-check [--board 15] [--json PATH] [--self-test]
+Read-only. It flags; the board lead moves tickets.
+"""
+import argparse
+import json
+import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+
+# board: (runner tmux prefix and agent name pattern, columns with their limits in hours)
+BOARDS = {
+    15: {
+        "runners": [("ht-or-runner-", "Runner {n}")],
+        "in_progress": "In Progress",
+        "waits": {"QA": 24, "AI Review": 6, "Agent Blocked (Infra)": 24},
+        "blocked_cap": 5,
+    },
+    4060: {
+        "runners": [],
+        "in_progress": "In Progress",
+        "waits": {"AI Review": 6, "Agent Blocked": 24},
+        "blocked_cap": 5,
+    },
+    11514: {
+        "runners": [("ht-ci-runner-", "CI Runner {n}")],
+        "in_progress": "In Progress",
+        "waits": {"AI Review": 6},
+        "blocked_cap": 5,
+    },
+}
+ACTIVE_HOURS = 3
+CLAIM = re.compile(r"^\s*(?:\S+\s+){0,3}claimed\b", re.I)
+
+
+def ht(*args):
+    r = subprocess.run(["hypertask", "--json", *args], capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def hours_since(stamp, now):
+    try:
+        return (now - datetime.fromisoformat(stamp.replace("Z", "+00:00"))).total_seconds() / 3600
+    except (AttributeError, ValueError):
+        return None
+
+
+def live_runners(board):
+    out = subprocess.run(["tmux", "ls", "-F", "#S"], capture_output=True, text=True).stdout.split()
+    names = set()
+    for prefix, pattern in BOARDS[board]["runners"]:
+        for s in out:
+            m = re.fullmatch(re.escape(prefix) + r"(\d+)", s)
+            if m:
+                names.add(pattern.format(n=m.group(1)).lower())
+    return names
+
+
+def column(board, name):
+    tickets, offset = [], 0
+    while True:
+        page = ht("task", "list", "--project", str(board), "--section", name, "--status", "Normal",
+                  "--limit", "100", "--offset", str(offset)).get("tasks", [])
+        tickets += page
+        if len(page) < 100:
+            return tickets
+        offset += 100
+
+
+def details(t):
+    num = t["ticketNumber"]
+    log = ht("task", "agent-log", num).get("activities", [])
+    task = (ht("task", "get", num).get("tasks") or [{}])[0]
+    return num, log, (task.get("staleness") or {}).get("sectionChangedAt") or t.get("updatedAt")
+
+
+def in_progress_verdict(log, live, newest_claim, now, num):
+    claim = next((a for a in log if CLAIM.search((a.get("text") or "")[:60])), None)
+    last = log[0] if log else None
+    idle = hours_since(last.get("createdAt"), now) if last else None
+    if not claim:
+        return "NO-CLAIM", None, idle
+    who = claim.get("agentName") or "unknown"
+    if live is not None and who.lower().startswith(("runner ", "ci runner ")) and who.lower() not in live:
+        return "DEAD-RUNNER", who, idle
+    if newest_claim.get(who, (None, ""))[0] not in (None, num):
+        return "MOVED-ON", who, idle
+    if idle is None or idle > ACTIVE_HOURS:
+        return "STALE", who, idle
+    return "OK", who, idle
+
+
+def run(board):
+    cfg = BOARDS[board]
+    now = datetime.now(timezone.utc)
+    live = live_runners(board) if cfg["runners"] else None
+    cols = {name: column(board, name) for name in [cfg["in_progress"], *cfg["waits"]]}
+    with ThreadPoolExecutor(6) as ex:
+        info = {num: (log, moved) for num, log, moved in ex.map(details, [t for ts in cols.values() for t in ts])}
+    newest_claim = {}
+    for t in cols[cfg["in_progress"]]:
+        log = info[t["ticketNumber"]][0]
+        claim = next((a for a in log if CLAIM.search((a.get("text") or "")[:60])), None)
+        if claim:
+            who, at = claim.get("agentName") or "unknown", claim.get("createdAt") or ""
+            if at > newest_claim.get(who, (None, ""))[1]:
+                newest_claim[who] = (t["ticketNumber"], at)
+    rows = []
+    for t in cols[cfg["in_progress"]]:
+        num = t["ticketNumber"]
+        verdict, who, idle = in_progress_verdict(info[num][0], live, newest_claim, now, num)
+        rows.append({"ticket": num, "column": cfg["in_progress"], "verdict": verdict, "holder": who,
+                     "idle_h": idle, "title": t["title"]})
+    for name, limit in cfg["waits"].items():
+        for t in cols[name]:
+            num = t["ticketNumber"]
+            waited = hours_since(info[num][1], now)
+            last = info[num][0][0] if info[num][0] else {}
+            rows.append({"ticket": num, "column": name, "verdict": "OVERDUE" if waited and waited > limit else "OK",
+                         "holder": last.get("agentName"), "idle_h": waited, "title": t["title"]})
+    working = sum(1 for r in rows if r["column"] == cfg["in_progress"] and r["verdict"] == "OK")
+    blocked = [c for c in cfg["waits"] if c.startswith("Agent Blocked")]
+    summary = {
+        "board": board,
+        "live_runners": len(live) if live is not None else None,
+        "in_progress": len(cols[cfg["in_progress"]]),
+        "really_worked": working,
+        "out_of_place": [r for r in rows if r["verdict"] != "OK"],
+        "columns": {c: len(ts) for c, ts in cols.items()},
+        "blocked_over_cap": bool(blocked) and len(cols[blocked[0]]) > cfg["blocked_cap"],
+    }
+    return rows, summary
+
+
+def show(rows, s):
+    url = "https://app.hypertask.ai/detail/project-{b}/{n}"
+    for r in sorted(rows, key=lambda r: (r["column"], r["verdict"] == "OK", -(r["idle_h"] or 0))):
+        if r["verdict"] == "OK":
+            continue
+        idle = f"{r['idle_h']:.0f}h" if r["idle_h"] is not None else "-"
+        print(f"{r['verdict']:<11} {r['column']:<22} {idle:>5}  {(r['holder'] or '-')[:18]:<18} "
+              f"{url.format(b=s['board'], n=r['ticket'].rsplit('-', 1)[1])}  {r['title'][:60]}")
+    runners = "no runner pool" if s["live_runners"] is None else f"{s['live_runners']} live runners"
+    print(f"COLUMNS board {s['board']}: " + ", ".join(f"{c} {n}" for c, n in s["columns"].items()))
+    print(f"SUMMARY board {s['board']}: {s['in_progress']} In Progress, {s['really_worked']} really worked, "
+          f"{runners}, {len(s['out_of_place'])} out of place"
+          + (", Agent Blocked over cap" if s["blocked_over_cap"] else ""))
+    if s["live_runners"] is not None and s["in_progress"] > s["live_runners"]:
+        print(f"IMPOSSIBLE In Progress holds {s['in_progress']} tickets for {s['live_runners']} runners")
+
+
+def self_test():
+    now = datetime(2026, 11, 5, 22, 0, tzinfo=timezone.utc)
+    fresh, old = "2026-11-05T21:30:00Z", "2026-11-01T10:00:00Z"
+    live = {"runner 1", "runner 2"}
+    claim = lambda who, at: {"agentName": who, "createdAt": at, "text": "Claimed. Session working it now."}
+    note = lambda who, at: {"agentName": who, "createdAt": at, "text": "Plan: reproduce"}
+    newest = {"Runner 1": ("HTPR-2", fresh), "Runner 2": ("HTPR-3", fresh)}
+    assert in_progress_verdict([note("Runner 1", fresh), claim("Runner 1", fresh)], live, newest, now, "HTPR-2")[0] == "OK"
+    assert in_progress_verdict([claim("Runner 12", fresh)], live, newest, now, "HTPR-9")[0] == "DEAD-RUNNER"
+    assert in_progress_verdict([claim("Runner 1", old)], live, newest, now, "HTPR-1")[0] == "MOVED-ON"
+    assert in_progress_verdict([claim("Runner 2", old)], live, {"Runner 2": ("HTPR-3", old)}, now, "HTPR-3")[0] == "STALE"
+    assert in_progress_verdict([note("HT Design Lead", fresh)], live, newest, now, "HTPR-4")[0] == "NO-CLAIM"
+    assert in_progress_verdict([claim("HT Design Builder", fresh)], live, {}, now, "HTPR-5")[0] == "OK"
+    sweep = {"agentName": "Runner 12", "createdAt": fresh, "text": "HT Product Lead pickup queue: orphan HTPR-2. Claim record: 91"}
+    assert in_progress_verdict([sweep, claim("Runner 1", fresh)], live, newest, now, "HTPR-2")[0] == "OK", "sweep note read as a claim"
+    print("SELF_TEST_OK")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--board", type=int, default=15, choices=sorted(BOARDS))
+    p.add_argument("--json")
+    p.add_argument("--self-test", action="store_true")
+    a = p.parse_args()
+    if a.self_test:
+        return self_test()
+    rows, summary = run(a.board)
+    show(rows, summary)
+    if a.json:
+        json.dump({"rows": rows, "summary": summary}, open(a.json, "w"), indent=1, default=str)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

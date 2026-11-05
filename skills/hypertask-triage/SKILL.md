@@ -79,12 +79,33 @@ Only real tool or server failures stay. Design goes to UX needed. Merged work go
 Waiting on a ticket or date goes home with a link. His call goes to Valentin Review with one Question.
 The class is a regex guess. Read the ticket, move it with `blocker-review --clear T --to <id> --why "..."`.
 
+## 6c. Flag tickets nobody can be working
+Valentin, 2026-11-05:
+> I see 20 tickets in progress. That's impossible. We don't have that many runners.
+
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/flow-check --board 15`
+Also run it for 4060 and 11514.
+
+A runner stays on one ticket until it ships. So:
+- In Progress never holds more tickets than live runners. More? It prints `IMPOSSIBLE`.
+- An In Progress ticket is fine only if its claimer is a live runner, it is that runner's newest claim, and its log moved in the last 3 hours.
+- Otherwise: `DEAD-RUNNER` (no such runner session), `MOVED-ON` (runner claimed something newer), `STALE` (no log for 3h) or `NO-CLAIM`.
+- QA over 24h: the runner left before the live proof.
+- AI Review over 6h: nobody drives the PR.
+- Agent Blocked over 24h, or more than 5 tickets: not being cleared.
+
+It only reads. It flags; it moves nothing.
+Report every flagged row to the board's lead, as full links in your reply.
+The lead sends each ticket back to a runner or to its home column.
+Same flag on the next run? The lead's sweep is broken. File that on board 4060.
+
 ## 7. Report to Valentin
 Caveman:
 - Archived N of M done tickets.
 - Kept K, grouped by reason, each a full https link.
 - Blockers: N wait on you, X cleared, Y badly written, notes posted.
 - Levers found, each with what it ends.
+- Out of place: In Progress count against live runners, then counts per flag and column.
 - Wrong calls fixed in the rule, if any.
 
 Auto-archive of done tickets on a timer comes later, after Valentin trusts the manual runs.
