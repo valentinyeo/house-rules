@@ -40,7 +40,7 @@ MARK = "blocker-review"
 # Where a cleared ticket goes back to. Board 15: Bugs, Features, Improvements.
 HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}, 4060: {"other": 10414}, 2060: {"other": 4351}}
 CEO_HT = Path.home() / "projects/ceo/bin/ceo-ht"
-ASKS_OFF = re.compile(r"\bswitch\b[^.?]{0,80}\boff\b|\bto off\b", re.I)
+ASKS_OFF = re.compile(r"\bswitch\s+[a-z0-9]+(?:-[a-z0-9]+)+\s+to\s+off\b|\bflag\b[^.?]{0,60}\boff\b|\boff\b[^.?]{0,40}\bflag\b", re.I)
 
 LINT_PATH = Path(__file__).resolve().parents[2] / "tickets/scripts/ticket-lint"
 lint = importlib.machinery.SourceFileLoader("ticket_lint", str(LINT_PATH)).load_module()
@@ -52,6 +52,7 @@ HIS_CALLS = [
     ("going public", re.compile(r"\b(public|publish\w*|launch|play store|app store|store listing|announce|x\.com)\b", re.I)),
     ("prod data deletion", re.compile(r"\b(delete|deletion|wipe|purge)\b[^.]{0,60}\b(prod|production|customer|real|user)\b", re.I)),
     ("needs him at his PC or phone", re.compile(r"\b(your (pc|computer|desktop|laptop|phone|machine|windows|account)|at your pc|real slack|only you can|have you secured)\b", re.I)),
+    ("Hypertask Cloudflare change", re.compile(r"\bcloudflare\b", re.I)),
     ("product decision", re.compile(r"\b(scope|which (option|design|version|one)|option [ab12]|new (button|screen|element|feature|page)|wireframe|figma)\b", re.I)),
 ]
 
@@ -291,6 +292,9 @@ def self_test():
     assert drift(q, [q, {"createdAt": "2026-10-02", "creatorId": 6, "agent": {"id": "x"}, "text": "status"}]) is None, \
         "agent posting under his login counted as his reply"
     assert drift({**q, "text": "Question: Switch htpr-1-x to Off?"}, []), "missed an Off ask"
+    assert drift({**q, "text": "Question: Get fresh keys and switch the old ones off?"}, []) is None, "key rotation read as a flag Off ask"
+    assert drift({**q, "text": "Question: Turn the graphite flag off?"}, []), "missed a flag Off ask in words"
+    assert his_call("Let an agent apply the free Cloudflare fixes?"), "Cloudflare change not his call"
     assert home({"title": "[BUG] x"}, 15) == 4389 and home({"title": "x"}, 4060) == 10414, "wrong home column"
     print("SELF_TEST_OK")
     return 0
