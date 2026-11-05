@@ -86,6 +86,16 @@ def ci_block(log):
     return "NO-TICKET" if CI_FAIL.search(newest_blocker) else None
 
 
+def ci_link(relations):
+    """House rule 2026-11-06: the app ticket is linked BlockedBy its Fleet CI ticket on board 11514."""
+    for rel in relations:
+        other = rel.get("otherTask") or {}
+        if other.get("projectId") == 11514 and "block" in (rel.get("relationType") or "").lower() \
+                and (other.get("status") or "Normal") == "Normal":
+            return other.get("ticketNumber")
+    return None
+
+
 def ci_verdict(ci_task, now):
     if not ci_task:
         return "CI-WAIT", None
@@ -226,13 +236,17 @@ def run(board):
                          "holder": last.get("agentName"), "idle_h": waited, "title": t["title"]})
     ci_rows, ci_boss_h = [], None
     if board != 11514:
-        found = [(r, ci_block(info[r["ticket"]][0])) for r in rows]
-        found = [(r, ref) for r, ref in found if ref]
-        refs = sorted({ref for _, ref in found if ref != "NO-TICKET"})
+        with ThreadPoolExecutor(6) as ex:
+            linked = list(ex.map(lambda r: ci_link(ht("task", "relations", r["ticket"]).get("relations") or []), rows))
+        found = [(r, link or ci_block(info[r["ticket"]][0]), bool(link)) for r, link in zip(rows, linked)]
+        found = [f for f in found if f[1]]
+        refs = sorted({ref for _, ref, _ in found if ref != "NO-TICKET"})
         with ThreadPoolExecutor(6) as ex:
             ci_tasks = dict(zip(refs, ex.map(lambda n: (ht("task", "get", n).get("tasks") or [None])[0], refs)))
-        for r, ref in found:
+        for r, ref, is_linked in found:
             verdict, open_h = ("CI-NO-TICKET", None) if ref == "NO-TICKET" else ci_verdict(ci_tasks.get(ref), now)
+            if ref != "NO-TICKET" and not is_linked and verdict != "CI-DONE":
+                verdict = "CI-NO-LINK"
             ci_rows.append({"ticket": r["ticket"], "column": r["column"], "verdict": verdict,
                             "ci_ticket": None if ref == "NO-TICKET" else ref, "ci_open_h": open_h,
                             "waited_h": r["idle_h"], "title": r["title"]})
@@ -348,6 +362,9 @@ def self_test():
     assert ci_block([entry("Plan: fix the test"), claim("Runner 1", old)]) is None
     assert ci_block([entry("Blocker: Vercel env returns 403, the ship gate fails"), claim("Runner 1", old)]) is None
     assert ci_block([claim("Runner 1", fresh), entry("Blocker: see HYCI-9")]) is None, "CI link before the claim counted"
+    rel = lambda kind, board, num, status="Normal": {"relationType": kind, "otherTask": {"projectId": board, "ticketNumber": num, "status": status}}
+    assert ci_link([rel("RelatedTo", 11514, "HYCI-1"), rel("BlockedBy", 11514, "HYCI-2")]) == "HYCI-2"
+    assert ci_link([rel("BlockedBy", 15, "HTPR-1"), rel("BlockedBy", 11514, "HYCI-3", "Archive")]) is None
     task = lambda h, sec="In Progress", pri="Urgent": {"createdAt": f"2026-11-05T{22 - h:02d}:00:00Z", "section": sec,
                                                        "status": "Normal", "priority": {"Priority_Value": pri}}
     assert ci_verdict(task(1), now)[0] == "CI-WAIT"

@@ -31,8 +31,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 STATE = Path.home() / ".local/state/board-health"
 ESCALATE_HOURS = 24
-LEADS = {15: "HT Product Lead", 4060: "Infra Lead", 11514: "CI Boss"}
+LEADS = {15: "HT Product Lead", 4060: "Infra Lead", 11514: "CI Boss", 2060: "Mini Boss CEO"}
 CHATTER_LINE = 10
+FLOW_BOARDS = {15, 4060, 11514}
 
 # key: (what must hold, owner role, fix). Owner "lead" means the board's lead.
 INVARIANTS = {
@@ -58,6 +59,8 @@ INVARIANTS = {
                      "rewrite per skills/tickets, then fix what wrote it"),
     "chatter": (f"under {CHATTER_LINE} agent rule breaks a day", "fleet chief",
                 "fix the rule or code behind the top writer, /house-rules-update"),
+    "status": ("no merged, closed or PR-less ticket in a pre-merge column", "lead",
+               "merged: QA on board 15, Done elsewhere after the live check; closed or no PR: home column"),
     "identities": ("runner logins match live runner sessions, no duplicate names", "Chief Of Staff",
                    "/agent-housekeeping files the extra logins for Valentin's yes; sync logins whenever runners change"),
 }
@@ -84,8 +87,16 @@ def number(pattern, text):
     return tuple(int(g) for g in m.groups()) if m else None
 
 
-def measure(flow, blockers, chatter, identities=None):
+def measure(flow, blockers, chatter, identities=None, status=None):
     """Turn the three checks into {key: (bad count, detail)}; None means not measured on this board."""
+    m = {}
+    if flow:
+        m.update(measure_flow(flow))
+    m.update(measure_rest(blockers, chatter, identities, status))
+    return m
+
+
+def measure_flow(flow):
     s, rows = flow["summary"], flow["rows"]
     o = s.get("ownership")
     m = {}
@@ -105,6 +116,11 @@ def measure(flow, blockers, chatter, identities=None):
     if any(r["ci_ticket"] for r in s.get("ci_blocked", [])):
         h = s.get("ci_boss_h")
         m["ci_boss"] = (int(h is None or h > 6), "never" if h is None else f"last note {h:.0f}h ago")
+    return m
+
+
+def measure_rest(blockers, chatter, identities, status):
+    m = {}
     pristine = number(r"^PRISTINE (\d+) of (\d+)", blockers)
     if pristine:
         m["pristine"] = (pristine[1] - pristine[0], f"{pristine[0]} of {pristine[1]} clean")
@@ -114,6 +130,8 @@ def measure(flow, blockers, chatter, identities=None):
     if chatter is not None:
         agent = len({(r["ticket"], r["item"]) for r in chatter if r["origin"] == "agent"})
         m["chatter"] = (int(agent >= CHATTER_LINE), f"{agent} agent items in 24h")
+    if status is not None:
+        m["status"] = (len(status["rows"]), " ".join(f"{r['ticket']}({r['verdict']})" for r in status["rows"]))
     if identities is not None:
         extra = {p: v["extra"] for p, v in identities["pools"].items() if v.get("extra")}
         detail = " ".join(f"{p}: {len(e)} extra" for p, e in extra.items())
@@ -188,6 +206,8 @@ def self_test():
     assert any(l.startswith("ESCALATE  wip") and "HT Product Lead" in l for l in lines), lines
     ids = {"pools": {"Runner N": {"extra": ["11", "12"]}}, "duplicates": ["mini boss ceo"], "extra": 2}
     assert measure(flow, blockers, None, ids)["identities"][0] == 3
+    st = {"rows": [{"ticket": "IGSH-1", "verdict": "MERGED-NOT-MOVED"}]}
+    assert measure(flow, blockers, None, None, st)["status"] == (1, "IGSH-1(MERGED-NOT-MOVED)")
     clean = {k: (0, "") for k in m}
     assert scorecard(15, clean, {})[1] == "BOARD-HEALTH board 15: GREEN"
     print("SELF_TEST_OK")
@@ -202,16 +222,18 @@ def main():
     a = p.parse_args()
     if a.self_test:
         return self_test()
-    with ThreadPoolExecutor(4) as ex:
+    with ThreadPoolExecutor(5) as ex:
+        status = ex.submit(run_json, [str(HERE / "wrong-status"), "--board", str(a.board)])
         flow = ex.submit(run_json, [str(HERE / "flow-check"), "--board", str(a.board)])
         blockers = ex.submit(run_text, [str(HERE / "blocker-review"), "--boards", str(a.board)])
         chatter = ex.submit(run_json, [str(HERE / "ticket-check"), "--board", str(a.board)])
         identities = ex.submit(run_json, [str(HERE / "agent-identities")]) if a.board == 15 else None
-    if flow.result() is None:
+    if flow.result() is None and a.board in FLOW_BOARDS:
         print(f"BOARD-HEALTH board {a.board}: UNKNOWN, flow-check failed")
         return 1
     now = datetime.now(timezone.utc)
-    measured = measure(flow.result(), blockers.result(), chatter.result(), identities and identities.result())
+    measured = measure(flow.result(), blockers.result(), chatter.result(), identities and identities.result(),
+                       status.result())
     lines, head, escalate = scorecard(a.board, measured, track(a.board, measured, now))
     print("\n".join(lines))
     print(head)

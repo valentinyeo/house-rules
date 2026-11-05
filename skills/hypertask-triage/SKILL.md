@@ -17,7 +17,7 @@ Valentin, 2026-11-06:
 > the outcome of the skill is to force the chief of staff to fix all of this, and make sure that the system is running smoothly
 
 `~/.local/share/house-rules/skills/hypertask-triage/scripts/board-health --board 15 --apply`
-Run it for every board your fleet owns. Hypertask: 15, 4060, 11514.
+Run it for every board your fleet owns. Hypertask: 15, 4060, 11514. Software Factory: 2060.
 
 One runner, one ticket until live. So:
 - Active tickets (In Progress, AI Review, QA) never outnumber live runners.
@@ -145,24 +145,42 @@ A board with no brain labels at all? File that once on board 4060.
 ## 6e. Flag tickets blocked by CI
 CI Boss owns CI, on the fleet CI board https://app.hypertask.ai/project?id=11514.
 CI Boss slow? Product tickets pile up behind it.
-A CI-blocked ticket links one Urgent CI ticket in its log.
+House rule, CI snag (2026-11-06): one Fleet CI ticket per CI problem on 11514. Search first; same problem gets a +1 and a link.
+The app ticket stays on its board, linked BlockedBy that CI ticket, and waits. App sessions never fix CI.
+Fix ships: CI Boss's `ci-unblock-waiters` posts a continue note in the app ticket's agent lane and clears the wait.
 
 flow-check prints, per blocked ticket:
 - `CI-WAIT`: CI ticket open, Urgent, In Progress, under 6 hours. Fine.
 - `CI-SLOW`: CI ticket open over 6 hours, not Urgent, or not In Progress. CI Boss is behind.
 - `CI-DONE`: CI ticket closed, but the ticket still waits. Its runner must resume.
 - `CI-NO-TICKET`: CI failure blocker, no CI ticket. CI Boss never heard.
+- `CI-NO-LINK`: a CI ticket is named in the log, but no BlockedBy link. `ci-unblock-waiters` will never wake it.
 Then `CI-BLOCKED board N: X tickets wait on CI`.
 
 Act on it:
-- `CI-NO-TICKET`: file one Urgent ticket on 11514, labels CI and Hypertask CI. Or +1 the open one for the same check. Link it in the blocked ticket's agent lane.
+- `CI-NO-TICKET`: file one Urgent ticket on 11514, labels CI and Hypertask CI. Or +1 the open one for the same problem. Link the app ticket BlockedBy it: `vcc task link <app ticket> <CI ticket> --type BlockedBy`.
+- `CI-NO-LINK`: add that BlockedBy link.
+- `CI-DONE`: the wait did not clear. Tell CI Boss its `ci-unblock-waiters` missed it, and the board lead which runner resumes.
 - `CI-SLOW`: add a line in that CI ticket's agent lane. List the waiting tickets and hours.
-- `CI-DONE`: tell the board lead which runner must resume.
 - `CI-SLOW` again on the next run? File one Urgent alarm on 11514 for CI Boss.
 - `CI-BOSS-QUIET`: no CI Boss note on the blocking CI tickets for 6 hours. CI Boss is likely not running. Tell Chief Of Staff, who restarts leads.
 
 Who can write on 11514: Chief Of Staff and CI Boss. The shared vcc login can tag there, but its agent lane says "Task not found".
 Can't write there? Post the CI list in each blocked product ticket's agent lane. Then hand it to Chief Of Staff.
+
+## 6h. Find tickets in the wrong column
+Valentin, 2026-11-06:
+> a bunch of tickets that are in AI review, but really the feature is already in the app ... the runner just forgot to move it
+
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/wrong-status --board 15`
+Also 4060, 11514, and Software Factory 2060. board-health shows it as the `status` line.
+
+It reads every GitHub PR link on each work ticket and asks GitHub for the newest PR's state.
+- `MERGED-NOT-MOVED`: PR merged, ticket still before merge. Board 15: move to QA for the live proof. Other boards: merged means released; check it live, then Done.
+- `PR-CLOSED`: PR closed unmerged, none open. Back to its home column.
+- `NO-PR`: in AI Review with no PR. Back to its home column, or add the PR link.
+It only reads. The board lead moves them, as its agent, with the reason in the agent lane.
+Same runner forgets twice? Fix its ship step, not the ticket.
 
 ## 6f. Keep tickets clean: count chatter and fix its origin
 Valentin, 2026-11-06:
