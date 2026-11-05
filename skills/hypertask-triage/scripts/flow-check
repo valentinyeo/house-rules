@@ -67,7 +67,8 @@ CLAIM = re.compile(r"^\s*(?:\S+\s+){0,3}claimed\b", re.I)
 CI_SLOW_HOURS = 6
 CI_REF = re.compile(r"\bHYCI-(\d+)\b|project-11514/(\d+)")
 BLOCKER = re.compile(r"^\W*(blocker|blocked|waiting on ci|ci block)", re.I)
-CI_FAIL = re.compile(r"\b(ci|checks?|gate|test-shard\d*|visual regression|workflow|hosted|runner)\b[^.]{0,80}"
+CI_FAIL = re.compile(r"\b(ci|feature-flag-gate|test-shard\d*|visual regression|workflow|hosted (?:retry|run|check)\w*"
+                     r"|github checks?|check runs?|required checks?)\b[^.]{0,80}"
                      r"\b(fail\w*|red|stuck|timed out|cancel\w*|queued)\b", re.I)
 
 
@@ -287,6 +288,7 @@ def self_test():
     assert ci_block([entry("Blocker: waiting on https://app.hypertask.ai/detail/project-11514/133"), claim("Runner 1", old)]) == "HYCI-133"
     assert ci_block([entry("Blocker: hosted feature-flag-gate failed again"), claim("Runner 1", old)]) == "NO-TICKET"
     assert ci_block([entry("Plan: fix the test"), claim("Runner 1", old)]) is None
+    assert ci_block([entry("Blocker: Vercel env returns 403, the ship gate fails"), claim("Runner 1", old)]) is None
     assert ci_block([claim("Runner 1", fresh), entry("Blocker: see HYCI-9")]) is None, "CI link before the claim counted"
     task = lambda h, sec="In Progress", pri="Urgent": {"createdAt": f"2026-11-05T{22 - h:02d}:00:00Z", "section": sec,
                                                        "status": "Normal", "priority": {"Priority_Value": pri}}
