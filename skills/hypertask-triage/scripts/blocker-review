@@ -117,15 +117,21 @@ def parked(boards, min_age_days=1):
                     age = 0
                 if age < min_age_days:
                     continue
-                cs = ht("comment", "list", t["ticketNumber"], "--limit", "5").get("comments") or []
+                cs = ht("comment", "list", t["ticketNumber"], "--limit", "200").get("comments") or []
                 last = plain(max(cs, key=lambda c: c.get("createdAt") or "").get("text") if cs else "")
                 where = next((name for name, rx in PARKED_CLASSES if rx.search(last)), None)
                 where = where or ("his call: Valentin Review with one Question" if his_call(last) else "real infra: stays")
-                rows.append((where, t["ticketNumber"], age, f"https://app.hypertask.ai/detail/project-{board}/{t['uniqueIndex']}"))
-    for where, number, age, url in sorted(rows):
-        print(f"PARKED {number:11} {age:3}d  {where:42} {url}")
+                full = (ht("task", "get", t["ticketNumber"]).get("tasks") or [t])[0]
+                defects = description_defects(full.get("description"), False) + ticket_defects(full, cs)
+                rows.append((where, t["ticketNumber"], age, f"https://app.hypertask.ai/detail/project-{board}/{t['uniqueIndex']}",
+                             defects))
+    for where, number, age, url, defects in sorted(rows):
+        print(f"PARKED {number:11} {age:3}d  {where:42} {len(defects)} defects  {url}")
+        for d in defects:
+            print(f"    - {d}")
     misplaced = sum(1 for r in rows if not r[0].startswith("real infra"))
-    print(f"PARKED SUMMARY {len(rows)} parked over {min_age_days}d, {misplaced} belong in another column")
+    print(f"PARKED SUMMARY {len(rows)} parked over {min_age_days}d, {misplaced} belong in another column, "
+          f"{sum(1 for r in rows if not r[4])} break no ticket rule")
 
 
 def his_call(text):
@@ -164,8 +170,45 @@ def description_defects(desc, waiting_on_him):
     return bad
 
 
-def review(t, q_text, waiting_on_him):
-    defects = description_defects(t.get("description"), waiting_on_him)
+PEOPLE_KINDS = {"qa", "question", "done"}
+PLAIN_QUOTE = re.compile(r"(Valentin|owner)[^.<]{0,40}(said|asked|wrote|says)[^<]{0,50}(&quot;|\"|“)", re.I)
+BOT_VERDICT = re.compile(r"AI review \(PR", re.I)
+
+
+def people_comment(c):
+    return c.get("kind") in PEOPLE_KINDS or 'data-type="mention"' in (c.get("text") or "")
+
+
+def ticket_defects(t, comments):
+    """Whole-ticket check: title, every people comment, one open Question, chatter in the people lane."""
+    bad = [f"title: {b[:90]}" for b in lint.lint(t.get("title") or "")]
+    if PLAIN_QUOTE.search(t.get("description") or ""):
+        bad.append("description quotes Valentin in plain quote marks, not a > quote block")
+    last_his = max((c.get("createdAt") or "" for c in comments if is_owner(c)), default="")
+    open_qs = 0
+    for c in sorted(comments, key=lambda c: c.get("createdAt") or ""):
+        if is_owner(c) or not people_comment(c):
+            continue
+        text = c.get("text") or c.get("commentText") or ""
+        who = c.get("agent_display_name") or "personal login"
+        where = f"people comment {c.get('id')} ({c.get('kind') or 'mention'}, {who})"
+        if BOT_VERDICT.search(plain(text)):
+            bad.append(f"{where}: bot review verdict in the people lane, belongs in the agent lane")
+            continue
+        hits = lint.lint(text)
+        if PLAIN_QUOTE.search(text):
+            hits.append("quotes Valentin in plain quote marks, not a > quote block")
+        if hits:
+            bad.append(f"{where}: {len(hits)} breaks, first: {hits[0][:80]}")
+        if "Question:" in plain(text) and (c.get("createdAt") or "") > last_his and not reacted(c):
+            open_qs += 1
+    if open_qs > 1:
+        bad.append(f"{open_qs} open Questions: keep one, retire the rest")
+    return bad
+
+
+def review(t, q_text, waiting_on_him, comments=()):
+    defects = description_defects(t.get("description"), waiting_on_him) + ticket_defects(t, comments)
     if waiting_on_him or t.get("section") == "Valentin Review":
         defects += question_defects(q_text)
     if t.get("section") == "Valentin Review" and not waiting_on_him:
@@ -250,8 +293,9 @@ def note(t, calls, defects, who, lead, tag):
     lines += ["Do:",
               "1. Rewrite the description in the shape Now, Problem, Fix, Done when, Risk, Decision. Plain words he sees in the app.",
               "2. If he must decide: one marked Question per the template (Question, My recommendation, Why, Yes, No). Retire older ones.",
-              "3. Find what made you write it this way (skill line, wrapper, prompt, missing lint) and fix that origin. Name the fix here.",
-              f"{lead}: check 1 to 3 are done on your next turn."]
+              "3. Each flagged people comment: rewrite it to the rules, or move it to the agent lane and delete it. One open Question only.",
+              "4. Find what made you write it this way (skill line, wrapper, prompt, missing lint) and fix that origin. Name the fix here.",
+              f"{lead}: check 1 to 4 are done on your next turn. A ticket that waits on Valentin must break no rule."]
     return "\n".join(lines)
 
 
@@ -295,6 +339,18 @@ def self_test():
     assert drift({**q, "text": "Question: Get fresh keys and switch the old ones off?"}, []) is None, "key rotation read as a flag Off ask"
     assert drift({**q, "text": "Question: Turn the graphite flag off?"}, []), "missed a flag Off ask in words"
     assert his_call("Let an agent apply the free Cloudflare fixes?"), "Cloudflare change not his call"
+    t = {**t0, "description": good_desc, "section": "Valentin Review"}
+    chatter = {"kind": "qa", "createdAt": "2026-10-01", "agent_display_name": "Runner 3",
+               "text": "<p>Claimed: worktree ~/w/x, Gates: 3 of 5.</p>"}
+    verdict = {"kind": "qa", "createdAt": "2026-10-01", "agent_display_name": "Error Alerts", "text": "AI review (PR 9): PASS"}
+    lane = {"kind": None, "createdAt": "2026-10-01", "agent_display_name": "Runner 3", "text": "Claimed: worktree ~/w/x"}
+    q2 = {"kind": "question", "createdAt": "2026-10-03", "agent_display_name": "Runner 3", "text": good_q}
+    assert review(t, good_q, True, [lane, q2])[1] == [], "agent lane or a clean Question flagged"
+    _, defects = review(t, good_q, True, [chatter, verdict, q2, {**q2, "createdAt": "2026-10-04"}])
+    assert any("Runner 3" in d for d in defects) and any("bot review" in d for d in defects) \
+        and any("2 open Questions" in d for d in defects), ("whole-ticket chatter passed", defects)
+    _, defects = review(t, good_q, True, [q2, {"createdAt": "2026-10-05", "creatorId": 6, "text": "yes"}, {**q2, "createdAt": "2026-10-06"}])
+    assert not any("open Questions" in d for d in defects), "Question before his reply counted as open"
     assert home({"title": "[BUG] x"}, 15) == 4389 and home({"title": "x"}, 4060) == 10414, "wrong home column"
     print("SELF_TEST_OK")
     return 0
@@ -326,7 +382,7 @@ def main():
         found = {k: v for k, v in found.items() if k in only}
     kinds = Counter()
     counts = {"CLEAR": 0, "ANSWERED": 0, "HIS-OK": 0, "HIS-BADLY-WRITTEN": 0, "NOT-HIS": 0}
-    posted = skipped = failed = others = cleared = 0
+    posted = skipped = failed = others = cleared = pristine = 0
     me = subprocess.run([str(Path.home() / ".agents/skills/ship/scripts/ship-identity")],
                         capture_output=True, text=True).stdout.split("\t")[0].strip()
     for number, board in sorted(found.items()):
@@ -340,7 +396,8 @@ def main():
                    if "Question:" in plain(c.get("text") or c.get("commentText"))), None)
         qc = qc or next((c for c in cs if str(c.get("id")) == str(t.get("blockerCommentId"))), None)
         q = qc and (qc.get("text") or qc.get("commentText"))
-        calls, defects = review(t, q, waiting)
+        calls, defects = review(t, q, waiting, cs)
+        pristine += not defects
         why = drift(qc, cs)
         # Money, keys or his hands stay in front of him even after a reply: the lead reads it, not the script.
         if why and (not calls or why.startswith("asks him")):
@@ -384,6 +441,7 @@ def main():
     extra = (f" cleared={cleared} notes posted={posted} already-noted={skipped} failed={failed} left-for-other-leads={others}"
              if a.apply else "")
     print(f"SUMMARY {len(found)} tickets wait on Valentin: {summary}{extra}")
+    print(f"PRISTINE {pristine} of {len(found)} tickets that wait on Valentin break no ticket rule")
     parked(boards)
     return 1 if failed else 0
 
