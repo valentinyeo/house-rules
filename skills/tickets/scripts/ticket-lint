@@ -17,6 +17,8 @@ ROBOT =re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|C
 MONEY = re.compile(r"\b(money|cost|costs|pay|pays|paid|paying|payment|spend|spending|price|pricing|billing|charge|charges|budget|invoice|subscription|dollars?|usd|gbp|euros?|pounds?)\b|[£$€]", re.I)
 AMOUNT = re.compile(r"[£$€]\s?\d|\b\d+(\.\d+)?\s?(k\b|dollars?|usd|gbp|pounds?|euros?|cents?|a month|a year|per month|per year)|\b(free|no cost|no charge|nothing to pay|at no cost|zero cost)\b", re.I)
 ONCE = re.compile(r"\bonce\b", re.I)
+FACT_ASK = re.compile(r"\b(can|could|would|will) you\b[^.?]{0,30}\b(share|send|tell|check|confirm|look|find|give|provide|paste|read|screenshot)\b"
+                      r"|\bwhat (version|build|number)\b|\bwhich (version|build)\b", re.I)
 SECRET_ASK = re.compile(r"\b(paste|post|send|share)\b[^.?]{0,40}\b(key|token|secret|password)\b[^.?]{0,30}\b(here|in (this|the) (ticket|comment|chat))\b"
                         r"|\b(paste|post|send)\b[^.?]{0,10}\b(key|it|them)\b[^.?]{0,6}\bhere\b", re.I)
 CODE = [
@@ -72,6 +74,9 @@ def question_rules(text):
         bad.append('no "What this is:" part above the Question: say what it is, why it reached him, what each answer changes')
     elif len(words(ctx.group(1))) < 25:
         bad.append('"What this is:" too thin to decide on: name the thing as he sees it, why it reached him, what each answer changes')
+    q = re.search(r"Question:(.*)", ours, re.I | re.S)
+    if q and FACT_ASK.search(q.group(1).split("\n\n")[0]):
+        bad.append("asks him for a fact, not a decision: look it up yourself (logs, updater, his PC through agent tools)")
     if SECRET_ASK.search(ours):
         bad.append("asks him to paste a key into the ticket: keys go only in 1Password, name the item instead")
     return bad
