@@ -66,7 +66,7 @@ return out;
 
 ## Hand off
 - Post one ticket comment: Figma frame links, exact values (hex, dp or px, radius), what stays the same, and the keyframe attached with `--attach`.
-- Record his yes on the ticket in his own words before builders start.
+- Record his yes (chat or ticket) on the build ticket in his own words, with the frame link. Builders ship it to the flag. They never ask him again or block on design approval.
 - Split approved work into build tickets, one per repo, under a parent ticket, with the app label.
 - Superseded frames: delete them, so runners never build the wrong one.
 
