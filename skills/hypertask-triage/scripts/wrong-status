@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Find open tickets whose column no longer matches their pull request.
+
+A runner that forgets to move its ticket leaves shipped work in In Progress
+or AI Review. Per open ticket in a work column, this reads every GitHub pull
+request link in the description, comments and agent log, asks GitHub for its
+state, and judges the newest one:
+  MERGED-NOT-MOVED  newest PR merged, ticket still in a pre-merge column.
+                    Board 15: move to QA for the live proof. Other boards:
+                    merged means released, move to Done after the live check.
+  PR-CLOSED         newest PR closed unmerged, no open PR. Back to the queue.
+  NO-PR             in AI Review with no PR link at all.
+
+Valentin, 2026-11-06: "a bunch of tickets that are in AI review, but really
+the feature is already in the app ... the runner just forgot to move it".
+
+usage: wrong-status [--board 15] [--json PATH] [--self-test]
+Reads only. The board lead moves the tickets.
+"""
+import argparse
+import json
+import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
+# board: (columns before merge, column a merged ticket belongs in)
+BOARDS = {
+    15: (["In Progress", "AI Review", "Agent Blocked (Infra)", "Valentin Review"], "QA"),
+    4060: (["In Progress", "AI Review", "Agent Blocked", "Valentin Review"], "Done"),
+    11514: (["In Progress", "AI Review", "Agent Blocked", "Valentin Review"], "Done"),
+    2060: (["Doing", "AI Review", "Valentin Review"], "Done"),
+}
+PR = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
+
+
+def ht(*args):
+    r = subprocess.run(["hypertask", "--json", *args], capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def column(board, name):
+    out, offset = [], 0
+    while True:
+        page = ht("task", "list", "--project", str(board), "--section", name, "--status", "Normal",
+                  "--limit", "100", "--offset", str(offset)).get("tasks", [])
+        out += page
+        if len(page) < 100:
+            return out
+        offset += 100
+
+
+def pr_links(t):
+    """Newest mention last: description, then comments and log entries in time order."""
+    num = t["ticketNumber"]
+    task = (ht("task", "get", num).get("tasks") or [{}])[0]
+    desc = (task.get("description") or "") + " " + json.dumps(task.get("pullRequests") or [])
+    entries = [(c.get("createdAt") or "", c.get("text") or "") for c in ht("comment", "list", num).get("comments") or []]
+    entries += [(a.get("createdAt") or "", a.get("text") or "") for a in ht("task", "agent-log", num).get("activities") or []]
+    seen = []
+    for _, text in [("", desc)] + sorted(entries):
+        for repo, n in PR.findall(text):
+            key = f"{repo}#{n}"
+            if key in seen:
+                seen.remove(key)
+            seen.append(key)
+    return seen
+
+
+def pr_state(key):
+    repo, n = key.split("#")
+    r = subprocess.run(["gh", "pr", "view", n, "--repo", repo, "--json", "state,mergedAt"], capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout).get("state", "UNKNOWN")
+    except ValueError:
+        return "UNKNOWN"
+
+
+def verdict(col, prs, states):
+    """prs oldest to newest mention; states maps pr key to OPEN, MERGED, CLOSED or UNKNOWN."""
+    if not prs:
+        return "NO-PR" if col == "AI Review" else None
+    if any(states.get(p) == "OPEN" for p in prs):
+        return None
+    newest = states.get(prs[-1])
+    if newest == "MERGED":
+        return "MERGED-NOT-MOVED"
+    if newest == "CLOSED":
+        return "PR-CLOSED"
+    return None
+
+
+def run(board):
+    cols, merged_to = BOARDS[board]
+    tickets = [(c, t) for c in cols for t in column(board, c)]
+    with ThreadPoolExecutor(6) as ex:
+        links = list(ex.map(lambda ct: pr_links(ct[1]), tickets))
+    keys = sorted({k for ls in links for k in ls})
+    with ThreadPoolExecutor(4) as ex:
+        states = dict(zip(keys, ex.map(pr_state, keys)))
+    rows = []
+    for (col, t), prs in zip(tickets, links):
+        v = verdict(col, prs, states)
+        if v:
+            rows.append({"ticket": t["ticketNumber"], "column": col, "verdict": v, "pr": prs[-1] if prs else None,
+                         "move_to": merged_to if v == "MERGED-NOT-MOVED" else "home column", "title": t["title"]})
+    return rows, len(tickets)
+
+
+def show(board, rows, scanned):
+    url = "https://app.hypertask.ai/detail/project-{b}/{n}"
+    for r in sorted(rows, key=lambda r: (r["verdict"], r["column"])):
+        pr = r["pr"] and "https://github.com/{0}/pull/{1}".format(*r["pr"].split("#"))
+        print(f"{r['verdict']:<17} {r['column']:<16} {url.format(b=board, n=r['ticket'].rsplit('-', 1)[1])}  "
+              f"{pr or 'no PR'}  move to {r['move_to']}  {r['title'][:50]}")
+    count = {}
+    for r in rows:
+        count[r["verdict"]] = count.get(r["verdict"], 0) + 1
+    print(f"WRONG-STATUS board {board}: {len(rows)} of {scanned} work tickets in the wrong column"
+          + (": " + ", ".join(f"{k} {v}" for k, v in sorted(count.items())) if count else ""))
+
+
+def self_test():
+    s = {"a#1": "MERGED", "a#2": "OPEN", "a#3": "CLOSED"}
+    assert verdict("AI Review", ["a#1"], s) == "MERGED-NOT-MOVED"
+    assert verdict("AI Review", ["a#1", "a#2"], s) is None, "open PR still in flight"
+    assert verdict("In Progress", ["a#1", "a#3"], s) == "PR-CLOSED"
+    assert verdict("In Progress", ["a#3", "a#1"], s) == "MERGED-NOT-MOVED"
+    assert verdict("AI Review", [], s) == "NO-PR" and verdict("In Progress", [], s) is None
+    assert PR.findall("see https://github.com/hypertask-ai/hypertask/pull/2939.") == [("hypertask-ai/hypertask", "2939")]
+    print("SELF_TEST_OK")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--board", type=int, default=15, choices=sorted(BOARDS))
+    p.add_argument("--json")
+    p.add_argument("--self-test", action="store_true")
+    a = p.parse_args()
+    if a.self_test:
+        return self_test()
+    rows, scanned = run(a.board)
+    show(a.board, rows, scanned)
+    if a.json:
+        json.dump({"rows": rows, "scanned": scanned}, open(a.json, "w"), indent=1)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
