@@ -50,6 +50,16 @@ Verdicts, from the newest Question on the ticket:
 - HIS-BADLY-WRITTEN: his call, but breaks `skills/tickets/`. A note asks for a rewrite and an origin fix.
 - HIS-OK: leave it.
 
+Valentin, 2026-11-06:
+> if i am mentioned as the blocking person the tickets must be pristine
+
+So the whole ticket is checked, not only the Question:
+- Title and description: plain words, ticket shape, Valentin quoted in a `>` block.
+- Every people comment (qa, question, done, mentions): ticket-lint rules. Robot status or bot review verdicts there belong in the agent lane.
+- One open Question only.
+`PRISTINE X of Y` counts tickets that break no rule. HIS-OK needs zero breaks.
+Every other ticket gets the rewrite note: fix each flagged comment, then fix the origin.
+
 Clear = agent-lane note, his name off, ticket back to its home column (board 15: Bugs, Features or Improvements by title and label; 4060: Backlog).
 Tickets on another lead's board are listed as "left for <lead>". That lead runs this step on its turn.
 
@@ -77,6 +87,8 @@ Valentin, 2026-11-02:
 `blocker-review` ends with `PARKED` rows: every ticket parked over a day, and the column it belongs in.
 Only real tool or server failures stay. Design goes to UX needed. Merged work goes to QA.
 Waiting on a ticket or date goes home with a link. His call goes to Valentin Review with one Question.
+Each `PARKED` row also gets the whole-ticket check, with its defects listed. Blocked tickets must be clean too.
+Send the defect list to the board's lead, same as step 4.
 The class is a regex guess. Read the ticket, move it with `blocker-review --clear T --to <id> --why "..."`.
 
 ## 6c. Flag tickets nobody can be working
@@ -131,7 +143,7 @@ Act on it:
 Caveman:
 - Archived N of M done tickets.
 - Kept K, grouped by reason, each a full https link.
-- Blockers: N wait on you, X cleared, Y badly written, notes posted.
+- Blockers: N wait on you, X cleared, Y badly written, notes posted. Pristine: X of N. Agent Blocked clean: X of N.
 - Levers found, each with what it ends.
 - Out of place: In Progress count against live runners, then counts per flag and column.
 - No brain tag: X of Y open tickets, per board.
