@@ -109,6 +109,24 @@ It only counts. It tags nothing.
 Report the count per board. Send the list to the board's lead to tag.
 A board with no brain labels at all? File that once on board 4060.
 
+## 6e. Flag tickets blocked by CI
+CI Boss owns CI, on the fleet CI board https://app.hypertask.ai/project?id=11514.
+CI Boss slow? Product tickets pile up behind it.
+A CI-blocked ticket links one Urgent CI ticket in its log.
+
+flow-check prints, per blocked ticket:
+- `CI-WAIT`: CI ticket open, Urgent, In Progress, under 6 hours. Fine.
+- `CI-SLOW`: CI ticket open over 6 hours, not Urgent, or not In Progress. CI Boss is behind.
+- `CI-DONE`: CI ticket closed, but the ticket still waits. Its runner must resume.
+- `CI-NO-TICKET`: CI failure blocker, no CI ticket. CI Boss never heard.
+Then `CI-BLOCKED board N: X tickets wait on CI`.
+
+Act on it:
+- `CI-NO-TICKET`: file one Urgent ticket on 11514, labels CI and Hypertask CI. Or +1 the open one for the same check. Link it in the blocked ticket's agent lane.
+- `CI-SLOW`: add a line in that CI ticket's agent lane. List the waiting tickets and hours.
+- `CI-DONE`: tell the board lead which runner must resume.
+- `CI-SLOW` again on the next run? File one Urgent alarm on 11514 for CI Boss.
+
 ## 7. Report to Valentin
 Caveman:
 - Archived N of M done tickets.
@@ -117,6 +135,7 @@ Caveman:
 - Levers found, each with what it ends.
 - Out of place: In Progress count against live runners, then counts per flag and column.
 - No brain tag: X of Y open tickets, per board.
+- Blocked by CI: X tickets, counts per CI flag, slow CI tickets as links.
 - Wrong calls fixed in the rule, if any.
 
 Auto-archive of done tickets on a timer comes later, after Valentin trusts the manual runs.

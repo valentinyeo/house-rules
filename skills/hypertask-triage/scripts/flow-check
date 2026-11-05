@@ -19,6 +19,12 @@ Brain tags: every open ticket carries one of brain-light, brain-medium,
 brain-hard or brain-extra-hard, so the runner picks the right brain. Counts
 open tickets without one, per column. Done and flag columns are skipped.
 
+CI blocks: CI Boss owns CI on board 11514. A ticket blocked by CI links an
+Urgent HYCI ticket in its log. CI-WAIT lists those; CI-SLOW marks a CI ticket
+open over 6 hours, not Urgent or not In Progress; CI-DONE means CI is fixed
+but the ticket still waits; CI-NO-TICKET is a CI failure blocker with no CI
+ticket, so CI Boss never hears of it.
+
 Valentin, 2026-11-05: "20 tickets in progress. That's impossible. We don't
 have that many runners."
 
@@ -58,6 +64,37 @@ ACTIVE_HOURS = 3
 BRAINS = {"brain-light", "brain-medium", "brain-hard", "brain-extra-hard"}
 SHIPPED = re.compile(r"^(done|flag:|no flag)", re.I)
 CLAIM = re.compile(r"^\s*(?:\S+\s+){0,3}claimed\b", re.I)
+CI_SLOW_HOURS = 6
+CI_REF = re.compile(r"\bHYCI-(\d+)\b|project-11514/(\d+)")
+BLOCKER = re.compile(r"^\W*(blocker|blocked|waiting on ci|ci block)", re.I)
+CI_FAIL = re.compile(r"\b(ci|checks?|gate|test-shard\d*|visual regression|workflow|hosted|runner)\b[^.]{0,80}"
+                     r"\b(fail\w*|red|stuck|timed out|cancel\w*|queued)\b", re.I)
+
+
+def ci_block(log):
+    recent = []
+    for a in log:
+        recent.append(a.get("text") or "")
+        if CLAIM.search((a.get("text") or "")[:60]):
+            break
+    for text in recent:
+        m = CI_REF.search(text)
+        if m:
+            return "HYCI-" + (m.group(1) or m.group(2))
+    newest_blocker = next((t for t in recent if BLOCKER.search(t)), "")
+    return "NO-TICKET" if CI_FAIL.search(newest_blocker) else None
+
+
+def ci_verdict(ci_task, now):
+    if not ci_task:
+        return "CI-WAIT", None
+    open_h = hours_since(ci_task.get("createdAt"), now)
+    section = ci_task.get("section") or ""
+    if SHIPPED.match(section) or ci_task.get("status") not in (None, "Normal"):
+        return "CI-DONE", open_h
+    urgent = ((ci_task.get("priority") or {}).get("Priority_Value") or "").lower() == "urgent"
+    slow = (open_h or 0) > CI_SLOW_HOURS or not urgent or section != "In Progress"
+    return ("CI-SLOW" if slow else "CI-WAIT"), open_h
 
 
 def ht(*args):
@@ -163,6 +200,18 @@ def run(board):
             last = info[num][0][0] if info[num][0] else {}
             rows.append({"ticket": num, "column": name, "verdict": "OVERDUE" if waited and waited > limit else "OK",
                          "holder": last.get("agentName"), "idle_h": waited, "title": t["title"]})
+    ci_rows = []
+    if board != 11514:
+        found = [(r, ci_block(info[r["ticket"]][0])) for r in rows]
+        found = [(r, ref) for r, ref in found if ref]
+        refs = sorted({ref for _, ref in found if ref != "NO-TICKET"})
+        with ThreadPoolExecutor(6) as ex:
+            ci_tasks = dict(zip(refs, ex.map(lambda n: (ht("task", "get", n).get("tasks") or [None])[0], refs)))
+        for r, ref in found:
+            verdict, open_h = ("CI-NO-TICKET", None) if ref == "NO-TICKET" else ci_verdict(ci_tasks.get(ref), now)
+            ci_rows.append({"ticket": r["ticket"], "column": r["column"], "verdict": verdict,
+                            "ci_ticket": None if ref == "NO-TICKET" else ref, "ci_open_h": open_h,
+                            "waited_h": r["idle_h"], "title": r["title"]})
     opened = open_tickets(board)
     bare = no_brain(opened)
     working = sum(1 for r in rows if r["column"] == cfg["in_progress"] and r["verdict"] == "OK")
@@ -175,6 +224,7 @@ def run(board):
         "out_of_place": [r for r in rows if r["verdict"] != "OK"],
         "columns": {c: len(ts) for c, ts in cols.items()},
         "blocked_over_cap": bool(blocked) and len(cols[blocked[0]]) > cfg["blocked_cap"],
+        "ci_blocked": ci_rows,
         "open": len(opened),
         "no_brain": [{"ticket": t["ticketNumber"], "column": t.get("section"), "title": t["title"]} for t in bare],
     }
@@ -196,6 +246,18 @@ def show(rows, s):
           + (", Agent Blocked over cap" if s["blocked_over_cap"] else ""))
     if s["live_runners"] is not None and s["in_progress"] > s["live_runners"]:
         print(f"IMPOSSIBLE In Progress holds {s['in_progress']} tickets for {s['live_runners']} runners")
+    ci_url = "https://app.hypertask.ai/detail/project-11514/{n}"
+    for r in sorted(s["ci_blocked"], key=lambda r: r["verdict"]):
+        ci = ci_url.format(n=r["ci_ticket"].split("-")[1]) if r["ci_ticket"] else "no CI ticket"
+        age = f"CI open {r['ci_open_h']:.0f}h" if r["ci_open_h"] is not None else ""
+        print(f"{r['verdict']:<12} {r['column']:<22} {url.format(b=s['board'], n=r['ticket'].rsplit('-', 1)[1])}  "
+              f"{ci}  {age}  {r['title'][:50]}")
+    if s["ci_blocked"]:
+        count = {}
+        for r in s["ci_blocked"]:
+            count[r["verdict"]] = count.get(r["verdict"], 0) + 1
+        print(f"CI-BLOCKED board {s['board']}: {len(s['ci_blocked'])} tickets wait on CI: "
+              + ", ".join(f"{v} {n}" for v, n in sorted(count.items())))
     by_col = {}
     for t in s["no_brain"]:
         by_col[t["column"]] = by_col.get(t["column"], 0) + 1
@@ -221,6 +283,18 @@ def self_test():
     tag = lambda *names: {"labels": [{"name": n} for n in names]}
     assert no_brain([tag("Bug"), tag("Bug", "Brain-Hard"), tag(), {"labels": None}]) == [tag("Bug"), tag(), {"labels": None}]
     assert [bool(SHIPPED.match(c)) for c in ("Done", "Flag: Everyone", "No Flag", "Bugs", "QA")] == [True, True, True, False, False]
+    entry = lambda text: {"text": text}
+    assert ci_block([entry("Blocker: waiting on https://app.hypertask.ai/detail/project-11514/133"), claim("Runner 1", old)]) == "HYCI-133"
+    assert ci_block([entry("Blocker: hosted feature-flag-gate failed again"), claim("Runner 1", old)]) == "NO-TICKET"
+    assert ci_block([entry("Plan: fix the test"), claim("Runner 1", old)]) is None
+    assert ci_block([claim("Runner 1", fresh), entry("Blocker: see HYCI-9")]) is None, "CI link before the claim counted"
+    task = lambda h, sec="In Progress", pri="Urgent": {"createdAt": f"2026-11-05T{22 - h:02d}:00:00Z", "section": sec,
+                                                       "status": "Normal", "priority": {"Priority_Value": pri}}
+    assert ci_verdict(task(1), now)[0] == "CI-WAIT"
+    assert ci_verdict(task(8), now)[0] == "CI-SLOW"
+    assert ci_verdict(task(1, pri="Normal"), now)[0] == "CI-SLOW"
+    assert ci_verdict(task(1, sec="Later (parked)"), now)[0] == "CI-SLOW"
+    assert ci_verdict(task(1, sec="Done"), now)[0] == "CI-DONE"
     print("SELF_TEST_OK")
 
 
