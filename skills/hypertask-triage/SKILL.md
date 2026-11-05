@@ -99,6 +99,16 @@ Report every flagged row to the board's lead, as full links in your reply.
 The lead sends each ticket back to a runner or to its home column.
 Same flag on the next run? The lead's sweep is broken. File that on board 4060.
 
+## 6d. Count tickets with no brain tag
+Every open ticket needs one brain tag: `brain-light`, `brain-medium`, `brain-hard` or `brain-extra-hard`.
+The runner picks its brain from it. No tag means the medium brain by default.
+
+flow-check prints `NO-BRAIN board N: X of Y open tickets have no brain tag`, split by column.
+Done and flag columns are skipped. The full list is in its `--json` file.
+It only counts. It tags nothing.
+Report the count per board. Send the list to the board's lead to tag.
+A board with no brain labels at all? File that once on board 4060.
+
 ## 7. Report to Valentin
 Caveman:
 - Archived N of M done tickets.
@@ -106,6 +116,7 @@ Caveman:
 - Blockers: N wait on you, X cleared, Y badly written, notes posted.
 - Levers found, each with what it ends.
 - Out of place: In Progress count against live runners, then counts per flag and column.
+- No brain tag: X of Y open tickets, per board.
 - Wrong calls fixed in the rule, if any.
 
 Auto-archive of done tickets on a timer comes later, after Valentin trusts the manual runs.
