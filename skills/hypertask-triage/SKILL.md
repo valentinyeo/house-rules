@@ -180,6 +180,20 @@ Never fix the tickets one by one. Fix what writes them.
 10 or more agent items: it files one Urgent "Chatter" alarm on the alarm board, or bumps the open one.
 The fleet chief owns that alarm until the next count is under 10.
 
+## 6g. Keep agent logins in sync with runners
+Valentin, 2026-11-06:
+> runners create new agent identities, but they do not frequently release the old ones
+
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/agent-identities`
+board-health runs it on board 15 as the `identities` line. Owner: Chief Of Staff.
+
+Per runner pool it compares active logins with live runner sessions on this server.
+- `EXTRA`: logins with no live session. List them.
+- `DUPLICATE`: one name, more than one active login. One agent, one identity.
+- Pools on another server (inne) are listed, not judged.
+Fix: run `/agent-housekeeping`. It files one ticket with the logins to remove. Revoking is Valentin's call.
+Changed the runner count, or restarted runners? Reuse each runner's login. Never mint a new one. Rerun this check the same turn.
+
 ## 7. Report to Valentin
 Caveman:
 - Archived N of M done tickets.
@@ -190,6 +204,7 @@ Caveman:
 - No brain tag: X of Y open tickets, per board.
 - Blocked by CI: X tickets, counts per CI flag, slow CI tickets as links.
 - Chatter: X bad items, split code, agent and personal. Top writer each, and the rule you changed.
+- Agent logins: extra and duplicate counts per pool.
 - Wrong calls fixed in the rule, if any.
 
 Auto-archive of done tickets on a timer comes later, after Valentin trusts the manual runs.
