@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""One scorecard for a board: GREEN only when every house-rules invariant holds.
+
+The fleet chief runs it every loop and is not done until it prints GREEN.
+Each red line names its owner and the fix. An invariant red for over a day
+prints ESCALATE; with --apply it files or bumps one Urgent alarm.
+
+Invariants come from flow-check (work in flight, CI, brain tags),
+blocker-review (tickets on Valentin and in Agent Blocked) and ticket-check
+(chatter). One runner, one ticket until live, so active work (In Progress,
+AI Review, QA) never exceeds live runners and every active ticket has one
+live runner.
+
+Valentin, 2026-11-06: "the outcome of the skill is to force the chief of
+staff to fix all of this, and make sure that the system is running smoothly".
+
+usage: board-health [--board 15] [--apply] [--alarm-board 4060] [--self-test]
+Exit 0 GREEN, 1 RED.
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+STATE = Path.home() / ".local/state/board-health"
+ESCALATE_HOURS = 24
+LEADS = {15: "HT Product Lead", 4060: "Infra Lead", 11514: "CI Boss"}
+CHATTER_LINE = 10
+
+# key: (what must hold, owner role, fix). Owner "lead" means the board's lead.
+INVARIANTS = {
+    "wip": ("active tickets at most live runners", "lead",
+            "runners finish one ticket before the next; send extras back to the queue"),
+    "orphans": ("every active ticket has a live runner", "lead",
+                "hand each orphan to a live runner, or move it to its home column"),
+    "doubles": ("no runner holds two active tickets", "lead",
+                "the runner keeps its oldest ticket; the rest go back to the queue"),
+    "outside": ("only runners hold active tickets", "lead", "leads hand the ticket to a runner"),
+    "stale": ("every In Progress ticket moved in the last 3 hours", "lead", "wake the runner or reassign"),
+    "overdue": ("no ticket over its wait limit in QA, AI Review or Agent Blocked", "lead",
+                "drive the PR or live proof today"),
+    "blocked_cap": ("Agent Blocked at or under its cap", "lead", "clear the column today; only broken tools stay"),
+    "brain": ("every open ticket has one brain tag", "lead", "tag it, brain-medium when unsure"),
+    "ci": ("no ticket waits on a slow, closed or missing CI ticket", "CI Boss",
+           "CI Boss works its Urgent CI tickets; triage files the missing ones"),
+    "ci_boss": ("CI Boss wrote on the blocking CI tickets in the last 6 hours", "Chief Of Staff",
+                "restart CI Boss"),
+    "pristine": ("every ticket on Valentin breaks no ticket rule", "lead",
+                 "rewrite per skills/tickets, then fix what wrote it"),
+    "parked_clean": ("every Agent Blocked ticket breaks no ticket rule", "lead",
+                     "rewrite per skills/tickets, then fix what wrote it"),
+    "chatter": (f"under {CHATTER_LINE} agent rule breaks a day", "fleet chief",
+                "fix the rule or code behind the top writer, /house-rules-update"),
+}
+
+
+def run_json(cmd):
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        path = f.name
+    subprocess.run(cmd + ["--json", path], capture_output=True, text=True)
+    try:
+        return json.load(open(path))
+    except ValueError:
+        return None
+    finally:
+        os.unlink(path)
+
+
+def run_text(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+
+def number(pattern, text):
+    m = re.search(pattern, text, re.M)
+    return tuple(int(g) for g in m.groups()) if m else None
+
+
+def measure(flow, blockers, chatter):
+    """Turn the three checks into {key: (bad count, detail)}; None means not measured on this board."""
+    s, rows = flow["summary"], flow["rows"]
+    o = s.get("ownership")
+    m = {}
+    if o:
+        m["wip"] = (max(0, o["active"] - o["live"]), f"{o['active']} active for {o['live']} runners")
+        m["orphans"] = (len(o["orphans"]), " ".join(n for n, _ in o["orphans"]))
+        m["doubles"] = (len(o["doubles"]), " ".join(f"{w}: {','.join(n)}" for w, n in o["doubles"].items()))
+        m["outside"] = (len(o["outside"]), " ".join(f"{n} ({w})" for n, w in o["outside"]))
+    stale = [r["ticket"] for r in rows if r["verdict"] == "STALE"]
+    m["stale"] = (len(stale), " ".join(stale))
+    over = [r["ticket"] for r in rows if r["verdict"] == "OVERDUE"]
+    m["overdue"] = (len(over), " ".join(over))
+    m["blocked_cap"] = (int(bool(s["blocked_over_cap"])), "")
+    m["brain"] = (len(s["no_brain"]), " ".join(t["ticket"] for t in s["no_brain"]))
+    ci_bad = [r for r in s.get("ci_blocked", []) if r["verdict"] != "CI-WAIT"]
+    m["ci"] = (len(ci_bad), " ".join(f"{r['ticket']}>{r['ci_ticket'] or 'none'}" for r in ci_bad))
+    if any(r["ci_ticket"] for r in s.get("ci_blocked", [])):
+        h = s.get("ci_boss_h")
+        m["ci_boss"] = (int(h is None or h > 6), "never" if h is None else f"last note {h:.0f}h ago")
+    pristine = number(r"^PRISTINE (\d+) of (\d+)", blockers)
+    if pristine:
+        m["pristine"] = (pristine[1] - pristine[0], f"{pristine[0]} of {pristine[1]} clean")
+    parked = number(r"^PARKED SUMMARY (\d+) parked .* (\d+) break no ticket rule", blockers)
+    if parked:
+        m["parked_clean"] = (parked[0] - parked[1], f"{parked[1]} of {parked[0]} clean")
+    if chatter is not None:
+        agent = len({(r["ticket"], r["item"]) for r in chatter if r["origin"] == "agent"})
+        m["chatter"] = (int(agent >= CHATTER_LINE), f"{agent} agent items in 24h")
+    return m
+
+
+def track(board, measured, now):
+    STATE.mkdir(parents=True, exist_ok=True)
+    path = STATE / f"{board}.json"
+    first = json.load(open(path)) if path.exists() else {}
+    first = {k: first.get(k, now.isoformat()) for k, (bad, _) in measured.items() if bad}
+    json.dump(first, open(path, "w"), indent=1)
+    return {k: (now - datetime.fromisoformat(v)).total_seconds() / 3600 for k, v in first.items()}
+
+
+def scorecard(board, measured, red_for):
+    lead = LEADS.get(board, "the board lead")
+    lines, escalate = [], []
+    for key, (rule, owner, fix) in INVARIANTS.items():
+        if key not in measured:
+            continue
+        bad, detail = measured[key]
+        who = lead if owner == "lead" else owner
+        if not bad:
+            lines.append(f"OK        {key:<13} {rule}")
+            continue
+        hours = red_for.get(key, 0)
+        tag = "ESCALATE" if hours > ESCALATE_HOURS else "RED"
+        (escalate.append(key) if tag == "ESCALATE" else None)
+        lines.append(f"{tag:<9} {key:<13} {rule}. {detail}. Owner {who}: {fix}. Red {hours:.0f}h.")
+    red = sum(1 for k in measured if measured[k][0])
+    verdict = "GREEN" if not red else f"RED {red} of {len(measured)}"
+    return lines, f"BOARD-HEALTH board {board}: {verdict}", escalate
+
+
+def alarm(board, alarm_board, lines, escalate):
+    title = f"Board health: board {board} red over a day"
+    found = next((t for t in json.loads(run_text(["hypertask", "--json", "task", "list", "--project", str(alarm_board),
+                                                  "--status", "Normal", "--search", "Board health", "--limit", "50"])
+                                        or "{}").get("tasks", []) if t.get("title") == title), None)
+    red = [l for l in lines if l.startswith(("RED", "ESCALATE"))]
+    if found:
+        subprocess.run(["vcc", "activity", "add", found["ticketNumber"],
+                        f"board-health: still red over a day: {', '.join(escalate)}."], check=False)
+        return f"ALARM bumped {found['ticketNumber']}"
+    body = ("## Problem\n" + "\n".join(f"- {l.split('. Owner')[0].split(None, 1)[1]}" for l in red) +
+            "\n\n## Fix\n- Fleet chief runs /hypertask-triage step 0 until GREEN.\n- Each owner fixes its line today.\n\n"
+            "## Done when\n- board-health prints GREEN.\n\n## Risk\n- None. Board moves only.\n\n## Decision\nnone\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(body)
+    r = subprocess.run(["vcc", "task", "create", "--project", str(alarm_board), "--priority", "urgent", "--labels",
+                        "brain-medium", "--title", title, "--description-file", f.name, "--markdown"],
+                       capture_output=True, text=True)
+    return "ALARM filed" if r.returncode == 0 else f"ALARM failed: {(r.stderr or r.stdout)[:160]}"
+
+
+def self_test():
+    flow = {"rows": [{"ticket": "HTPR-1", "verdict": "STALE"}, {"ticket": "HTPR-2", "verdict": "OK"}],
+            "summary": {"ownership": {"active": 12, "live": 10, "orphans": [("HTPR-1", "no claim")], "doubles": {},
+                                      "outside": []},
+                        "blocked_over_cap": False, "no_brain": [], "ci_blocked": [], "ci_boss_h": None}}
+    blockers = "PRISTINE 3 of 25 tickets that wait on Valentin break no ticket rule\n" \
+               "PARKED SUMMARY 12 parked over 1d, 6 belong in another column, 12 break no ticket rule\n"
+    m = measure(flow, blockers, [{"ticket": "A", "item": "ticket", "origin": "agent"}])
+    assert m["wip"][0] == 2 and m["orphans"][0] == 1 and m["stale"][0] == 1 and m["pristine"][0] == 22, m
+    assert m["parked_clean"][0] == 0 and m["chatter"][0] == 0 and m["doubles"][0] == 0 and "ci_boss" not in m, m
+    lines, head, esc = scorecard(15, m, {"wip": 30})
+    assert head == "BOARD-HEALTH board 15: RED 4 of 12" and esc == ["wip"], (head, esc)
+    assert any(l.startswith("ESCALATE  wip") and "HT Product Lead" in l for l in lines), lines
+    clean = {k: (0, "") for k in m}
+    assert scorecard(15, clean, {})[1] == "BOARD-HEALTH board 15: GREEN"
+    print("SELF_TEST_OK")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--board", type=int, default=15)
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--alarm-board", type=int, default=4060)
+    p.add_argument("--self-test", action="store_true")
+    a = p.parse_args()
+    if a.self_test:
+        return self_test()
+    with ThreadPoolExecutor(3) as ex:
+        flow = ex.submit(run_json, [str(HERE / "flow-check"), "--board", str(a.board)])
+        blockers = ex.submit(run_text, [str(HERE / "blocker-review"), "--boards", str(a.board)])
+        chatter = ex.submit(run_json, [str(HERE / "ticket-check"), "--board", str(a.board)])
+    if flow.result() is None:
+        print(f"BOARD-HEALTH board {a.board}: UNKNOWN, flow-check failed")
+        return 1
+    now = datetime.now(timezone.utc)
+    measured = measure(flow.result(), blockers.result(), chatter.result())
+    lines, head, escalate = scorecard(a.board, measured, track(a.board, measured, now))
+    print("\n".join(lines))
+    print(head)
+    if escalate and a.apply:
+        print(alarm(a.board, a.alarm_board, lines, escalate))
+    return 0 if head.endswith("GREEN") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

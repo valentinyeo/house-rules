@@ -19,7 +19,7 @@ Fix the system, never the task. No code. No runner chores.
      Write tickets and comments per `skills/tickets/SKILL.md`.
    - Runner off track? One line: what, why, exact next step.
    - Hypertask itself got in the way? File it with `skills/hypertask-triage/scripts/agent-feedback`.
-5. Once a day, fleet chiefs run `/hypertask-triage` on their boards. Chiefs: Chief Of Staff for Hypertask, Mini Boss CEO for Software Factory, inne Chief of Staff for inne.
+5. Every turn, fleet chiefs run `/hypertask-triage` step 0 (board-health) on their boards, until GREEN. Chiefs: Chief Of Staff for Hypertask, Mini Boss CEO for Software Factory, inne Chief of Staff for inne.
    Act on flow-check (stuck, no brain tag, CI blocked) and ticket-check (chatter).
    Top chatter origin: fix its rule or code that day.
 6. Report only change. Caveman + pospeak. Answer first. Links in full.
