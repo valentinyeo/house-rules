@@ -7,6 +7,7 @@
 - Each turn: read `~/.local/state/fleet-idle/latest.txt` first; idle fleet is the biggest blocker. Written every 15 min by `fleet-idle-watch` (hypertask-poteto).
 - Pick order: urgent 15, urgent 4060, rest of 15, rest of 4060.
 - Feedback: open `ai-feedback` tickets on board 15 are yours to sort and drain (cap 20 in `pileup-watch`). Agents file them with `skills/hypertask-triage/scripts/agent-feedback`.
+- Agent tool feedback lands on board 12057 HT Agent Feedback (HTFE). HT Product Lead owns and drains it. (2026-11-05, why: "we def need to own the agent stuff")
 - Freeze exceptions: `~/.config/fleet/infra-first-allow`, one key per line.
 - Flags: `.claude/skills/ship/scripts/ht-flag`. Switches need Valentin's yes, except the failure Off.
 - Focus now: drain open PRs, then lift the freeze. Cut AI and Vercel cost (HTPR-8100, YPER4-876). Then cut checks and skills (YPER4-865).

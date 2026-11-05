@@ -27,9 +27,9 @@ import tempfile
 BOARD = 15
 LABEL = "ai-feedback"
 SECTION = {"bug": "4389", "friction": "19734", "missing": "9190", "idea": "9190"}
-# Our own agent tools are not Hypertask: their reports go to the agents board (YPER4-1004).
-OWN_BOARD, OWN_SECTION, OWN_LABEL = 4060, "10414", "Agent Feedback"
-# One view per cluster on board 4060 (Valentin 2026-11-05). First match wins.
+# Our own agent tools are not Hypertask: their reports go to board HT Agent Feedback (Valentin 2026-11-05).
+OWN_BOARD, OWN_SECTION, OWN_LABEL = 12057, "34534", "Agent Feedback"
+# One label per cluster (Valentin 2026-11-05). First match wins.
 CLUSTERS = [
     ("Flag Switch", r"turn.*off|off order|safety switch|thumbs|left off|un-park|ht-flag"),
     ("Cross-Board Access", r"ci board|ci ticket|ci problem|another board|board 2060|non-member|software factory"),
