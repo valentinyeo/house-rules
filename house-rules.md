@@ -70,6 +70,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Must-finish task? Run `/do`. Any project, any fleet. House rules, one ticket per step moved live to Done, poteto plans, unlazy gates and proves. Hypertask board exists? Hypertask is mandatory. No board: project tracker, GitHub issues or a task list. Skill: `skills/do/`. (2026-11-01, why: "conditional but not so soft")
 - Owner away 60 to 90 minutes? Run `/deep-work`. Prove you can check your own output first. Ask every question up front. Then run alone via `/do`. Report at the end. Skill: `skills/deep-work/`. (2026-11-02, why: "must confirm upfront ... it can test")
 - Tag every ticket with its app or cluster label at creation. Reuse existing tags, never recreate. Tags in Title Case. Check old tickets too. (2026-10-26, why: "tags need to be reused not recreated")
+- Every ticket gets exactly one brain tag. Set it on create or edit. Light: tiny fix, one file. Medium: default, normal work. Hard: hard bug, security, money, many systems. Extra-hard: rare, auth or security plus money; runners skip. Unsure? Medium. Never two. Never blank. Keep other labels. No other brain names. How: `skills/tickets/` Brain tag. Enforcer: `flow-check` NO-BRAIN count in `/hypertask-triage`. Every fleet. (2026-11-06, why: "required on every new ticket")
 - Every label cluster has a board view filtered by that label. Board manager creates it itself. New cluster? Create its view same day. (2026-10-26, why: "manager should create these views itself")
 
 ## Design
