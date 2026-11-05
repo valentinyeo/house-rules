@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Count human-lane rule breaks on a board and name where each one comes from.
+
+Agent chatter belongs in the agent lane. Tickets and people comments
+(kind qa, question, done) follow skills/tickets. This reads every ticket
+touched in the window, lints new descriptions and people comments with
+ticket-lint, and splits each break by origin:
+  code      a job or app code writes it (review job, feedback reporter,
+            server job). Fix the code: route to the owning ticket.
+  agent     an agent login wrote it and no check stopped it. The fleet
+            chief fixes the rule, skill or lint via /house-rules-update.
+  personal  Valentin's own login, no agent named. Find the tool using it.
+
+Valentin, 2026-11-06: "agent chatter is just out of control ... force the
+chief of staff for each of the departments to run this skill and then get
+active fixing the house rules that caused the agent chatter".
+
+usage: ticket-check [--board 15] [--hours 24] [--json PATH]
+                    [--alarm-board 4060] [--alarm-at 10] [--self-test]
+Reads only, unless --alarm-board is set: then it files or bumps one alarm.
+"""
+import argparse
+import collections
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+_ld = importlib.machinery.SourceFileLoader("tl", os.path.join(HERE, "..", "..", "tickets", "scripts", "ticket-lint"))
+_sp = importlib.util.spec_from_loader("tl", _ld)
+tl = importlib.util.module_from_spec(_sp)
+_ld.exec_module(tl)
+
+PEOPLE = {"qa", "question", "done"}
+CODE_WRITERS = {"Error Alerts": "review job"}
+FEEDBACK_TITLE = re.compile(r"^(Agent feedback, |An agent's (MCP|API|CLI) call)")
+PLAIN_QUOTE = re.compile(r"(Valentin|owner)[^.<]{0,40}(said|asked|wrote|says)[^<]{0,50}(&quot;|\"|“)", re.I)
+BOT_VERDICT = re.compile(r"AI review \(PR", re.I)
+SHAPE = ["problem", "fix", "done when", "risk", "decision"]
+RULES = [("shape", "missing ticket parts"), ("plain quote", "plain quote marks"), ("flag key", "code name"),
+         ("code identifier", "code name"), ("file path", "code name"), ("file name", "code name"),
+         ("commit hash", "code or error id"), ("code span", "code name"), ("log or command", "code name"),
+         ("function name", "code name"), ("robot status", "robot status"), ("bot review", "robot status"),
+         ("words, max", "sentence too long"), ("insider word", "insider word"), ("What this is", "question form")]
+
+
+def ht(*args):
+    r = subprocess.run(["hypertask", "--json", *args], capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def rule_name(hit):
+    return next((v for k, v in RULES if k in hit), hit.split(":")[0][:40])
+
+
+def shape_missing(desc):
+    text = tl.plain(desc).lower()
+    lines = [l.strip(" #*-") for l in re.split(r"[\n\r]+", text)]
+    found = {s for s in SHAPE for l in lines if re.match(re.escape(s) + r"\s*[:.]?(\s|$)", l)}
+    return [s for s in SHAPE if s not in found]
+
+
+def ticket_origin(t):
+    agent = t.get("agent") if isinstance(t.get("agent"), dict) else {}
+    name = (agent or {}).get("displayName")
+    if name in CODE_WRITERS:
+        return "code", CODE_WRITERS[name]
+    if FEEDBACK_TITLE.match(t.get("title") or ""):
+        return "code", "app feedback reporter"
+    if name:
+        return "agent", name
+    return "personal", "Valentin Yeo login"
+
+
+def comment_origin(c):
+    name = c.get("agent_display_name")
+    if name in CODE_WRITERS:
+        return "code", CODE_WRITERS[name]
+    if name:
+        return "agent", name
+    return "personal", "Valentin Yeo login"
+
+
+def lint_text(text):
+    hits = tl.lint(text)
+    if PLAIN_QUOTE.search(text):
+        hits.append("plain quote marks")
+    return {rule_name(h) for h in hits}
+
+
+def breaks_for(t, comments, since):
+    out = []
+    if (t.get("createdAt") or "") >= since:
+        desc = t.get("description") or ""
+        rules = lint_text(t.get("title") or "") | lint_text(desc)
+        if shape_missing(desc):
+            rules.add("missing ticket parts")
+        origin, who = ticket_origin(t)
+        out += [{"ticket": t["ticketNumber"], "item": "ticket", "origin": origin, "who": who, "rule": r} for r in rules]
+    for c in comments:
+        if (c.get("createdAt") or "") < since or c.get("kind") not in PEOPLE:
+            continue
+        text = c.get("text") or ""
+        rules = lint_text(text)
+        if c.get("kind") == "qa" and BOT_VERDICT.search(tl.plain(text)):
+            rules.add("robot status")
+        origin, who = comment_origin(c)
+        out += [{"ticket": t["ticketNumber"], "item": f"comment {c.get('kind')}", "origin": origin, "who": who,
+                 "rule": r} for r in rules]
+    return out
+
+
+def touched(board, since):
+    tickets, offset = [], 0
+    while True:
+        page = ht("task", "list", "--project", str(board), "--sort-by", "updatedAt", "--sort-order", "desc",
+                  "--limit", "100", "--offset", str(offset)).get("tasks", [])
+        keep = [t for t in page if (t.get("updatedAt") or "") >= since]
+        tickets += keep
+        if len(keep) < len(page) or len(page) < 100:
+            return tickets
+        offset += 100
+
+
+def run(board, hours):
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+    tickets = touched(board, since)
+    with ThreadPoolExecutor(6) as ex:
+        comments = list(ex.map(lambda t: ht("comment", "list", t["ticketNumber"]).get("comments") or [], tickets))
+    rows = [b for t, cs in zip(tickets, comments) for b in breaks_for(t, cs, since)]
+    return rows, len(tickets)
+
+
+def summary(rows):
+    items = collections.defaultdict(set)
+    rules = collections.defaultdict(collections.Counter)
+    for r in rows:
+        items[(r["origin"], r["who"])].add((r["ticket"], r["item"]))
+        rules[(r["origin"], r["who"])][r["rule"]] += 1
+    return items, rules
+
+
+def show(board, hours, rows, scanned):
+    items, rules = summary(rows)
+    total = len({(r["ticket"], r["item"]) for r in rows})
+    url = "https://app.hypertask.ai/detail/project-{b}/{n}"
+    print(f"TICKET-CHECK board {board}, last {hours}h: {total} items break the ticket rules, {scanned} tickets read")
+    for origin, what in (("code", "fix the code, route to its owner ticket"),
+                         ("agent", "chief fixes the rule or lint, /house-rules-update"),
+                         ("personal", "find the tool on Valentin's login")):
+        keys = sorted((k for k in items if k[0] == origin), key=lambda k: -len(items[k]))
+        n = sum(len(items[k]) for k in keys)
+        print(f"ORIGIN {origin}: {n} items ({what})")
+        for k in keys:
+            top = ", ".join(f"{r} {c}" for r, c in rules[k].most_common(3))
+            examples = " ".join(url.format(b=board, n=t.rsplit("-", 1)[1]) for t, _ in sorted(items[k])[:2])
+            print(f"  {len(items[k]):4d}  {k[1][:24]:<24} {top}  {examples}")
+    return total, sum(len(items[k]) for k in items if k[0] == "agent")
+
+
+def alarm(board, hours, agent_items, alarm_board, rows):
+    _, rules = summary([r for r in rows if r["origin"] == "agent"])
+    top = collections.Counter()
+    for c in rules.values():
+        top.update(c)
+    lines = ", ".join(f"{r} {n}" for r, n in top.most_common(3))
+    prefix = f"Chatter: agents break the ticket rules on board {board}"
+    open_alarm = next((t for t in ht("task", "list", "--project", str(alarm_board), "--status", "Normal",
+                                     "--search", "Chatter: agents", "--limit", "50").get("tasks", [])
+                       if (t.get("title") or "").startswith(prefix)), None)
+    note = f"ticket-check: {agent_items} agent items broke the ticket rules on board {board} in {hours}h. Top: {lines}."
+    if open_alarm:
+        subprocess.run(["vcc", "activity", "add", open_alarm["ticketNumber"], note], check=False)
+        print(f"ALARM bumped {open_alarm['ticketNumber']}")
+        return
+    body = (f"## Problem\n- Agents wrote {agent_items} people comments or tickets that break the ticket rules.\n"
+            f"- Board {board}, last {hours} hours. Top rules: {lines}.\n\n"
+            "## Fix\n- Fleet chief runs /hypertask-triage step 6f.\n- Find the skill or rule behind each top writer.\n"
+            "- Change it with /house-rules-update, with a lint or tool refusal.\n\n"
+            "## Done when\n- Next daily count is under the alarm line.\n\n"
+            "## Risk\n- None. Rule text and lint only.\n\n## Decision\nnone\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(body)
+    r = subprocess.run(["vcc", "task", "create", "--project", str(alarm_board), "--priority", "urgent",
+                        "--labels", "brain-medium", "--title", prefix, "--description-file", f.name, "--markdown"],
+                       capture_output=True, text=True)
+    print("ALARM filed" if r.returncode == 0 else f"ALARM failed: {(r.stderr or r.stdout)[:200]}")
+
+
+def self_test():
+    since = "2026-11-05T00:00:00"
+    ticket = {"ticketNumber": "HTPR-1", "createdAt": "2026-11-05T10:00:00", "title": "Chat messages missing after reload",
+              "description": "## Problem\n- x\n## Fix\n- y\n## Done when\n- z\n## Risk\n- r\n## Decision\nnone",
+              "agent": {"displayName": "Runner 3"}}
+    assert breaks_for(ticket, [], since) == []
+    bare = dict(ticket, description="It broke.")
+    assert {r["rule"] for r in breaks_for(bare, [], since)} >= {"missing ticket parts"}
+    assert breaks_for(dict(bare, createdAt="2026-11-01T00:00:00"), [], since) == []
+    review = {"kind": "qa", "createdAt": "2026-11-05T11:00:00", "agent_display_name": "Error Alerts",
+              "text": "AI review (PR 12): CONCERNS"}
+    lane = {"kind": None, "createdAt": "2026-11-05T11:00:00", "agent_display_name": "Runner 3", "text": "Plan: fix it"}
+    rows = breaks_for(dict(ticket, createdAt="2026-11-01T00:00:00"), [review, lane], since)
+    assert rows and all(r["origin"] == "code" and r["who"] == "review job" for r in rows), rows
+    assert ticket_origin({"title": "Agent feedback, bug: x"}) == ("code", "app feedback reporter")
+    assert comment_origin({}) == ("personal", "Valentin Yeo login")
+    print("SELF_TEST_OK")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--board", type=int, default=15)
+    p.add_argument("--hours", type=int, default=24)
+    p.add_argument("--json")
+    p.add_argument("--alarm-board", type=int)
+    p.add_argument("--alarm-at", type=int, default=10)
+    p.add_argument("--self-test", action="store_true")
+    a = p.parse_args()
+    if a.self_test:
+        return self_test()
+    rows, scanned = run(a.board, a.hours)
+    _, agent_items = show(a.board, a.hours, rows, scanned)
+    if a.json:
+        json.dump(rows, open(a.json, "w"), indent=1)
+    if a.alarm_board and agent_items >= a.alarm_at:
+        alarm(a.board, a.hours, agent_items, a.alarm_board, rows)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

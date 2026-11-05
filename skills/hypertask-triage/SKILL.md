@@ -138,6 +138,26 @@ Act on it:
 - `CI-SLOW`: add a line in that CI ticket's agent lane. List the waiting tickets and hours.
 - `CI-DONE`: tell the board lead which runner must resume.
 - `CI-SLOW` again on the next run? File one Urgent alarm on 11514 for CI Boss.
+- `CI-BOSS-QUIET`: no CI Boss note on the blocking CI tickets for 6 hours. CI Boss is likely not running. Tell Chief Of Staff, who restarts leads.
+
+Who can write on 11514: Chief Of Staff and CI Boss. The shared vcc login can tag there, but its agent lane says "Task not found".
+Can't write there? Post the CI list in each blocked product ticket's agent lane. Then hand it to Chief Of Staff.
+
+## 6f. Keep tickets clean: count chatter and fix its origin
+Valentin, 2026-11-06:
+> Every bot has currently this problem that agent chatter is just out of control ... force the chief of staff for each of the departments to run this skill and then get active fixing the house rules that caused the agent chatter on the ticket.
+
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/ticket-check --board 15 --alarm-board 4060`
+Run it for each board your fleet writes on.
+
+It lints every new ticket and people comment from the last 24 hours, with ticket-lint.
+It splits the breaks by origin:
+- `ORIGIN code`: a job or app code writes it. Fix the code. Add the count to its owner ticket, or file one.
+- `ORIGIN agent`: an agent login wrote it. Find the skill or rule that told it to. Fix that with `/house-rules-update`, plus a lint or tool refusal. A longer note is not a fix.
+- `ORIGIN personal`: Valentin's own login. Find the tool using it. Move it to an agent login.
+Never fix the tickets one by one. Fix what writes them.
+10 or more agent items: it files one Urgent "Chatter" alarm on the alarm board, or bumps the open one.
+The fleet chief owns that alarm until the next count is under 10.
 
 ## 7. Report to Valentin
 Caveman:
@@ -148,6 +168,7 @@ Caveman:
 - Out of place: In Progress count against live runners, then counts per flag and column.
 - No brain tag: X of Y open tickets, per board.
 - Blocked by CI: X tickets, counts per CI flag, slow CI tickets as links.
+- Chatter: X bad items, split code, agent and personal. Top writer each, and the rule you changed.
 - Wrong calls fixed in the rule, if any.
 
 Auto-archive of done tickets on a timer comes later, after Valentin trusts the manual runs.

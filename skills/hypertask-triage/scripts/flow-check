@@ -201,7 +201,7 @@ def run(board):
             last = info[num][0][0] if info[num][0] else {}
             rows.append({"ticket": num, "column": name, "verdict": "OVERDUE" if waited and waited > limit else "OK",
                          "holder": last.get("agentName"), "idle_h": waited, "title": t["title"]})
-    ci_rows = []
+    ci_rows, ci_boss_h = [], None
     if board != 11514:
         found = [(r, ci_block(info[r["ticket"]][0])) for r in rows]
         found = [(r, ref) for r, ref in found if ref]
@@ -213,6 +213,11 @@ def run(board):
             ci_rows.append({"ticket": r["ticket"], "column": r["column"], "verdict": verdict,
                             "ci_ticket": None if ref == "NO-TICKET" else ref, "ci_open_h": open_h,
                             "waited_h": r["idle_h"], "title": r["title"]})
+        with ThreadPoolExecutor(6) as ex:
+            ci_logs = list(ex.map(lambda n: ht("task", "agent-log", n).get("activities", []), refs))
+        boss = max((a.get("createdAt") or "" for log in ci_logs for a in log
+                    if (a.get("agentName") or "").lower() == "ci boss"), default="")
+        ci_boss_h = hours_since(boss, now) if boss else None
     opened = open_tickets(board)
     bare = no_brain(opened)
     working = sum(1 for r in rows if r["column"] == cfg["in_progress"] and r["verdict"] == "OK")
@@ -226,6 +231,7 @@ def run(board):
         "columns": {c: len(ts) for c, ts in cols.items()},
         "blocked_over_cap": bool(blocked) and len(cols[blocked[0]]) > cfg["blocked_cap"],
         "ci_blocked": ci_rows,
+        "ci_boss_h": ci_boss_h,
         "open": len(opened),
         "no_brain": [{"ticket": t["ticketNumber"], "column": t.get("section"), "title": t["title"]} for t in bare],
     }
@@ -259,6 +265,11 @@ def show(rows, s):
             count[r["verdict"]] = count.get(r["verdict"], 0) + 1
         print(f"CI-BLOCKED board {s['board']}: {len(s['ci_blocked'])} tickets wait on CI: "
               + ", ".join(f"{v} {n}" for v, n in sorted(count.items())))
+        h = s["ci_boss_h"]
+        if any(r["ci_ticket"] for r in s["ci_blocked"]):
+            seen = "never on these CI tickets" if h is None else f"last note {h:.0f}h ago on these CI tickets"
+            quiet = h is None or h > CI_SLOW_HOURS
+            print(f"{'CI-BOSS-QUIET' if quiet else 'CI-BOSS'}: {seen}")
     by_col = {}
     for t in s["no_brain"]:
         by_col[t["column"]] = by_col.get(t["column"], 0) + 1
