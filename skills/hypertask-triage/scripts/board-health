@@ -58,6 +58,8 @@ INVARIANTS = {
                      "rewrite per skills/tickets, then fix what wrote it"),
     "chatter": (f"under {CHATTER_LINE} agent rule breaks a day", "fleet chief",
                 "fix the rule or code behind the top writer, /house-rules-update"),
+    "identities": ("runner logins match live runner sessions, no duplicate names", "Chief Of Staff",
+                   "/agent-housekeeping files the extra logins for Valentin's yes; sync logins whenever runners change"),
 }
 
 
@@ -82,7 +84,7 @@ def number(pattern, text):
     return tuple(int(g) for g in m.groups()) if m else None
 
 
-def measure(flow, blockers, chatter):
+def measure(flow, blockers, chatter, identities=None):
     """Turn the three checks into {key: (bad count, detail)}; None means not measured on this board."""
     s, rows = flow["summary"], flow["rows"]
     o = s.get("ownership")
@@ -112,6 +114,12 @@ def measure(flow, blockers, chatter):
     if chatter is not None:
         agent = len({(r["ticket"], r["item"]) for r in chatter if r["origin"] == "agent"})
         m["chatter"] = (int(agent >= CHATTER_LINE), f"{agent} agent items in 24h")
+    if identities is not None:
+        extra = {p: v["extra"] for p, v in identities["pools"].items() if v.get("extra")}
+        detail = " ".join(f"{p}: {len(e)} extra" for p, e in extra.items())
+        if identities["duplicates"]:
+            detail += f" duplicates: {', '.join(identities['duplicates'])}"
+        m["identities"] = (identities["extra"] + len(identities["duplicates"]), detail.strip())
     return m
 
 
@@ -178,6 +186,8 @@ def self_test():
     lines, head, esc = scorecard(15, m, {"wip": 30})
     assert head == "BOARD-HEALTH board 15: RED 4 of 12" and esc == ["wip"], (head, esc)
     assert any(l.startswith("ESCALATE  wip") and "HT Product Lead" in l for l in lines), lines
+    ids = {"pools": {"Runner N": {"extra": ["11", "12"]}}, "duplicates": ["mini boss ceo"], "extra": 2}
+    assert measure(flow, blockers, None, ids)["identities"][0] == 3
     clean = {k: (0, "") for k in m}
     assert scorecard(15, clean, {})[1] == "BOARD-HEALTH board 15: GREEN"
     print("SELF_TEST_OK")
@@ -192,15 +202,16 @@ def main():
     a = p.parse_args()
     if a.self_test:
         return self_test()
-    with ThreadPoolExecutor(3) as ex:
+    with ThreadPoolExecutor(4) as ex:
         flow = ex.submit(run_json, [str(HERE / "flow-check"), "--board", str(a.board)])
         blockers = ex.submit(run_text, [str(HERE / "blocker-review"), "--boards", str(a.board)])
         chatter = ex.submit(run_json, [str(HERE / "ticket-check"), "--board", str(a.board)])
+        identities = ex.submit(run_json, [str(HERE / "agent-identities")]) if a.board == 15 else None
     if flow.result() is None:
         print(f"BOARD-HEALTH board {a.board}: UNKNOWN, flow-check failed")
         return 1
     now = datetime.now(timezone.utc)
-    measured = measure(flow.result(), blockers.result(), chatter.result())
+    measured = measure(flow.result(), blockers.result(), chatter.result(), identities and identities.result())
     lines, head, escalate = scorecard(a.board, measured, track(a.board, measured, now))
     print("\n".join(lines))
     print(head)

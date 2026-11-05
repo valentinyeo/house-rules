@@ -119,6 +119,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Leads without runners never check runners. Design, Growth, Support and Finance skip `/runner-update` and pace checks. Token-ladder alerts go only to leads with runners. (2026-10-28, why: "this is a token waste")
 - Managers run `/agent-housekeeping` every Monday. It lists all agents and boards, flags agents with no live user or no activity for 7 days, writes the inventory file and files one ticket with the proposed removals. One agent per live session, named `HT <Role> Lead` or `RUNNER N`. Never revoke or archive without a yes from Valentin on that ticket. Skill: `skills/agent-housekeeping/` in this repo. (2026-10-26, why: Team Hypertask had too many agents and boards)
 - One agent, one identity, across all teams. Never create a second login for the same agent. (2026-10-28, why: "should not be possible for the SAME agent to have several identities")
+- Agent logins track the real runner fleet. Chief Of Staff changes, closes or restarts runners? Reuse each runner's login, never mint a new one. Same turn, rerun the identity check. Extra logins go to `/agent-housekeeping` for his yes. Enforcer: `agent-identities`, the `identities` line in `board-health`. (2026-11-06, why: "hyper task is complete mess in terms of agent identities")
 
 ## Valentin's alone
 - Money, paid keys, deleting or revoking agents with the management key, and x.com/valentinyeo are Valentin's decisions only. (2026-10-25, why: irreversible or costs money)
