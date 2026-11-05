@@ -24,9 +24,9 @@ import subprocess
 import sys
 import tempfile
 
-BOARD = 15
+BOARD = 12057
 LABEL = "ai-feedback"
-SECTION = {"bug": "4389", "friction": "19734", "missing": "9190", "idea": "9190"}
+SECTION = {"bug": "34534", "friction": "34534", "missing": "34534", "idea": "34534"}
 # Our own agent tools are not Hypertask: their reports go to board HT Agent Feedback (Valentin 2026-11-05).
 OWN_BOARD, OWN_SECTION, OWN_LABEL = 12057, "34534", "Agent Feedback"
 # One label per cluster (Valentin 2026-11-05). First match wins.
@@ -182,7 +182,7 @@ def description(kind, tool):
 
 
 def main():
-    p = argparse.ArgumentParser(description="File feedback about Hypertask on board 15.")
+    p = argparse.ArgumentParser(description="File agent feedback on board 12057 HT Agent Feedback.")
     p.add_argument("--kind", required=True, choices=sorted(SECTION))
     p.add_argument("--tool", required=True, help="the exact command, MCP tool or screen: 'sections list', 'hypertask_comments', 'inbox'")
     p.add_argument("--dry-run", action="store_true")
@@ -209,7 +209,7 @@ def main():
     found = next((t for t in pool if t.get("uniqueIndex") == a.same), None) if a.same else duplicate(a.kind, place, note, pool, catalog)
     if a.same and not found:
         sys.exit(f"agent-feedback: no open feedback ticket {a.same} on board {board}")
-    if not found and own and not a.new:
+    if not found and not a.new:
         topic = f"Feedback: {cluster(tool + ' ' + note)}"
         words = stems(note)
         def near(t):
@@ -227,8 +227,7 @@ def main():
             r = run("vcc", "activity", "add", found["ticketNumber"], f"agent-feedback +1 ({a.kind}{', ' + tool if tool else ''}): {lane}")
             if r.returncode:
                 sys.exit(f"agent-feedback: bump failed: {(r.stderr or r.stdout).strip()[:200]}")
-            if own:
-                bump_comment(found)
+            bump_comment(found)
         print(f"{'would bump' if a.dry_run else 'bumped'} {found['ticketNumber']} {url}")
         return
     title = title_for(a.kind, note)
