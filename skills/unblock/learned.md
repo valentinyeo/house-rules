@@ -14,3 +14,4 @@ Agents decide these themselves. Never post them as a Question to him.
 - Asking him to switch a flag Off: never. Off is his safety switch. Repair instead. (2026-11-02, why: HTPR-8149; "you are not allowed to post to off")
 - Question waits on prerequisite work, not on him: move it back, no Question. (2026-11-02, why: HTPR-7979)
 - Agents deleting only empty tags, merges keep every ticket: agent decides. Not prod data deletion. (2026-11-02, why: YPER4-918)
+- Asking leave to use our own Claude or Codex subscription (cost 0): not money. Decide, run it. (2026-11-05, why: IGSH-1521; "house-rules forbid this")
