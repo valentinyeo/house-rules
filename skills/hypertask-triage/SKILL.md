@@ -1,6 +1,6 @@
 ---
 name: hypertask-triage
-description: Archive finished Hypertask tickets that need no product owner attention, and review every ticket waiting on Valentin (his call or not, written the house way or not). Use for /hypertask-triage, "archive the boring done tickets", "clean the flag columns". Board first; other Hypertask areas later. Any fleet.
+description: Board health loop for fleet chiefs. One scorecard (board-health) must print GREEN; every red line names its owner and fix. Also archives finished tickets and reviews every ticket waiting on Valentin. Use for /hypertask-triage, "board health", "is the board healthy", "archive the boring done tickets", "clean the flag columns". Any fleet.
 ---
 
 # /hypertask-triage [board]
@@ -11,6 +11,27 @@ Valentin, 2026-10-31:
 > as a product owner non dev i don't enve know what it is or if it is interseting
 
 Default board: your fleet's product board (Hypertask: 15). Software Factory: its own board.
+
+## 0. Board health: loop until GREEN
+Valentin, 2026-11-06:
+> the outcome of the skill is to force the chief of staff to fix all of this, and make sure that the system is running smoothly
+
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/board-health --board 15 --apply`
+Run it for every board your fleet owns. Hypertask: 15, 4060, 11514.
+
+One runner, one ticket until live. So:
+- Active tickets (In Progress, AI Review, QA) never outnumber live runners.
+- Every active ticket has exactly one live runner. No runner holds two.
+The scorecard checks those plus steps 4 to 6f: wait limits, Agent Blocked, brain tags, CI, pristine blockers, chatter.
+
+Each line is `OK`, `RED` or `ESCALATE`. A red line names its owner and the fix.
+- You are not done until it prints `BOARD-HEALTH board N: GREEN`. Exit code 1 means red.
+- Work the reds in order, top first. Then rerun.
+- Your own lines (fleet chief, Chief Of Staff): fix them now.
+- A lead's or CI Boss's line: one agent-lane note on its alarm ticket, with the tickets. Never do runner work yourself.
+- Red over a day prints `ESCALATE`. `--apply` files or bumps one Urgent "Board health" alarm on 4060.
+- Same line red on three runs in a row? The owner's loop is broken. Fix that loop's skill or script, not the tickets.
+- The steps below are the detail behind each line. Run one when its line is red.
 
 ## 1. Dry run
 `~/.local/share/house-rules/skills/hypertask-triage/scripts/archive-done --board <id>`

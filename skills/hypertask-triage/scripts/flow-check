@@ -173,6 +173,29 @@ def in_progress_verdict(log, live, newest_claim, now, num):
     return "OK", who, idle
 
 
+ACTIVE = ("In Progress", "AI Review", "QA")
+
+
+def ownership(active, logs, live):
+    """One runner, one ticket until live: map each active ticket to its newest claimer."""
+    owners, orphans, outside = {}, [], []
+    for num in active:
+        claim = next((a for a in logs[num] if CLAIM.search((a.get("text") or "")[:60])), None)
+        who = (claim or {}).get("agentName") or ""
+        if not who:
+            orphans.append((num, "no claim"))
+        elif not who.lower().startswith(("runner ", "ci runner ")):
+            outside.append((num, who))
+        elif who.lower() not in live:
+            orphans.append((num, f"{who} not running"))
+        else:
+            owners.setdefault(who, []).append(num)
+    doubles = {who: nums for who, nums in owners.items() if len(nums) > 1}
+    return {"active": len(active), "live": len(live), "owners": owners, "orphans": orphans,
+            "outside": outside, "doubles": doubles,
+            "idle_runners": sorted(r for r in live if r not in {o.lower() for o in owners})}
+
+
 def run(board):
     cfg = BOARDS[board]
     now = datetime.now(timezone.utc)
@@ -218,6 +241,10 @@ def run(board):
         boss = max((a.get("createdAt") or "" for log in ci_logs for a in log
                     if (a.get("agentName") or "").lower() == "ci boss"), default="")
         ci_boss_h = hours_since(boss, now) if boss else None
+    own = None
+    if live is not None:
+        active = [t["ticketNumber"] for c in ACTIVE if c in cols for t in cols[c]]
+        own = ownership(active, {n: info[n][0] for n in active}, live)
     opened = open_tickets(board)
     bare = no_brain(opened)
     working = sum(1 for r in rows if r["column"] == cfg["in_progress"] and r["verdict"] == "OK")
@@ -232,6 +259,7 @@ def run(board):
         "blocked_over_cap": bool(blocked) and len(cols[blocked[0]]) > cfg["blocked_cap"],
         "ci_blocked": ci_rows,
         "ci_boss_h": ci_boss_h,
+        "ownership": own,
         "open": len(opened),
         "no_brain": [{"ticket": t["ticketNumber"], "column": t.get("section"), "title": t["title"]} for t in bare],
     }
@@ -253,6 +281,19 @@ def show(rows, s):
           + (", Agent Blocked over cap" if s["blocked_over_cap"] else ""))
     if s["live_runners"] is not None and s["in_progress"] > s["live_runners"]:
         print(f"IMPOSSIBLE In Progress holds {s['in_progress']} tickets for {s['live_runners']} runners")
+    o = s.get("ownership")
+    if o:
+        link = lambda n: url.format(b=s["board"], n=n.rsplit("-", 1)[1])
+        print(f"WIP board {s['board']}: {o['active']} active (In Progress, AI Review, QA) for {o['live']} live runners"
+              + (" OVER" if o["active"] > o["live"] else ""))
+        for num, why in o["orphans"]:
+            print(f"ORPHAN       {link(num)}  {why}")
+        for num, who in o["outside"]:
+            print(f"NOT-A-RUNNER {link(num)}  held by {who}")
+        for who, nums in o["doubles"].items():
+            print(f"DOUBLE       {who} holds {len(nums)}: " + " ".join(link(n) for n in nums))
+        if o["idle_runners"]:
+            print(f"IDLE-RUNNERS {', '.join(o['idle_runners'])}")
     ci_url = "https://app.hypertask.ai/detail/project-11514/{n}"
     for r in sorted(s["ci_blocked"], key=lambda r: r["verdict"]):
         ci = ci_url.format(n=r["ci_ticket"].split("-")[1]) if r["ci_ticket"] else "no CI ticket"
@@ -292,6 +333,12 @@ def self_test():
     assert in_progress_verdict([claim("HT Design Builder", fresh)], live, {}, now, "HTPR-5")[0] == "OK"
     sweep = {"agentName": "Runner 12", "createdAt": fresh, "text": "HT Product Lead pickup queue: orphan HTPR-2. Claim record: 91"}
     assert in_progress_verdict([sweep, claim("Runner 1", fresh)], live, newest, now, "HTPR-2")[0] == "OK", "sweep note read as a claim"
+    logs = {"A": [claim("Runner 1", fresh)], "B": [claim("Runner 1", old)], "C": [claim("Runner 12", fresh)],
+            "D": [note("x", fresh)], "E": [claim("HT Design Builder", fresh)]}
+    o = ownership(list(logs), logs, live)
+    assert o["doubles"] == {"Runner 1": ["A", "B"]}, o
+    assert [n for n, _ in o["orphans"]] == ["C", "D"] and o["outside"] == [("E", "HT Design Builder")], o
+    assert o["idle_runners"] == ["runner 2"] and o["active"] == 5, o
     tag = lambda *names: {"labels": [{"name": n} for n in names]}
     assert no_brain([tag("Bug"), tag("Bug", "Brain-Hard"), tag(), {"labels": None}]) == [tag("Bug"), tag(), {"labels": None}]
     assert [bool(SHIPPED.match(c)) for c in ("Done", "Flag: Everyone", "No Flag", "Bugs", "QA")] == [True, True, True, False, False]
