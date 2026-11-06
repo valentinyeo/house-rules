@@ -16,18 +16,30 @@ Default board: your fleet's product board (Hypertask: 15). Software Factory: its
 Valentin, 2026-11-06:
 > the outcome of the skill is to force the chief of staff to fix all of this, and make sure that the system is running smoothly
 
-`~/.local/share/house-rules/skills/hypertask-triage/scripts/board-health --board 15 --apply`
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/board-health --board 15 --fix --apply`
 Run it for every board your fleet owns. Hypertask: 15, 4060, 11514. Software Factory: 2060.
 
-One runner, one ticket until live. So:
-- Active tickets (In Progress, AI Review, QA) never outnumber live runners.
-- Every active ticket has exactly one live runner. No runner holds two.
+`--fix` runs the safe fixes first, then scores. Each gets an agent-lane note. Board 15 and 4060 only.
+- Merged ticket before QA: moves to QA (board 15).
+- No PR in AI Review, or PR closed: back to its home column.
+- No brain tag: brain-medium.
+- Worker assigned two tickets being built: keeps its most recent, unassigned from the rest.
+- QA ticket already in the live production deploy: ready-to-close note. The runner checks live, then Done.
+Never hand-write a one-off fix script. A fix that is missing goes into `plan_fixes` in board-health.
+
+The assignee is the one record of who owns a ticket. Unassign a worker and its double clears at once.
+Workers: live runners, plus HT Design Builder and Speed Runner, one ticket each.
+- Tickets being built (In Progress, AI Review) never outnumber workers.
+- Merged tickets waiting for the live check (QA) have their own cap: 15 on board 15.
+- Every ticket being built has one live assigned worker. No worker holds two.
 - No live runner idles while orphans or queued tickets wait.
   `idle` red? The board lead runs `/runner-update` and `/runner-list` that turn. It looks at each idle pane and names why.
   Each idle runner takes an orphan first, then the queue. A `stale` ticket means its runner idles too.
 The scorecard checks those plus steps 4 to 6f: wait limits, Agent Blocked, brain tags, CI, pristine blockers, chatter.
 
 Each line is `OK`, `RED` or `ESCALATE`. A red line names its owner and the fix.
+The brain line names which tool wrote the untagged tickets. Fix that tool, not only the tickets.
+Each line shows "Was N, now M" since the last run. `TREND` shows tickets being built, in QA and total problems against the last run.
 - You are not done until it prints `BOARD-HEALTH board N: GREEN`. Exit code 1 means red.
 - Work the reds in order, top first. Then rerun.
 - Your own lines (fleet chief, Chief Of Staff): fix them now.
