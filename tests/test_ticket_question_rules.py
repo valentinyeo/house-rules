@@ -21,6 +21,14 @@ sweep = load("blocker_sweep", ROOT / "skills/tickets/scripts/blocker-sweep.py")
 
 class QuestionLintTest(unittest.TestCase):
     def bad(self, body):
+        if "Question:" in body:
+            body = ("What this is: The app needs your choice today.\n"
+                    "This is your call, not an agent choice.\n"
+                    "Yes changes the app as described below.\n"
+                    "No keeps the app as it stands.\n\n" + body)
+            for part in ("My recommendation", "Why", "Yes", "No"):
+                if part + ":" not in body:
+                    body += f"\n\n{part}: Keep the app working."
         return "\n".join(lint_mod.question_rules(body))
 
     def test_money_ask_without_amount_is_refused(self):

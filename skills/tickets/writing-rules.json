@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "maxWords": 12,
+  "questionContextMinWords": 25,
+  "patterns": {
+    "URL": {
+      "pattern": "https?://\\S+|<https?://[^>]+>",
+      "flags": ""
+    },
+    "QUOTE": {
+      "pattern": "\\\"[^\\\"]+\\\"|“[^”]+”",
+      "flags": ""
+    },
+    "ROBOT": {
+      "pattern": "(^|[\\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|Claim|Released|Gate|Gates|Resume|Session|tmux|Worktree|Ledger)\\s*:",
+      "flags": "i"
+    },
+    "MONEY": {
+      "pattern": "\\b(money|cost|costs|pay|pays|paid|paying|payment|spend|spending|price|pricing|billing|charge|charges|budget|invoice|subscription|dollars?|usd|gbp|euros?|pounds?)\\b|[£$€]",
+      "flags": "i"
+    },
+    "AMOUNT": {
+      "pattern": "[£$€]\\s?\\d|\\b\\d+(\\.\\d+)?\\s?(k\\b|dollars?|usd|gbp|pounds?|euros?|cents?|a month|a year|per month|per year)|\\b(free|no cost|no charge|nothing to pay|at no cost|zero cost)\\b",
+      "flags": "i"
+    },
+    "ONCE": {
+      "pattern": "\\bonce\\b",
+      "flags": "i"
+    },
+    "FACT_ASK": {
+      "pattern": "\\b(can|could|would|will) you\\b[^.?]{0,30}\\b(share|send|tell|check|confirm|look|find|give|provide|paste|read|screenshot)\\b|\\bwhat (version|build|number)\\b|\\bwhich (version|build)\\b",
+      "flags": "i"
+    },
+    "ZERO_COST": {
+      "pattern": "[£$€]\\s?0(\\.0+)?\\b(?!\\.\\d*[1-9])|\\b(existing|own|current) (claude |codex )?subscription\\b|\\bsubscription only\\b|\\bno extra cost\\b",
+      "flags": "i"
+    },
+    "SECRET_ASK": {
+      "pattern": "\\b(paste|post|send|share)\\b[^.?]{0,40}\\b(key|token|secret|password)\\b[^.?]{0,30}\\b(here|in (this|the) (ticket|comment|chat))\\b|\\b(paste|post|send)\\b[^.?]{0,10}\\b(key|it|them)\\b[^.?]{0,6}\\bhere\\b",
+      "flags": "i"
+    },
+    "PLAIN_QUOTE": {
+      "pattern": "\\b(?:Valentin|owner)\\b(?:\\s*,|\\s+\\([^)\\n]{0,48}\\))?(?:\\s+\\d{4}-\\d{2}-\\d{2})?\\s*:\\s*[\"“]|\\b(?:Valentin|owner)\\s+(?:said|says|wrote|asked|replied)\\b[^.\\n]{0,40}[\"“]",
+      "flags": "i"
+    }
+  },
+  "technicalKinds": [
+    {
+      "pattern": "(^|\\s)(~|\\.{0,2})/[\\w.-]+/[\\w./-]*",
+      "flags": "",
+      "name": "file path"
+    },
+    {
+      "pattern": "\\b[\\w-]+\\.(py|sh|zig|ts|tsx|js|mjs|go|kt|json|ya?ml|toml|md|jsonl|log|html)\\b",
+      "flags": "",
+      "name": "file name"
+    },
+    {
+      "pattern": "\\b[A-Za-z_][\\w.]*\\(\\)",
+      "flags": "",
+      "name": "function name"
+    },
+    {
+      "pattern": "\\b[a-z]+(_[a-z0-9]+)+\\b",
+      "flags": "",
+      "name": "code identifier"
+    },
+    {
+      "pattern": "\\b(?:htpr|yper\\d+|hyci|htfe|hefe|inne)-\\d+(?:-[a-z0-9]+)+\\b",
+      "flags": "i",
+      "name": "dashed code identifier"
+    },
+    {
+      "pattern": "\\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\\b",
+      "flags": "",
+      "name": "commit hash"
+    },
+    {
+      "pattern": "`[^`]+`",
+      "flags": "",
+      "name": "code span"
+    },
+    {
+      "pattern": "\\b(Traceback|stderr|stdout|exit code|stack trace|tmux|--[a-z][\\w-]+)\\b",
+      "flags": "",
+      "name": "log or command"
+    },
+    {
+      "pattern": "\\b(this server|this setup|the hub|messaging hub|hub checks|exception|forbids|preflight|solo-dev|CI)\\b",
+      "flags": "i",
+      "name": "insider word, say what he sees in the app"
+    }
+  ],
+  "ticketParts": [
+    "Problem",
+    "Fix",
+    "Done when",
+    "Risk",
+    "Decision"
+  ],
+  "questionParts": [
+    "What this is",
+    "Question",
+    "My recommendation",
+    "Why",
+    "Yes",
+    "No"
+  ]
+}

@@ -1,0 +1,217 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "plain-success",
+      "text": "Messages stay after reload.",
+      "accepted": true
+    },
+    {
+      "id": "ordinary-dashes",
+      "text": "Read-only access stays available.",
+      "accepted": true
+    },
+    {
+      "id": "ticket-reference",
+      "text": "Fixed HTPR-8255.",
+      "accepted": true
+    },
+    {
+      "id": "code-name",
+      "text": "Use htpr-8255-kanban-cleanup.",
+      "accepted": false,
+      "refusal": "dashed code identifier"
+    },
+    {
+      "id": "uppercase-code-name",
+      "text": "Use YPER4-1349-WRITING-RULES.",
+      "accepted": false,
+      "refusal": "dashed code identifier"
+    },
+    {
+      "id": "code-url",
+      "text": "See https://app.hypertask.ai/htpr-8255-kanban-cleanup.",
+      "accepted": true
+    },
+    {
+      "id": "plain-quote",
+      "text": "Valentin said \"Keep it simple.\"",
+      "accepted": false,
+      "refusal": "plain quote marks"
+    },
+    {
+      "id": "html-encoded-quote",
+      "text": "<p>Valentin said &quot;Keep it simple.&quot;</p>",
+      "accepted": false,
+      "refusal": "plain quote marks"
+    },
+    {
+      "id": "dated-quote",
+      "text": "Valentin, 2026-11-06: “Keep it simple.”",
+      "accepted": false,
+      "refusal": "plain quote marks"
+    },
+    {
+      "id": "owner-quote",
+      "text": "The owner asked \"Keep it simple.\"",
+      "accepted": false,
+      "refusal": "plain quote marks"
+    },
+    {
+      "id": "markdown-blockquote",
+      "text": "> Valentin said \"Keep it simple.\"",
+      "accepted": true
+    },
+    {
+      "id": "html-blockquote",
+      "text": "<blockquote><p>Valentin said &quot;Keep it simple.&quot;</p></blockquote>",
+      "accepted": true
+    },
+    {
+      "id": "unattributed-quote",
+      "text": "Click \"Yes\" to continue.",
+      "accepted": true
+    },
+    {
+      "id": "old-quote",
+      "text": "Valentin said \"Keep it simple.\"",
+      "accepted": true,
+      "old": "Valentin said \"Keep it simple.\""
+    },
+    {
+      "id": "old-does-not-exempt-new",
+      "text": "Valentin said \"Keep it simple.\"\nUse htpr-8255-kanban-cleanup.",
+      "accepted": false,
+      "old": "Valentin said \"Keep it simple.\"",
+      "refusal": "dashed code identifier"
+    },
+    {
+      "id": "robot-status",
+      "text": "Next: Fix the messages.",
+      "accepted": false,
+      "refusal": "robot status"
+    },
+    {
+      "id": "snake-code",
+      "text": "Use ticket_writer.",
+      "accepted": false,
+      "refusal": "code identifier"
+    },
+    {
+      "id": "file-name",
+      "text": "Read writing.ts.",
+      "accepted": false,
+      "refusal": "file name"
+    },
+    {
+      "id": "file-path",
+      "text": "Read /home/agent/writing.",
+      "accepted": false,
+      "refusal": "file path"
+    },
+    {
+      "id": "function-name",
+      "text": "Call writing().",
+      "accepted": false,
+      "refusal": "function name"
+    },
+    {
+      "id": "code-span",
+      "text": "Use `writing`.",
+      "accepted": false,
+      "refusal": "code span"
+    },
+    {
+      "id": "commit-hash",
+      "text": "Built abc1234.",
+      "accepted": false,
+      "refusal": "commit hash"
+    },
+    {
+      "id": "long-sentence",
+      "text": "One two three four five six seven eight nine ten eleven twelve thirteen.",
+      "accepted": false,
+      "refusal": "13 words"
+    },
+    {
+      "id": "twelve-words",
+      "text": "One two three four five six seven eight nine ten eleven twelve.",
+      "accepted": true
+    },
+    {
+      "id": "shaped-description",
+      "text": "## Problem\n- Messages disappear.\n## Fix\n- Keep messages visible.\n## Done when\n- Messages stay after reload.\n## Risk\n- Undo if messages disappear.\n## Decision\nnone",
+      "accepted": true,
+      "shape": true
+    },
+    {
+      "id": "missing-ticket-part",
+      "text": "## Problem\n- Messages disappear.",
+      "accepted": false,
+      "shape": true,
+      "refusal": "ticket shape misses"
+    },
+    {
+      "id": "valid-paid-question",
+      "text": "What this is: The app needs a new paid key.\nThis is your call because it costs money.\nYes buys the key for the app.\nNo keeps the current app as it stands.\n\nQuestion: **Buy the key at $20?**\n\nMy recommendation: Yes.\n\nWhy: It lets the app keep working.\n\nYes: Buy the key.\n\nNo: Keep the app unchanged.",
+      "accepted": true
+    },
+    {
+      "id": "missing-context",
+      "text": "Question: **Buy the key at $20?**",
+      "accepted": false,
+      "refusal": "What this is:"
+    },
+    {
+      "id": "money-without-amount",
+      "text": "What this is: The app needs a new paid key.\nThis is your call because it costs money.\nYes buys the key for the app.\nNo keeps the current app as it stands.\n\nQuestion: **Buy the key?**\n\nMy recommendation: Yes.\n\nWhy: It lets the app keep working.\n\nYes: Buy the key.\n\nNo: Keep the app unchanged.",
+      "accepted": false,
+      "refusal": "no amount"
+    },
+    {
+      "id": "future-question",
+      "text": "What this is: The app needs a new paid key.\nThis is your call because it costs money.\nYes buys the key for the app.\nNo keeps the current app as it stands.\n\nQuestion: **Buy the key at $20 once ready?**\n\nMy recommendation: Yes.\n\nWhy: It lets the app keep working.\n\nYes: Buy the key.\n\nNo: Keep the app unchanged.",
+      "accepted": false,
+      "refusal": "once X"
+    },
+    {
+      "id": "quoted-once-markdown",
+      "text": "What this is: The app needs a new paid key.\nThis is your call because it costs money.\nYes buys the key for the app.\nNo keeps the current app as it stands.\n\nQuestion: **Buy the key at $20?**\n\nMy recommendation: Yes.\n\nWhy: It lets the app keep working.\n\nYes: Buy the key.\n\nNo: Keep the app unchanged.\n\n> once the app is ready",
+      "accepted": true
+    },
+    {
+      "id": "quoted-once-html",
+      "text": "<blockquote><p>once the app is ready</p></blockquote>\nWhat this is: The app needs a new paid key.\nThis is your call because it costs money.\nYes buys the key for the app.\nNo keeps the current app as it stands.\n\nQuestion: **Buy the key at $20?**\n\nMy recommendation: Yes.\n\nWhy: It lets the app keep working.\n\nYes: Buy the key.\n\nNo: Keep the app unchanged.",
+      "accepted": true
+    },
+    {
+      "id": "quoted-fake-question",
+      "text": "<blockquote><p>Question: Should we spend money once ready?</p></blockquote>",
+      "accepted": true
+    },
+    {
+      "id": "fact-ask",
+      "text": "What this is: The app needs a new paid key.\nThis is your call because it costs money.\nYes buys the key for the app.\nNo keeps the current app as it stands.\n\nQuestion: **Can you send the version?**\n\nMy recommendation: Yes.\n\nWhy: It lets the app keep working.\n\nYes: Buy the key.\n\nNo: Keep the app unchanged.",
+      "accepted": false,
+      "refusal": "asks him for a fact"
+    },
+    {
+      "id": "zero-cost-not-decision",
+      "text": "What this is: The app needs a new paid key.\nThis is your call because it costs money.\nYes buys the key for the app.\nNo keeps the current app as it stands.\n\nQuestion: **Buy the key at $0?**\n\nMy recommendation: Yes.\n\nWhy: It lets the app keep working.\n\nYes: Buy the key.\n\nNo: Keep the app unchanged.",
+      "accepted": false,
+      "refusal": "costs nothing extra"
+    },
+    {
+      "id": "secret-ask",
+      "text": "What this is: The app needs a new paid key.\nThis is your call because it costs money.\nYes buys the key for the app.\nNo keeps the current app as it stands.\n\nQuestion: **Send the key here at $20?**\n\nMy recommendation: Yes.\n\nWhy: It lets the app keep working.\n\nYes: Buy the key.\n\nNo: Keep the app unchanged.",
+      "accepted": false,
+      "refusal": "paste a key"
+    },
+    {
+      "id": "missing-recommendation",
+      "text": "What this is: The app needs a new paid key.\nThis is your call because it costs money.\nYes buys the key for the app.\nNo keeps the current app as it stands.\n\nQuestion: **Buy the key at $20?**\n\n\n\nWhy: It lets the app keep working.\n\nYes: Buy the key.\n\nNo: Keep the app unchanged.",
+      "accepted": false,
+      "refusal": "My recommendation"
+    }
+  ]
+}

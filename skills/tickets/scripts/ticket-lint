@@ -7,31 +7,30 @@ Exit 0 = ok. Exit 1 = rejected; reasons on stderr.
 --shape: a ticket description must have the house parts (skills/tickets).
 """
 import html
+import json
+from pathlib import Path
 import re
 import sys
 
-MAX_WORDS = 12  # hard cap; skill target stays 8. Approved model tickets run 9 to 10.
-URL = re.compile(r"https?://\S+|<https?://[^>]+>")
-QUOTE = re.compile(r"\"[^\"]+\"|“[^”]+”")  # Valentin's own words stay verbatim
-ROBOT =re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|Claim|Released|Gate|Gates|Resume|Session|tmux|Worktree|Ledger)\s*:", re.I)
-MONEY = re.compile(r"\b(money|cost|costs|pay|pays|paid|paying|payment|spend|spending|price|pricing|billing|charge|charges|budget|invoice|subscription|dollars?|usd|gbp|euros?|pounds?)\b|[£$€]", re.I)
-AMOUNT = re.compile(r"[£$€]\s?\d|\b\d+(\.\d+)?\s?(k\b|dollars?|usd|gbp|pounds?|euros?|cents?|a month|a year|per month|per year)|\b(free|no cost|no charge|nothing to pay|at no cost|zero cost)\b", re.I)
-ONCE = re.compile(r"\bonce\b", re.I)
-FACT_ASK = re.compile(r"\b(can|could|would|will) you\b[^.?]{0,30}\b(share|send|tell|check|confirm|look|find|give|provide|paste|read|screenshot)\b"
-                      r"|\bwhat (version|build|number)\b|\bwhich (version|build)\b", re.I)
-ZERO_COST = re.compile(r"[£$€]\s?0(\.0+)?\b(?!\.\d*[1-9])|\b(existing|own|current) (claude |codex )?subscription\b|\bsubscription only\b|\bno extra cost\b", re.I)
-SECRET_ASK = re.compile(r"\b(paste|post|send|share)\b[^.?]{0,40}\b(key|token|secret|password)\b[^.?]{0,30}\b(here|in (this|the) (ticket|comment|chat))\b"
-                        r"|\b(paste|post|send)\b[^.?]{0,10}\b(key|it|them)\b[^.?]{0,6}\bhere\b", re.I)
-CODE = [
-    (re.compile(r"(^|\s)(~|\.{0,2})/[\w.-]+/[\w./-]*"), "file path"),
-    (re.compile(r"\b[\w-]+\.(py|sh|zig|ts|tsx|js|mjs|go|kt|json|ya?ml|toml|md|jsonl|log|html)\b"), "file name"),
-    (re.compile(r"\b[A-Za-z_][\w.]*\(\)"), "function name"),
-    (re.compile(r"\b[a-z]+(_[a-z0-9]+)+\b"), "code identifier"),
-    (re.compile(r"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b"), "commit hash"),
-    (re.compile(r"`[^`]+`"), "code span"),
-    (re.compile(r"\b(Traceback|stderr|stdout|exit code|stack trace|tmux|--[a-z][\w-]+)\b"), "log or command"),
-    (re.compile(r"\b(this server|this setup|the hub|messaging hub|hub checks|exception|forbids|preflight|solo-dev|CI)\b", re.I), "insider word, say what he sees in the app"),
-]
+RULES = json.loads((Path(__file__).resolve().parents[1] / "writing-rules.json").read_text(encoding="utf-8"))
+MAX_WORDS = RULES["maxWords"]
+
+
+def pattern(rule):
+    return re.compile(rule["pattern"], re.I if "i" in rule["flags"] else 0)
+
+
+URL = pattern(RULES["patterns"]["URL"])
+QUOTE = pattern(RULES["patterns"]["QUOTE"])
+ROBOT = pattern(RULES["patterns"]["ROBOT"])
+MONEY = pattern(RULES["patterns"]["MONEY"])
+AMOUNT = pattern(RULES["patterns"]["AMOUNT"])
+ONCE = pattern(RULES["patterns"]["ONCE"])
+FACT_ASK = pattern(RULES["patterns"]["FACT_ASK"])
+ZERO_COST = pattern(RULES["patterns"]["ZERO_COST"])
+SECRET_ASK = pattern(RULES["patterns"]["SECRET_ASK"])
+PLAIN_QUOTE = pattern(RULES["patterns"]["PLAIN_QUOTE"])
+CODE = [(pattern(rule), rule["name"]) for rule in RULES["technicalKinds"]]
 
 
 def plain(text):
@@ -62,10 +61,15 @@ def words(sentence):
 
 
 def question_rules(text):
-    ours = QUOTE.sub(" ", plain(text))
+    unquoted = re.sub(r"(?is)<blockquote\b.*?</blockquote>", "\n", text)
+    unquoted = "\n".join(line for line in plain(unquoted).splitlines() if not line.lstrip().startswith(">"))
+    ours = QUOTE.sub(" ", unquoted)
     if not re.search(r"(?im)^[\s*_-]*Question:", ours):
         return []
     bad = []
+    for part in RULES["questionParts"]:
+        if not re.search(r"(?im)^[\s*_-]*" + re.escape(part) + r":", ours):
+            bad.append(f"Question misses {part}: put each part on its own line")
     if MONEY.search(ours) and not AMOUNT.search(ours):
         bad.append("money ask with no amount: say what it costs him")
     if ONCE.search(ours):
@@ -73,7 +77,7 @@ def question_rules(text):
     ctx = re.search(r"What this is:(.*?)Question:", ours, re.I | re.S)
     if not ctx:
         bad.append('no "What this is:" part above the Question: say what it is, why it reached him, what each answer changes')
-    elif len(words(ctx.group(1))) < 25:
+    elif len(words(ctx.group(1))) < RULES["questionContextMinWords"]:
         bad.append('"What this is:" too thin to decide on: name the thing as he sees it, why it reached him, what each answer changes')
     q = re.search(r"Question:(.*)", ours, re.I | re.S)
     if q and FACT_ASK.search(q.group(1).split("\n\n")[0]):
@@ -85,7 +89,7 @@ def question_rules(text):
     return bad
 
 
-SHAPE = ["Problem", "Fix", "Done when", "Risk", "Decision"]
+SHAPE = RULES["ticketParts"]
 
 
 def shape_rules(text):
@@ -104,6 +108,8 @@ def lint(text, old=""):
             bad.append(f"robot status line, use the agent lane: {line[:80]}")
             continue
         noref = URL.sub(" ", line)
+        if PLAIN_QUOTE.search(noref):
+            bad.append("plain quote marks: put Valentin’s words in a quote block")
         for rx, what in CODE:
             m = rx.search(noref)
             if m:

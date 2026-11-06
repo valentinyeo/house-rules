@@ -41,9 +41,8 @@ _ld.exec_module(tl)
 PEOPLE = {"qa", "question", "done"}
 CODE_WRITERS = {"Error Alerts": "review job"}
 FEEDBACK_TITLE = re.compile(r"^(Agent feedback, |An agent's (MCP|API|CLI) call)")
-PLAIN_QUOTE = re.compile(r"(Valentin|owner)[^.<]{0,40}(said|asked|wrote|says)[^<]{0,50}(&quot;|\"|“)", re.I)
 BOT_VERDICT = re.compile(r"AI review \(PR", re.I)
-SHAPE = ["problem", "fix", "done when", "risk", "decision"]
+SHAPE = [part.lower() for part in tl.SHAPE]
 RULES = [("shape", "missing ticket parts"), ("plain quote", "plain quote marks"), ("flag key", "code name"),
          ("code identifier", "code name"), ("file path", "code name"), ("file name", "code name"),
          ("commit hash", "code or error id"), ("code span", "code name"), ("log or command", "code name"),
@@ -92,10 +91,7 @@ def comment_origin(c):
 
 
 def lint_text(text):
-    hits = tl.lint(text)
-    if PLAIN_QUOTE.search(text):
-        hits.append("plain quote marks")
-    return {rule_name(h) for h in hits}
+    return {rule_name(hit) for hit in tl.lint(text)}
 
 
 def breaks_for(t, comments, since):
