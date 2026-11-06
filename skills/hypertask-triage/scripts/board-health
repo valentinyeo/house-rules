@@ -97,12 +97,12 @@ def number(pattern, text):
     return tuple(int(g) for g in m.groups()) if m else None
 
 
-def measure(flow, blockers, chatter, identities=None, status=None):
+def measure(flow, blockers, chatter, identities=None, status=None, board=None):
     """Turn the three checks into {key: (bad count, detail)}; None means not measured on this board."""
     m = {}
     if flow:
         m.update(measure_flow(flow))
-    m.update(measure_rest(blockers, chatter, identities, status))
+    m.update(measure_rest(blockers, chatter, identities, status, board))
     return m
 
 
@@ -137,9 +137,15 @@ def measure_flow(flow):
     return m
 
 
-def measure_rest(blockers, chatter, identities, status):
+def pristine_on(board, blockers):
+    """blocker-review lists his whole inbox, every board. Score only this board's rows."""
+    rows = re.findall(rf"^[A-Z-]+ +\S+ .* (\d+) defects +https://app\.hypertask\.ai/detail/project-{board}/", blockers, re.M)
+    return (sum(n == "0" for n in rows), len(rows))
+
+
+def measure_rest(blockers, chatter, identities, status, board=None):
     m = {}
-    pristine = number(r"^PRISTINE (\d+) of (\d+)", blockers)
+    pristine = pristine_on(board, blockers) if board else number(r"^PRISTINE (\d+) of (\d+)", blockers)
     if pristine:
         m["pristine"] = (pristine[1] - pristine[0], f"{pristine[0]} of {pristine[1]} clean")
     parked = number(r"^PARKED SUMMARY (\d+) parked .* (\d+) break no ticket rule", blockers)
@@ -241,6 +247,10 @@ def self_test():
     lines, head, esc = scorecard(15, m, {"wip": 30})
     assert head == "BOARD-HEALTH board 15: RED 4 of 13" and esc == ["wip"], (head, esc)
     assert any(l.startswith("ESCALATE  wip") and "HT Product Lead" in l for l in lines), lines
+    rows = "HIS-OK            HTPR-1   R1  money 0 defects  https://app.hypertask.ai/detail/project-15/1  t\n" \
+           "HIS-BADLY-WRITTEN YPER4-2  R2  keys  3 defects  https://app.hypertask.ai/detail/project-4060/2  t\n"
+    assert pristine_on(15, rows) == (1, 1) and pristine_on(2108, rows) == (0, 0), "pristine must stay on its board"
+    assert measure(flow, rows, None, board=2108)["pristine"][0] == 0, "other boards' blockers turned this one red"
     busy = {"rows": [], "summary": {**flow["summary"], "queue": 0, "ownership": {
         **flow["summary"]["ownership"], "orphans": [], "idle_runners": ["runner 3"]}}}
     assert measure(busy, "", None)["idle"][0] == 0, "idle with nothing waiting is fine"
@@ -367,7 +377,7 @@ def main():
         return 1
     now = datetime.now(timezone.utc)
     measured = measure(flow.result(), blockers.result(), chatter.result(), identities and identities.result(),
-                       status.result())
+                       status.result(), a.board)
     f = flow.result() or {}
     s = f.get("summary") or {}
     numbers = {"being built": (s.get("ownership") or {}).get("active"), "in QA": s.get("qa"),
