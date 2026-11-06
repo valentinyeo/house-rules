@@ -32,6 +32,8 @@ HIGH_RISK = re.compile(
     r'billing|stripe|payment|invoice|pric|money|cost|refund|subscription|'
     r'auth|login|log in|sign.?in|sign.?up|password|access|permission|security|privacy|'
     r'delet|data loss|lost data|gdpr|customer email|email to|token|api key|\bkeys?\b|\bpaid\b|secret', re.I)
+# Keyboard keys are not secrets: "two keys", "arrow keys", "key shortcut".
+KEYBOARD = re.compile(r'\b(?:one|two|three|arrow|hot|modifier|press(?:ing)?)\s+keys?\b|\bkeys?\s*(?:board|stroke|shortcut)', re.I)
 
 
 def ht(*args):
@@ -74,7 +76,7 @@ def verdict(t, kinds, board):
     if board in UNTAGGED and not upkeep and not ({n.lower() for n in names} & UPKEEP_LABELS) \
             and not UPKEEP_TITLE.search(t['title']):
         return 'keep', 'new or changed feature'
-    risk = HIGH_RISK.search(text)
+    risk = HIGH_RISK.search(KEYBOARD.sub(' ', text))
     if risk:
         return 'keep', f'risky area ({risk.group(0).lower()})'
     return 'archive', 'done, low risk, not a feature'
