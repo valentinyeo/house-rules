@@ -76,6 +76,8 @@ def question_rules(text):
     elif len(words(ctx.group(1))) < 25:
         bad.append('"What this is:" too thin to decide on: name the thing as he sees it, why it reached him, what each answer changes')
     q = re.search(r"Question:(.*)", ours, re.I | re.S)
+    if q and not re.search(r"recommendation", q.group(1), re.I):
+        bad.append('no "My recommendation:" right under the Question: say Yes or No and why in one line')
     if q and FACT_ASK.search(q.group(1).split("\n\n")[0]):
         bad.append("asks him for a fact, not a decision: look it up yourself (logs, updater, his PC through agent tools)")
     if ZERO_COST.search(ours):
