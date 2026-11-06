@@ -22,7 +22,9 @@ import json
 import re
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 # board: (columns before merge, column a merged ticket belongs in)
 BOARDS = {
@@ -51,6 +53,21 @@ def column(board, name):
         if len(page) < 100:
             return out
         offset += 100
+
+
+CACHE = Path.home() / ".local/state/board-health/pr-links.json"
+CACHE_MAX_S = 6 * 3600
+
+
+def cached_links(t, cache, now):
+    """Reuse a ticket's PR links while it is unchanged and the entry is under 6 hours old."""
+    key = f"{t.get('updatedAt')}|{t.get('commentCount')}"
+    hit = cache.get(t["ticketNumber"])
+    if hit and hit["key"] == key and now - hit["at"] < CACHE_MAX_S:
+        return hit["links"]
+    links = pr_links(t)
+    cache[t["ticketNumber"]] = {"key": key, "at": now, "links": links}
+    return links
 
 
 def pr_links(t):
@@ -129,8 +146,15 @@ def verdict(col, prs, states):
 def run(board):
     cols, merged_to = BOARDS[board]
     tickets = [(c, t) for c in cols + (["QA"] if merged_to == "QA" else []) for t in column(board, c)]
+    try:
+        cache = json.loads(CACHE.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    now = time.time()
     with ThreadPoolExecutor(6) as ex:
-        links = list(ex.map(lambda ct: pr_links(ct[1]), tickets))
+        links = list(ex.map(lambda ct: cached_links(ct[1], cache, now), tickets))
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    CACHE.write_text(json.dumps({k: v for k, v in cache.items() if now - v["at"] < CACHE_MAX_S}))
     keys = sorted({k for ls in links for k in ls})
     with ThreadPoolExecutor(4) as ex:
         raw = dict(zip(keys, ex.map(pr_state, keys)))

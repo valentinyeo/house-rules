@@ -13,8 +13,10 @@ Valentin, 2026-10-31:
 Default board: your fleet's product board (Hypertask: 15). Software Factory: its own board.
 
 ## How often to run it
-- Health check (step 0, `board-health`): every hour. Cheap script. It counts hours red per problem. Runners take about an hour per ticket, so more often adds nothing. Set it up with `/loop 1h /hypertask-triage step 0` in the chief session. Fix its red lines each hour.
-- Full clean-up (steps 1 to 7): once a day, around 08:00 London. Archives finished tickets and reviews Valentin's blockers. The blocker check also runs alone at 07:30.
+Two layers. The script runs on a timer, the chief session works what it cannot fix.
+- Script, every hour at :05: timer `ht-board-health` runs `board-health --fix --apply` for 15 and 4060, `--apply` for 11514. Safe fixes happen even when no chief is awake. Output: `~/.local/state/board-health/last-<board>.log`. Alarms bump at most once a day. Other fleets add their own boards to a timer like it.
+- Chief session, every hour at :20: read the last logs, work each red line. The script runs at :05, so the log is fresh by :20. A session cron dies with its session, so check `CronList` at every shift start and recreate it when missing: `CronCreate` cron `20 * * * *`, prompt `/hypertask-triage step 0: read ~/.local/state/board-health/last-*.log, work every red line, rerun board-health until GREEN`. Never more often: runners take about an hour per ticket.
+- Full clean-up (steps 1 to 7): once a day at 08:00 London, a second session cron `0 8 * * *`, prompt `/hypertask-triage`. The blocker check also runs alone at 07:30.
 - Right away after big changes: a runner restart or a batch of merges.
 
 ## 0. Board health: loop until GREEN
