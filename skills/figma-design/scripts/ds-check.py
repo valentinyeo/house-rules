@@ -15,8 +15,9 @@ import subprocess
 import sys
 
 THEME_FILES = ["src/themes.zig", "src/app_state.zig", "src/chat_style.zig"]
-RADIUS_LINE = re.compile(r"radius|RoundRect|RADIUS", re.I)
-RADIUS_NUM = re.compile(r"(?:scale|uiScaled|scaled)\((\d+)\)|RADIUS\s*[:=][^=]*?(\d+)\s*;|radius:\s*i32\s*=\s*(\d+)")
+RADIUS_LINE = re.compile(r"radius|RoundRect|RADIUS|CornerShape|CircleShape", re.I)
+RADIUS_NUM = re.compile(r"(?:scale|uiScaled|scaled)\((\d+)\)|RADIUS\s*[:=][^=]*?(\d+)\s*;|radius:\s*i32\s*=\s*(\d+)|RoundedCornerShape\((\d+)\.dp\)|(?:topStart|topEnd|bottomStart|bottomEnd)\s*=\s*(\d+)\.dp")
+PILL_HEIGHT = re.compile(r"height\((\d+)\.dp\)[^\n]*CircleShape")
 RGB = re.compile(r"RGB\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)")
 HEX = re.compile(r"(?:#|0x[fF]{2})([0-9a-fA-F]{6})\b")
 
@@ -38,6 +39,8 @@ def radii(text):
         if RADIUS_LINE.search(line):
             for m in RADIUS_NUM.finditer(line):
                 found.add(int(next(g for g in m.groups() if g)))
+            for m in PILL_HEIGHT.finditer(line):
+                found.add(int(m.group(1)) // 2)
     return found
 
 
