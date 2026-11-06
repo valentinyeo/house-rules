@@ -34,6 +34,7 @@ For each runner: active (working a ticket now) or idle. For every idle one, name
 - Claude runners follow the ladder. Claude is scarce: brake only Claude.
 - Restart dead or stuck runners. Unstick panes waiting on a prompt.
 - Idle for "no tickets"? Get tickets written or groomed. That is your gap to close.
+- Cross-check with `/hypertask-triage` step 0: its `idle`, `orphans` and `stale` lines must be OK when you finish.
 
 ## 4. Report
 

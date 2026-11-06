@@ -184,6 +184,7 @@ def in_progress_verdict(log, live, newest_claim, now, num):
 
 
 ACTIVE = ("In Progress", "AI Review", "QA")
+QUEUE = {"bugs", "improvements", "features", "backlog", "todo"}
 
 
 def ownership(active, logs, live):
@@ -275,6 +276,7 @@ def run(board):
         "ci_boss_h": ci_boss_h,
         "ownership": own,
         "open": len(opened),
+        "queue": sum(1 for t in opened if (t.get("section") or "").lower() in QUEUE),
         "no_brain": [{"ticket": t["ticketNumber"], "column": t.get("section"), "title": t["title"]} for t in bare],
     }
     return rows, summary

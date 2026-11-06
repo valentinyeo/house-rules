@@ -22,6 +22,9 @@ Run it for every board your fleet owns. Hypertask: 15, 4060, 11514. Software Fac
 One runner, one ticket until live. So:
 - Active tickets (In Progress, AI Review, QA) never outnumber live runners.
 - Every active ticket has exactly one live runner. No runner holds two.
+- No live runner idles while orphans or queued tickets wait.
+  `idle` red? The board lead runs `/runner-update` and `/runner-list` that turn. It looks at each idle pane and names why.
+  Each idle runner takes an orphan first, then the queue. A `stale` ticket means its runner idles too.
 The scorecard checks those plus steps 4 to 6f: wait limits, Agent Blocked, brain tags, CI, pristine blockers, chatter.
 
 Each line is `OK`, `RED` or `ESCALATE`. A red line names its owner and the fix.
