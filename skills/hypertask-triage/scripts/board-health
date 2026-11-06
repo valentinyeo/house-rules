@@ -59,6 +59,8 @@ INVARIANTS = {
                      "rewrite per skills/tickets, then fix what wrote it"),
     "chatter": (f"under {CHATTER_LINE} agent rule breaks a day", "fleet chief",
                 "fix the rule or code behind the top writer, /house-rules-update"),
+    "idle": ("no live runner idles while work waits", "lead",
+             "run /runner-update and /runner-list; give each idle runner an orphan first, then the queue, or fix why it idles"),
     "status": ("no merged, closed or PR-less ticket in a pre-merge column", "lead",
                "merged: QA on board 15, Done elsewhere after the live check; closed or no PR: home column"),
     "identities": ("runner logins match live runner sessions, no duplicate names", "Chief Of Staff",
@@ -105,6 +107,10 @@ def measure_flow(flow):
         m["orphans"] = (len(o["orphans"]), " ".join(n for n, _ in o["orphans"]))
         m["doubles"] = (len(o["doubles"]), " ".join(f"{w}: {','.join(n)}" for w, n in o["doubles"].items()))
         m["outside"] = (len(o["outside"]), " ".join(f"{n} ({w})" for n, w in o["outside"]))
+        waiting = len(o["orphans"]) + s.get("queue", 0)
+        idle = o.get("idle_runners", [])
+        m["idle"] = (len(idle) if waiting else 0,
+                     f"idle: {', '.join(idle) or 'none'}; waiting: {len(o['orphans'])} orphans, {s.get('queue', 0)} queued")
     stale = [r["ticket"] for r in rows if r["verdict"] == "STALE"]
     m["stale"] = (len(stale), " ".join(stale))
     over = [r["ticket"] for r in rows if r["verdict"] == "OVERDUE"]
@@ -202,8 +208,13 @@ def self_test():
     assert m["wip"][0] == 2 and m["orphans"][0] == 1 and m["stale"][0] == 1 and m["pristine"][0] == 22, m
     assert m["parked_clean"][0] == 0 and m["chatter"][0] == 0 and m["doubles"][0] == 0 and "ci_boss" not in m, m
     lines, head, esc = scorecard(15, m, {"wip": 30})
-    assert head == "BOARD-HEALTH board 15: RED 4 of 12" and esc == ["wip"], (head, esc)
+    assert head == "BOARD-HEALTH board 15: RED 4 of 13" and esc == ["wip"], (head, esc)
     assert any(l.startswith("ESCALATE  wip") and "HT Product Lead" in l for l in lines), lines
+    busy = {"rows": [], "summary": {**flow["summary"], "queue": 0, "ownership": {
+        **flow["summary"]["ownership"], "orphans": [], "idle_runners": ["runner 3"]}}}
+    assert measure(busy, "", None)["idle"][0] == 0, "idle with nothing waiting is fine"
+    flow["summary"]["ownership"]["idle_runners"] = ["runner 3"]
+    assert measure(flow, "", None)["idle"][0] == 1, "idle runner beside an orphan passed"
     ids = {"pools": {"Runner N": {"extra": ["11", "12"]}}, "duplicates": ["mini boss ceo"], "extra": 2}
     assert measure(flow, blockers, None, ids)["identities"][0] == 3
     st = {"rows": [{"ticket": "IGSH-1", "verdict": "MERGED-NOT-MOVED"}]}
