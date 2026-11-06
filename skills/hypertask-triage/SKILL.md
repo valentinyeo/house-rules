@@ -12,6 +12,11 @@ Valentin, 2026-10-31:
 
 Default board: your fleet's product board (Hypertask: 15). Software Factory: its own board.
 
+## How often to run it
+- Health check (step 0, `board-health`): every hour. Cheap script. It counts hours red per problem. Runners take about an hour per ticket, so more often adds nothing. Set it up with `/loop 1h /hypertask-triage step 0` in the chief session. Fix its red lines each hour.
+- Full clean-up (steps 1 to 7): once a day, around 08:00 London. Archives finished tickets and reviews Valentin's blockers. The blocker check also runs alone at 07:30.
+- Right away after big changes: a runner restart or a batch of merges.
+
 ## 0. Board health: loop until GREEN
 Valentin, 2026-11-06:
 > the outcome of the skill is to force the chief of staff to fix all of this, and make sure that the system is running smoothly
