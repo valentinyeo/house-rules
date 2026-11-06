@@ -127,8 +127,10 @@ def gh_json(path):
 PROD_CACHE = {}
 
 
-def verdict(col, prs, states):
+def verdict(col, prs, states, waiting_on_him=False):
     """prs oldest to newest mention; states maps pr key to (state, live)."""
+    if col == "Valentin Review" and waiting_on_him:
+        return None
     if not prs:
         return "NO-PR" if col == "AI Review" else None
     if any(states.get(p, ("",))[0] == "OPEN" for p in prs):
@@ -166,7 +168,7 @@ def run(board):
     states = {k: (s, live.get(k, False)) for k, (s, _) in raw.items()}
     rows = []
     for (col, t), prs in zip(tickets, links):
-        v = verdict(col, prs, states)
+        v = verdict(col, prs, states, bool(t.get("blockerCommentId")))
         if v:
             rows.append({"ticket": t["ticketNumber"], "column": col, "verdict": v, "pr": prs[-1] if prs else None,
                          "move_to": {"MERGED-NOT-MOVED": merged_to, "LIVE-READY": "Done after the runner's live check"}
@@ -196,6 +198,8 @@ def self_test():
     assert verdict("In Progress", ["a#1", "a#3"], s) == "PR-CLOSED"
     assert verdict("In Progress", ["a#3", "a#1"], s) == "MERGED-NOT-MOVED"
     assert verdict("AI Review", [], s) == "NO-PR" and verdict("In Progress", [], s) is None
+    assert verdict("Valentin Review", ["a#1"], s, waiting_on_him=True) is None, "open Question waits on him"
+    assert verdict("Valentin Review", ["a#1"], s) == "MERGED-NOT-MOVED", "no Question: merged work must move"
     assert PR.findall("see https://github.com/hypertask-ai/hypertask/pull/2939.") == [("hypertask-ai/hypertask", "2939")]
     print("SELF_TEST_OK")
 
