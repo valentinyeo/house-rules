@@ -25,6 +25,7 @@ import sys
 POOLS = {
     "Runner N": (r"^runner (\d+)$", "ht-or-runner-"),
     "CI Runner N": (r"^ci runner (\d+)$", "ht-ci-runner-"),
+    "Infra Runner N": (r"^infra runner (\d+)$", "infra-runner-"),
     "CEO Runner N": (r"^ceo runner (\d+)$", "ceo-runner-"),
     "Hax Runner N": (r"^hax runner (\d+)$", "hax-runner-"),
     "Multi Bot Runner X": (r"^multi bot runner ([a-z])$", "multibot-runner-"),
