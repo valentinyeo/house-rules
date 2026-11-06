@@ -6,15 +6,15 @@ Each red line names its owner and the fix. An invariant red for over a day
 prints ESCALATE; with --apply it files or bumps one Urgent alarm.
 
 Invariants come from flow-check (work in flight, CI, brain tags),
-blocker-review (tickets on Valentin and in Agent Blocked) and ticket-check
-(chatter). One runner, one ticket until live, so active work (In Progress,
-AI Review, QA) never exceeds live runners and every active ticket has one
-live runner.
+wrong-status (columns against PRs and the live deploy), blocker-review
+(tickets on Valentin and in Agent Blocked), ticket-check (chatter) and
+agent-identities. The assignee owns a ticket. Tickets being built never
+exceed workers; QA has its own cap. --fix runs the safe fixes first.
 
 Valentin, 2026-11-06: "the outcome of the skill is to force the chief of
 staff to fix all of this, and make sure that the system is running smoothly".
 
-usage: board-health [--board 15] [--apply] [--alarm-board 4060] [--self-test]
+usage: board-health [--board 15] [--fix] [--apply] [--alarm-board 4060] [--self-test]
 Exit 0 GREEN, 1 RED.
 """
 import argparse
@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,18 +38,24 @@ FLOW_BOARDS = {15, 4060, 11514}
 
 # key: (what must hold, owner role, fix). Owner "lead" means the board's lead.
 INVARIANTS = {
-    "wip": ("active tickets at most live runners", "lead",
+    "wip": ("tickets being built (In Progress, AI Review) at most the workers", "lead",
             "runners finish one ticket before the next; send extras back to the queue"),
-    "orphans": ("every active ticket has a live runner", "lead",
-                "hand each orphan to a live runner, or move it to its home column"),
-    "doubles": ("no runner holds two active tickets", "lead",
-                "the runner keeps its oldest ticket; the rest go back to the queue"),
-    "outside": ("only runners hold active tickets", "lead", "leads hand the ticket to a runner"),
+    "qa": ("merged tickets waiting for the live check at or under the QA cap", "lead",
+           "prove live and close, LIVE-READY ones first"),
+    "shipped": ("no QA ticket whose change is already live", "lead",
+                "the runner checks it live, then Done; --fix posts the ready-to-close note"),
+    "orphans": ("every ticket being built has a live assigned worker", "lead",
+                "assign a live runner, or move it to its home column"),
+    "doubles": ("no worker is assigned two tickets being built", "lead",
+                "keep its most recent ticket, unassign the rest; --fix does it"),
+    "outside": ("only runners, Design Builder and Speed Runner hold tickets being built", "lead",
+                "leads hand the ticket to a runner"),
     "stale": ("every In Progress ticket moved in the last 3 hours", "lead", "wake the runner or reassign"),
     "overdue": ("no ticket over its wait limit in QA, AI Review or Agent Blocked", "lead",
                 "drive the PR or live proof today"),
     "blocked_cap": ("Agent Blocked at or under its cap", "lead", "clear the column today; only broken tools stay"),
-    "brain": ("every open ticket has one brain tag", "lead", "tag it, brain-medium when unsure"),
+    "brain": ("every open ticket has one brain tag", "lead",
+              "--fix tags brain-medium; then make the writer named here set the tag"),
     "ci": ("no ticket waits on a slow, closed or missing CI ticket", "CI Boss",
            "CI Boss works its Urgent CI tickets; triage files the missing ones"),
     "ci_boss": ("CI Boss wrote on the blocking CI tickets in the last 6 hours", "Chief Of Staff",
@@ -62,7 +69,8 @@ INVARIANTS = {
     "idle": ("no live runner idles while work waits", "lead",
              "run /runner-update and /runner-list; give each idle runner an orphan first, then the queue, or fix why it idles"),
     "status": ("no merged, closed or PR-less ticket in a pre-merge column", "lead",
-               "merged: QA on board 15, Done elsewhere after the live check; closed or no PR: home column"),
+               "merged: QA on board 15, Done elsewhere after the live check; closed or no PR: home column; "
+               "--fix does board 15 and 4060"),
     "identities": ("runner logins match live runner sessions, no duplicate names", "Chief Of Staff",
                    "/agent-housekeeping files the extra logins for Valentin's yes; sync logins whenever runners change"),
 }
@@ -102,8 +110,10 @@ def measure_flow(flow):
     s, rows = flow["summary"], flow["rows"]
     o = s.get("ownership")
     m = {}
+    if s.get("qa_cap"):
+        m["qa"] = (max(0, s["qa"] - s["qa_cap"]), f"{s['qa']} in QA, cap {s['qa_cap']}")
     if o:
-        m["wip"] = (max(0, o["active"] - o["live"]), f"{o['active']} active for {o['live']} runners")
+        m["wip"] = (max(0, o["active"] - o["live"]), f"{o['active']} being built for {o['live']} workers")
         m["orphans"] = (len(o["orphans"]), " ".join(n for n, _ in o["orphans"]))
         m["doubles"] = (len(o["doubles"]), " ".join(f"{w}: {','.join(n)}" for w, n in o["doubles"].items()))
         m["outside"] = (len(o["outside"]), " ".join(f"{n} ({w})" for n, w in o["outside"]))
@@ -116,7 +126,9 @@ def measure_flow(flow):
     over = [r["ticket"] for r in rows if r["verdict"] == "OVERDUE"]
     m["overdue"] = (len(over), " ".join(over))
     m["blocked_cap"] = (int(bool(s["blocked_over_cap"])), "")
-    m["brain"] = (len(s["no_brain"]), " ".join(t["ticket"] for t in s["no_brain"]))
+    writers = Counter(t.get("writer") or "unknown" for t in s["no_brain"])
+    m["brain"] = (len(s["no_brain"]), "written by " + ", ".join(f"{w} {n}" for w, n in writers.most_common())
+                  + ": " + " ".join(t["ticket"] for t in s["no_brain"]) if s["no_brain"] else "")
     ci_bad = [r for r in s.get("ci_blocked", []) if r["verdict"] != "CI-WAIT"]
     m["ci"] = (len(ci_bad), " ".join(f"{r['ticket']}>{r['ci_ticket'] or 'none'}" for r in ci_bad))
     if any(r["ci_ticket"] for r in s.get("ci_blocked", [])):
@@ -137,7 +149,10 @@ def measure_rest(blockers, chatter, identities, status):
         agent = len({(r["ticket"], r["item"]) for r in chatter if r["origin"] == "agent"})
         m["chatter"] = (int(agent >= CHATTER_LINE), f"{agent} agent items in 24h")
     if status is not None:
-        m["status"] = (len(status["rows"]), " ".join(f"{r['ticket']}({r['verdict']})" for r in status["rows"]))
+        wrong = [r for r in status["rows"] if r["verdict"] != "LIVE-READY"]
+        live = [r["ticket"] for r in status["rows"] if r["verdict"] == "LIVE-READY"]
+        m["status"] = (len(wrong), " ".join(f"{r['ticket']}({r['verdict']})" for r in wrong))
+        m["shipped"] = (len(live), " ".join(live))
     if identities is not None:
         extra = {p: v["extra"] for p, v in identities["pools"].items() if v.get("extra")}
         detail = " ".join(f"{p}: {len(e)} extra" for p, e in extra.items())
@@ -147,16 +162,31 @@ def measure_rest(blockers, chatter, identities, status):
     return m
 
 
-def track(board, measured, now):
+def track(board, measured, numbers, now):
+    """Returns (hours red per key, bad count per key last run, headline numbers last run, last run time)."""
     STATE.mkdir(parents=True, exist_ok=True)
     path = STATE / f"{board}.json"
-    first = json.load(open(path)) if path.exists() else {}
-    first = {k: first.get(k, now.isoformat()) for k, (bad, _) in measured.items() if bad}
-    json.dump(first, open(path, "w"), indent=1)
-    return {k: (now - datetime.fromisoformat(v)).total_seconds() / 3600 for k, v in first.items()}
+    old = json.load(open(path)) if path.exists() else {}
+    if "first" not in old:
+        old = {"first": old, "last": {}}
+    first = {k: old["first"].get(k, now.isoformat()) for k, (bad, _) in measured.items() if bad}
+    json.dump({"first": first, "last": {k: bad for k, (bad, _) in measured.items()}, "numbers": numbers,
+               "at": now.isoformat()}, open(path, "w"), indent=1)
+    red_for = {k: (now - datetime.fromisoformat(v)).total_seconds() / 3600 for k, v in first.items()}
+    return red_for, old["last"], old.get("numbers", {}), old.get("at")
 
 
-def scorecard(board, measured, red_for):
+def headline(numbers, before, at):
+    parts = [f"{name} {before[name]} to {n}" if name in before else f"{name} {n}" for name, n in numbers.items()]
+    return "TREND " + ", ".join(parts) + (f" (since {at[:16].replace('T', ' ')} UTC)" if at else " (first run)")
+
+
+def trend(bad, before):
+    return "" if before is None or before == bad else f" Was {before}, now {bad}."
+
+
+def scorecard(board, measured, red_for, last=None):
+    last = last or {}
     lead = LEADS.get(board, "the board lead")
     lines, escalate = [], []
     for key, (rule, owner, fix) in INVARIANTS.items():
@@ -164,13 +194,14 @@ def scorecard(board, measured, red_for):
             continue
         bad, detail = measured[key]
         who = lead if owner == "lead" else owner
+        moved = trend(bad, last.get(key))
         if not bad:
-            lines.append(f"OK        {key:<13} {rule}")
+            lines.append(f"OK        {key:<13} {rule}.{moved}")
             continue
         hours = red_for.get(key, 0)
         tag = "ESCALATE" if hours > ESCALATE_HOURS else "RED"
         (escalate.append(key) if tag == "ESCALATE" else None)
-        lines.append(f"{tag:<9} {key:<13} {rule}. {detail}. Owner {who}: {fix}. Red {hours:.0f}h.")
+        lines.append(f"{tag:<9} {key:<13} {rule}. {detail}. Owner {who}: {fix}. Red {hours:.0f}h.{moved}")
     red = sum(1 for k in measured if measured[k][0])
     verdict = "GREEN" if not red else f"RED {red} of {len(measured)}"
     return lines, f"BOARD-HEALTH board {board}: {verdict}", escalate
@@ -221,18 +252,110 @@ def self_test():
     assert measure(flow, blockers, None, None, st)["status"] == (1, "IGSH-1(MERGED-NOT-MOVED)")
     clean = {k: (0, "") for k in m}
     assert scorecard(15, clean, {})[1] == "BOARD-HEALTH board 15: GREEN"
+    assert any("Was 2, now 0." in l for l in scorecard(15, clean, {}, {"wip": 2})[0]), "trend missing"
+    assert headline({"being built": 41}, {"being built": 51}, "2026-11-06T01:00:00") \
+        == "TREND being built 51 to 41 (since 2026-11-06 01:00 UTC)"
+    qa = {"rows": [], "summary": {**flow["summary"], "qa": 20, "qa_cap": 15}}
+    assert measure(qa, "", None)["qa"][0] == 5 and measure(qa, "", None)["wip"][0] == 2, "QA must not count as building"
+    st = {"rows": [{"ticket": "HTPR-5", "verdict": "LIVE-READY", "pr": "a#1", "column": "QA"},
+                   {"ticket": "HTPR-6", "verdict": "MERGED-NOT-MOVED", "pr": "a#2", "column": "AI Review"},
+                   {"ticket": "HTPR-7", "verdict": "NO-PR", "pr": None, "column": "AI Review", "title": "[BUG] x", "labels": []}]}
+    sm = measure(None, "", None, None, st)
+    assert sm["shipped"][0] == 1 and sm["status"][0] == 2, sm
+    fl = {"rows": [{"ticket": "A", "idle_h": 1}, {"ticket": "B", "idle_h": 9}],
+          "summary": {"no_brain": [{"ticket": "C", "writer": "app feedback reporter"}],
+                      "ownership": {"doubles": {"Runner 1": ["A", "B"]}}}}
+    plan = {n: (c, note) for n, c, note in plan_fixes(15, fl, st)}
+    assert plan["HTPR-6"][0] == [["vcc", "task", "move", "HTPR-6", "QA"]]
+    assert plan["HTPR-7"][0] == [["vcc", "task", "update", "HTPR-7", "--section", "4389"]]
+    assert plan["HTPR-5"][0] == [] and "ready to close" in plan["HTPR-5"][1]
+    assert plan["C"][0][0][-1] == "brain-medium" and "app feedback reporter" in plan["C"][1]
+    assert "A" not in plan and plan["B"][0] == [["vcc", "task", "unassign", "B", "--agent", "Runner 1"]], "kept the wrong ticket"
+    assert "HTPR-6" not in {n for n, _, _ in plan_fixes(4060, None, st)}, "merged moves to QA only on board 15"
     print("SELF_TEST_OK")
+
+
+FIX_BOARDS = {15, 4060}
+HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}, 4060: {"other": 10414}}
+NOTE = "board-health fix:"
+
+
+def home(t, board):
+    names = " ".join([t.get("title") or ""] + list(t.get("labels") or []))
+    cols = HOME[board]
+    if re.search(r"\bbug", names, re.I) and "bug" in cols:
+        return cols["bug"]
+    if re.search(r"feature", names, re.I) and "feature" in cols:
+        return cols["feature"]
+    return cols["other"]
+
+
+def plan_fixes(board, flow, status):
+    """Safe, reversible fixes as (ticket, commands, agent-lane note). Pure: reads results, writes nothing."""
+    plan = []
+    for r in (status or {}).get("rows", []):
+        n = r["ticket"]
+        if r["verdict"] == "MERGED-NOT-MOVED" and board == 15:
+            plan.append((n, [["vcc", "task", "move", n, "QA"]],
+                         f"{NOTE} moved to QA. Its PR is merged: {r['pr']}. Runner proves it live, then Done."))
+        elif r["verdict"] in ("NO-PR", "PR-CLOSED"):
+            plan.append((n, [["vcc", "task", "update", n, "--section", str(home(r, board))]],
+                         f"{NOTE} back to the queue. {'No PR linked' if r['verdict'] == 'NO-PR' else 'Its PR closed unmerged'}"
+                         f" while it sat in {r['column']}."))
+        elif r["verdict"] == "LIVE-READY":
+            plan.append((n, [], f"{NOTE} ready to close. Its merged PR {r['pr']} is in the live production deploy. "
+                                "Runner checks it live, then Done."))
+    if flow:
+        s = flow["summary"]
+        for t in s["no_brain"]:
+            plan.append((t["ticket"], [["vcc", "task", "update", t["ticket"], "--add-labels", "brain-medium"]],
+                         f"{NOTE} tagged brain-medium, the default. Written by {t.get('writer')}: that tool should set it."))
+        idle = {r["ticket"]: r.get("idle_h") for r in flow["rows"]}
+        for who, nums in ((s.get("ownership") or {}).get("doubles") or {}).items():
+            keep = min(nums, key=lambda n: idle.get(n) if idle.get(n) is not None else 1e9)
+            for n in nums:
+                if n != keep:
+                    plan.append((n, [["vcc", "task", "unassign", n, "--agent", who]],
+                                 f"{NOTE} unassigned {who}: one runner, one ticket. It keeps {keep}. "
+                                 "The orphan sweep hands this one to a free runner."))
+    return plan
+
+
+def apply_fixes(plan):
+    done = failed = skipped = 0
+    for ticket, cmds, note in plan:
+        log = json.loads(run_text(["hypertask", "--json", "task", "agent-log", ticket]) or "{}").get("activities") or []
+        if not cmds and any(note[:60] in (a.get("text") or "") for a in log[:20]):
+            skipped += 1
+            continue
+        errs = [r for r in (subprocess.run(c, capture_output=True, text=True) for c in cmds) if r.returncode]
+        if errs:
+            failed += 1
+            print(f"FIX FAILED {ticket}: {(errs[0].stderr or errs[0].stdout).strip()[:160]}")
+            continue
+        subprocess.run(["vcc", "activity", "add", ticket, note], capture_output=True, text=True)
+        done += 1
+        print(f"FIXED {ticket}: {note[len(NOTE) + 1:][:100]}")
+    print(f"FIX SUMMARY {done} fixed, {skipped} already noted, {failed} failed")
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--board", type=int, default=15)
-    p.add_argument("--apply", action="store_true")
+    p.add_argument("--apply", action="store_true", help="file or bump the alarm when a line is red over a day")
+    p.add_argument("--fix", action="store_true", help="run the safe fixes, then score again")
     p.add_argument("--alarm-board", type=int, default=4060)
     p.add_argument("--self-test", action="store_true")
     a = p.parse_args()
     if a.self_test:
         return self_test()
+    if a.fix:
+        if a.board not in FIX_BOARDS:
+            print(f"FIX not available on board {a.board}: the shared login cannot write there. The lead fixes by hand.")
+        else:
+            flow = run_json([str(HERE / "flow-check"), "--board", str(a.board)])
+            status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)])
+            apply_fixes(plan_fixes(a.board, flow, status))
     with ThreadPoolExecutor(5) as ex:
         status = ex.submit(run_json, [str(HERE / "wrong-status"), "--board", str(a.board)])
         flow = ex.submit(run_json, [str(HERE / "flow-check"), "--board", str(a.board)])
@@ -245,12 +368,23 @@ def main():
     now = datetime.now(timezone.utc)
     measured = measure(flow.result(), blockers.result(), chatter.result(), identities and identities.result(),
                        status.result())
-    lines, head, escalate = scorecard(a.board, measured, track(a.board, measured, now))
+    f = flow.result() or {}
+    s = f.get("summary") or {}
+    numbers = {"being built": (s.get("ownership") or {}).get("active"), "in QA": s.get("qa"),
+               "problems": sum(b for b, _ in measured.values())}
+    numbers = {k: v for k, v in numbers.items() if v is not None}
+    red_for, last, before, at = track(a.board, measured, numbers, now)
+    lines, head, escalate = scorecard(a.board, measured, red_for, last)
     print("\n".join(lines))
+    if not a.fix and a.board in FIX_BOARDS:
+        fixable = plan_fixes(a.board, f, status.result())
+        if fixable:
+            print(f"FIXABLE {len(fixable)} safe fixes waiting: rerun with --fix")
+    print(headline(numbers, before, at))
     print(head)
     if escalate and a.apply:
         print(alarm(a.board, a.alarm_board, lines, escalate))
-    return 0 if head.endswith("GREEN") else 1
+    return 0 if not any(b for b, _ in measured.values()) else 1
 
 
 if __name__ == "__main__":

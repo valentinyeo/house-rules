@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Flag tickets that sit in a column nobody can be working.
 
-House rules: a runner stays on its one ticket until it is shipped. So the
-work columns can never hold more tickets than there are live runners, and a
-ticket only waits in QA or AI Review for a short while.
+The assignee is the one record of who owns a ticket. Workers are live
+runners plus HT Design Builder and Speed Runner. Tickets being built (In
+Progress, AI Review) never outnumber workers; QA has its own cap.
 
 Per ticket, from the board and the ticket's own agent log:
-  In Progress  OK only when the last claimer is a live runner, this is that
-               runner's newest claim, and the log moved in the last few hours.
-               Otherwise DEAD-RUNNER, MOVED-ON, STALE or NO-CLAIM.
+  In Progress  OK only when its assigned worker is live, holds no other ticket
+               being built, and the log moved in the last few hours.
+               Otherwise NO-OWNER, DEAD-RUNNER, NOT-A-RUNNER, DOUBLE or STALE.
   QA           merged work waiting for its live proof. Over a day: the runner
                left before shipping.
   AI Review    a PR waiting for review. Over a few hours: nobody drives it.
@@ -46,6 +46,7 @@ BOARDS = {
         "in_progress": "In Progress",
         "waits": {"QA": 24, "AI Review": 6, "Agent Blocked (Infra)": 24},
         "blocked_cap": 5,
+        "qa_cap": 15,
     },
     4060: {
         "runners": [],
@@ -156,6 +157,21 @@ def open_tickets(board):
         offset += 100
 
 
+FEEDBACK_TITLE = re.compile(r"^(Agent feedback, |An agent's (MCP|API|CLI) call)")
+
+
+def writer(t):
+    """Which tool or login wrote the ticket: names the source to fix, not only the ticket."""
+    if FEEDBACK_TITLE.match(t.get("title") or ""):
+        return "app feedback reporter"
+    log = ht("task", "agent-log", t["ticketNumber"]).get("activities") or []
+    first = min(log, key=lambda a: a.get("createdAt") or "", default={})
+    if first.get("agentName"):
+        return first["agentName"]
+    task = (ht("task", "get", t["ticketNumber"]).get("tasks") or [{}])[0]
+    return ((task.get("createdBy") or {}).get("displayName") or "unknown") + " login"
+
+
 def no_brain(tickets):
     return [t for t in tickets if not BRAINS & {(l.get("name") or "").lower() for l in t.get("labels") or []}]
 
@@ -167,44 +183,54 @@ def details(t):
     return num, log, (task.get("staleness") or {}).get("sectionChangedAt") or t.get("updatedAt")
 
 
-def in_progress_verdict(log, live, newest_claim, now, num):
-    claim = next((a for a in log if CLAIM.search((a.get("text") or "")[:60])), None)
-    last = log[0] if log else None
-    idle = hours_since(last.get("createdAt"), now) if last else None
-    if not claim:
-        return "NO-CLAIM", None, idle
-    who = claim.get("agentName") or "unknown"
-    if live is not None and who.lower().startswith(("runner ", "ci runner ")) and who.lower() not in live:
-        return "DEAD-RUNNER", who, idle
-    if newest_claim.get(who, (None, ""))[0] not in (None, num):
-        return "MOVED-ON", who, idle
+BUILDING = ("In Progress", "AI Review")
+QUEUE = {"bugs", "improvements", "features", "backlog", "todo"}
+WORKERS = {"ht design builder", "speed runner"}
+
+
+def holder(t, live):
+    """The assignee is the one record of ownership. Returns (kind, name): owned, orphan or outside."""
+    agents = [a["agent"]["displayName"] for a in t.get("assignees") or [] if a.get("agent")]
+    workers = [n for n in agents if n.lower().startswith(("runner ", "ci runner ")) or n.lower() in WORKERS]
+    if not workers:
+        return ("outside", agents[0]) if agents else ("orphan", "nobody assigned")
+    alive = [n for n in workers if n.lower() in WORKERS or n.lower() in live]
+    return ("owned", alive[0]) if alive else ("orphan", f"{workers[0]} not running")
+
+
+def ownership(building, live):
+    """One runner, one ticket being built. QA waits on its own cap."""
+    owners, orphans, outside = {}, [], []
+    for t in building:
+        kind, who = holder(t, live)
+        if kind == "owned":
+            owners.setdefault(who, []).append(t["ticketNumber"])
+        else:
+            (orphans if kind == "orphan" else outside).append((t["ticketNumber"], who))
+    workers_busy = sum(1 for w in owners if w.lower() in WORKERS)
+    return {"active": len(building), "live": len(live) + workers_busy, "owners": owners, "orphans": orphans,
+            "outside": outside, "doubles": {w: n for w, n in owners.items() if len(n) > 1},
+            "idle_runners": sorted(r for r in live if r not in {o.lower() for o in owners})}
+
+
+def in_progress_verdict(t, own, log, now):
+    idle = hours_since(log[0].get("createdAt"), now) if log else None
+    num = t["ticketNumber"]
+    if own:
+        hit = next((who for n, who in own["orphans"] if n == num), None)
+        if hit:
+            return ("NO-OWNER" if hit == "nobody assigned" else "DEAD-RUNNER"), hit, idle
+        hit = next((who for n, who in own["outside"] if n == num), None)
+        if hit:
+            return "NOT-A-RUNNER", hit, idle
+        who = next((w for w, nums in own["owners"].items() if num in nums), None)
+        if who in own["doubles"]:
+            return "DOUBLE", who, idle
+    else:
+        who = next((a["agent"]["displayName"] for a in t.get("assignees") or [] if a.get("agent")), None)
     if idle is None or idle > ACTIVE_HOURS:
         return "STALE", who, idle
     return "OK", who, idle
-
-
-ACTIVE = ("In Progress", "AI Review", "QA")
-QUEUE = {"bugs", "improvements", "features", "backlog", "todo"}
-
-
-def ownership(active, logs, live):
-    """One runner, one ticket until live: map each active ticket to its newest claimer."""
-    owners, orphans, outside = {}, [], []
-    for num in active:
-        claim = next((a for a in logs[num] if CLAIM.search((a.get("text") or "")[:60])), None)
-        who = (claim or {}).get("agentName") or ""
-        if not who:
-            orphans.append((num, "no claim"))
-        elif not who.lower().startswith(("runner ", "ci runner ")):
-            outside.append((num, who))
-        elif who.lower() not in live:
-            orphans.append((num, f"{who} not running"))
-        else:
-            owners.setdefault(who, []).append(num)
-    doubles = {who: nums for who, nums in owners.items() if len(nums) > 1}
-    return {"active": len(active), "live": len(live), "owners": owners, "orphans": orphans,
-            "outside": outside, "doubles": doubles,
-            "idle_runners": sorted(r for r in live if r not in {o.lower() for o in owners})}
 
 
 def run(board):
@@ -214,18 +240,13 @@ def run(board):
     cols = {name: column(board, name) for name in [cfg["in_progress"], *cfg["waits"]]}
     with ThreadPoolExecutor(6) as ex:
         info = {num: (log, moved) for num, log, moved in ex.map(details, [t for ts in cols.values() for t in ts])}
-    newest_claim = {}
-    for t in cols[cfg["in_progress"]]:
-        log = info[t["ticketNumber"]][0]
-        claim = next((a for a in log if CLAIM.search((a.get("text") or "")[:60])), None)
-        if claim:
-            who, at = claim.get("agentName") or "unknown", claim.get("createdAt") or ""
-            if at > newest_claim.get(who, (None, ""))[1]:
-                newest_claim[who] = (t["ticketNumber"], at)
+    own = None
+    if live is not None:
+        own = ownership([t for c in BUILDING if c in cols for t in cols[c]], live)
     rows = []
     for t in cols[cfg["in_progress"]]:
         num = t["ticketNumber"]
-        verdict, who, idle = in_progress_verdict(info[num][0], live, newest_claim, now, num)
+        verdict, who, idle = in_progress_verdict(t, own, info[num][0], now)
         rows.append({"ticket": num, "column": cfg["in_progress"], "verdict": verdict, "holder": who,
                      "idle_h": idle, "title": t["title"]})
     for name, limit in cfg["waits"].items():
@@ -256,10 +277,6 @@ def run(board):
         boss = max((a.get("createdAt") or "" for log in ci_logs for a in log
                     if (a.get("agentName") or "").lower() == "ci boss"), default="")
         ci_boss_h = hours_since(boss, now) if boss else None
-    own = None
-    if live is not None:
-        active = [t["ticketNumber"] for c in ACTIVE if c in cols for t in cols[c]]
-        own = ownership(active, {n: info[n][0] for n in active}, live)
     opened = open_tickets(board)
     bare = no_brain(opened)
     working = sum(1 for r in rows if r["column"] == cfg["in_progress"] and r["verdict"] == "OK")
@@ -277,7 +294,10 @@ def run(board):
         "ownership": own,
         "open": len(opened),
         "queue": sum(1 for t in opened if (t.get("section") or "").lower() in QUEUE),
-        "no_brain": [{"ticket": t["ticketNumber"], "column": t.get("section"), "title": t["title"]} for t in bare],
+        "no_brain": [{"ticket": t["ticketNumber"], "column": t.get("section"), "title": t["title"],
+                      "writer": writer(t)} for t in bare],
+        "qa": len(cols.get("QA", [])),
+        "qa_cap": cfg.get("qa_cap"),
     }
     return rows, summary
 
@@ -300,8 +320,11 @@ def show(rows, s):
     o = s.get("ownership")
     if o:
         link = lambda n: url.format(b=s["board"], n=n.rsplit("-", 1)[1])
-        print(f"WIP board {s['board']}: {o['active']} active (In Progress, AI Review, QA) for {o['live']} live runners"
+        print(f"WIP board {s['board']}: {o['active']} being built (In Progress, AI Review) for {o['live']} workers"
               + (" OVER" if o["active"] > o["live"] else ""))
+        if s.get("qa_cap"):
+            print(f"QA board {s['board']}: {s['qa']} merged, waiting for the live check, cap {s['qa_cap']}"
+                  + (" OVER" if s["qa"] > s["qa_cap"] else ""))
         for num, why in o["orphans"]:
             print(f"ORPHAN       {link(num)}  {why}")
         for num, who in o["outside"]:
@@ -340,21 +363,21 @@ def self_test():
     live = {"runner 1", "runner 2"}
     claim = lambda who, at: {"agentName": who, "createdAt": at, "text": "Claimed. Session working it now."}
     note = lambda who, at: {"agentName": who, "createdAt": at, "text": "Plan: reproduce"}
-    newest = {"Runner 1": ("HTPR-2", fresh), "Runner 2": ("HTPR-3", fresh)}
-    assert in_progress_verdict([note("Runner 1", fresh), claim("Runner 1", fresh)], live, newest, now, "HTPR-2")[0] == "OK"
-    assert in_progress_verdict([claim("Runner 12", fresh)], live, newest, now, "HTPR-9")[0] == "DEAD-RUNNER"
-    assert in_progress_verdict([claim("Runner 1", old)], live, newest, now, "HTPR-1")[0] == "MOVED-ON"
-    assert in_progress_verdict([claim("Runner 2", old)], live, {"Runner 2": ("HTPR-3", old)}, now, "HTPR-3")[0] == "STALE"
-    assert in_progress_verdict([note("HT Design Lead", fresh)], live, newest, now, "HTPR-4")[0] == "NO-CLAIM"
-    assert in_progress_verdict([claim("HT Design Builder", fresh)], live, {}, now, "HTPR-5")[0] == "OK"
-    sweep = {"agentName": "Runner 12", "createdAt": fresh, "text": "HT Product Lead pickup queue: orphan HTPR-2. Claim record: 91"}
-    assert in_progress_verdict([sweep, claim("Runner 1", fresh)], live, newest, now, "HTPR-2")[0] == "OK", "sweep note read as a claim"
-    logs = {"A": [claim("Runner 1", fresh)], "B": [claim("Runner 1", old)], "C": [claim("Runner 12", fresh)],
-            "D": [note("x", fresh)], "E": [claim("HT Design Builder", fresh)]}
-    o = ownership(list(logs), logs, live)
+    tk = lambda num, *names: {"ticketNumber": num, "assignees": [{"agent": {"displayName": n}} for n in names]}
+    board = [tk("A", "Runner 1"), tk("B", "Runner 1"), tk("C", "Runner 12"), tk("D"), tk("E", "HT Design Builder"),
+             tk("F", "HT Product Lead"), tk("G", "Speed Runner")]
+    o = ownership(board, live)
     assert o["doubles"] == {"Runner 1": ["A", "B"]}, o
-    assert [n for n, _ in o["orphans"]] == ["C", "D"] and o["outside"] == [("E", "HT Design Builder")], o
-    assert o["idle_runners"] == ["runner 2"] and o["active"] == 5, o
+    assert o["orphans"] == [("C", "Runner 12 not running"), ("D", "nobody assigned")], o
+    assert o["outside"] == [("F", "HT Product Lead")], "design builder or speed runner counted as outsiders"
+    assert o["idle_runners"] == ["runner 2"] and o["active"] == 7 and o["live"] == 4, o
+    o2 = ownership([tk("A", "Runner 1"), tk("B")], live)
+    assert o2["doubles"] == {}, "unassigning a runner must clear its double at once"
+    assert in_progress_verdict(tk("A", "Runner 1"), o, [note("Runner 1", fresh)], now)[0] == "DOUBLE"
+    assert in_progress_verdict(tk("C", "Runner 12"), o, [claim("Runner 12", fresh)], now)[0] == "DEAD-RUNNER"
+    assert in_progress_verdict(tk("D"), o, [claim("Runner 2", fresh)], now)[0] == "NO-OWNER", "old claim note used as owner"
+    assert in_progress_verdict(tk("A", "Runner 1"), o2, [note("Runner 1", fresh)], now)[0] == "OK"
+    assert in_progress_verdict(tk("A", "Runner 1"), o2, [note("Runner 1", old)], now)[0] == "STALE"
     tag = lambda *names: {"labels": [{"name": n} for n in names]}
     assert no_brain([tag("Bug"), tag("Bug", "Brain-Hard"), tag(), {"labels": None}]) == [tag("Bug"), tag(), {"labels": None}]
     assert [bool(SHIPPED.match(c)) for c in ("Done", "Flag: Everyone", "No Flag", "Bugs", "QA")] == [True, True, True, False, False]
