@@ -49,7 +49,7 @@ BOARDS = {
         "qa_cap": 15,
     },
     4060: {
-        "runners": [],
+        "runners": [("infra-runner-", "Infra Runner {n}")],
         "in_progress": "In Progress",
         "waits": {"AI Review": 6, "Agent Blocked": 24},
         "blocked_cap": 5,
