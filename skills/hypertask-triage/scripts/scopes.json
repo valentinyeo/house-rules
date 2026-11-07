@@ -5,6 +5,11 @@
     "repos": ["hypertask-ai/hypertask"],
     "workers": [
       {"tmux_prefix": "ht-or-runner-", "agent": "Runner {n}"},
+      {"tmux": "poteto-cursor-1", "agent": "Runner 11"},
+      {"tmux": "poteto-cursor-2", "agent": "Runner 12"},
+      {"tmux": "poteto-cursor-3", "agent": "Runner 13"},
+      {"tmux": "poteto-cursor-4", "agent": "Runner 14"},
+      {"tmux": "poteto-cursor-5", "agent": "Runner 15"},
       {"agent": "HT Design Builder", "always": true},
       {"agent": "Speed Runner", "always": true}
     ]
