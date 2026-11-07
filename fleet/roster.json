@@ -265,11 +265,14 @@
   },
   {
    "name": "HT Design Builder",
-   "kind": "specialist",
-   "role_skill": "design-lead",
+   "kind": "solo-dev",
+   "role_skill": "/solo-dev",
    "login": "HT Design Builder",
    "board": "15",
-   "status": "unknown"
+   "status": "unknown",
+   "view": "15/design-pass",
+   "app": "hypertask",
+   "note": "Valentin 2026-11-07: \"you are a solo dev\". Builds and ships the design-pass view itself; runners skip tickets assigned to it. Hypertask is private with customers, so it keeps the repo PR flow instead of pushing straight to production."
   },
   {
    "name": "Speed Runner",
