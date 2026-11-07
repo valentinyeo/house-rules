@@ -6,6 +6,10 @@
 
 Valentin 2026-11-07: one pool, Runner 1..N, all on Cursor CLI with Grok. This replaces ht-or-runner-pick,
 ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/). Order:
+  0. a live incident (YPER4-1375): an open board 15 ticket labelled incident that no live runner works. Any runner takes it
+     first, whatever it holds. Lane cap, app freeze, rests, queue brake and holds do not apply (ship-claim runs with
+     SHIP_CLAIM_INCIDENT=1). Model grok-4.7-high, brief briefs/incident.txt in front of the app brief. A runner assigned to
+     an incident it is not running right now (log) is handed it again; an incident another runner is running is left alone.
   a. my own ticket in a building column on any board
   b. an orphan in a building column (nobody holds it, or only a retired login)
   c. the PR queue (pr-drain-pick rules)
@@ -44,6 +48,9 @@ HYPERTASK_REPO = HOME / "projects/hypertask"
 PROJECTS = HOME / "projects"
 LANE_CAP = 4
 CLAIM_TTL = 3 * 3600 + 600  # a run may last 3h (timeout in fleet/runner)
+FRESH_CLAIM = 120  # seconds: a claim younger than this has not started its run yet, so the log cannot show it
+INCIDENT_LABEL = "incident"
+INCIDENT_DONE = {"done", "archive", "archived", "flag: everyone", "flag: only me + qa"}
 CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
 REST_MAX = 3 * 86400  # an IDLE rest never outlives this, changed or not
@@ -132,14 +139,32 @@ def list_section(board, section):
             return [slim(t, board) for t in rows if TICKET.fullmatch(t.get("ticketNumber") or "")]
 
 
+def list_incidents():
+    """Open board 15 tickets labelled incident, in any column (the column snapshot misses Valentin Review, Agent Blocked
+    and the like). Done, archived and settled-flag tickets are dropped."""
+    rows, offset = [], 0
+    while True:
+        d = ht("task", "list", "--project", "15", "--labels", INCIDENT_LABEL, "--limit", "100", "--offset", str(offset))
+        if not d or not isinstance(d.get("tasks"), list):
+            raise RuntimeError("board 15 incident label unreadable")
+        rows += d["tasks"]
+        offset += len(d["tasks"])
+        if len(d["tasks"]) < 100:
+            break
+    return [slim(t, "15") for t in rows
+            if TICKET.fullmatch(t.get("ticketNumber") or "") and not t.get("sectionIsDone")
+            and (t.get("status") or "Normal") == "Normal" and (t.get("section") or "").lower() not in INCIDENT_DONE]
+
+
 def load_snapshot():
     cache = os.environ.get("FLEET_PICK_CACHE")
     if cache and os.path.exists(cache) and time.time() - os.path.getmtime(cache) < (3600 if os.environ.get("FLEET_PICK_VIRTUAL") else CACHE_TTL):
         return json.load(open(cache))
-    snap = {"tickets": [], "rel": {}, "prs": None}
+    snap = {"tickets": [], "rel": {}, "prs": None, "incidents": []}
     for board, (new, building) in BOARDS.items():
         for section in new + building:
             snap["tickets"] += list_section(board, section)
+    snap["incidents"] = list_incidents()
     if cache:
         save_cache(snap)
     return snap
@@ -291,8 +316,10 @@ def adopt(n, t, why):
     return rc == 0
 
 
-def ship_claim(n, key):
+def ship_claim(n, key, incident=False):
     env = dict(os.environ, SHIP_SESSION_NAME=f"RUNNER {n}", SHIP_CLAIM_PICKED="1")
+    if incident:
+        env["SHIP_CLAIM_INCIDENT"] = "1"  # ship-claim re-reads the ticket and honours it only for a real open incident
     r = subprocess.run([str(SHIP_CLAIM), key, env.get("SHIP_CLAIM_RESUME", "")], capture_output=True, text=True, env=env, timeout=900)
     return r.returncode, r.stdout + r.stderr
 
@@ -534,18 +561,18 @@ def try_claim(n, t, source, dry):
     if dry:
         record_claim(n, t["key"], True)
         return True
-    if t["board"] == "2060" or source == "orphan":
-        ok = adopt(n, t, "Adopted from a runner that no longer works it; staying on it until it is live" if source == "orphan" else "Picked by fleet/pick")
+    if t["board"] == "2060" or source in ("orphan", "incident-takeover"):
+        ok = adopt(n, t, "Adopted from a runner that no longer works it; staying on it until it is live" if source != "board" else "Picked by fleet/pick")
         if ok and t["board"] == "2060" and t["section"] == "Todo":
             ceo(n, "task", "move", t["key"], "--section", "Doing")
         if ok:
             record_claim(n, t["key"], False)
         return ok
-    rc, out = ship_claim(n, t["key"])
+    rc, out = ship_claim(n, t["key"], source == "incident")
     if rc == 0:
         record_claim(n, t["key"], False)
         return True
-    if rc == 4:
+    if rc == 4 and source != "incident":
         own = held_ticket(out)
         mine = fetch_ticket(own) if own else None
         if mine and own not in SKIP[0] and not held_back(mine, own=True):
@@ -605,7 +632,99 @@ def pr_candidates(n, taken):
     return [(p, k) for _, p, k in sorted(out, key=lambda x: x[0])]
 
 
+# ---------------------------------------------------------------- live incidents (YPER4-1375)
+
+def fresh_claims():
+    """Claims younger than FRESH_CLAIM: the run has not started yet, so no launcher log line shows it."""
+    out, now = {}, time.time()
+    try:
+        for p in STATE.joinpath("claims").iterdir():
+            if not p.name.startswith(".") and now - p.stat().st_mtime < FRESH_CLAIM:
+                n, key = p.read_text().split("\t")[:2]
+                out[key] = n
+    except OSError:
+        pass
+    return out
+
+
+def active_run(m):
+    """The ticket Runner m is running right now, from its launcher log: the last 'cursor: KEY' line with no 'end'
+    after it, started under CLAIM_TTL ago. None when idle, sleeping, or the log is missing."""
+    key = stamp = None
+    try:
+        with open(RUNNER_STATE / f"runner-{m}.log", "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 65536))
+            lines = f.read().decode(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.endswith(" end"):
+            key = None
+        elif " cursor: " in line:
+            found = TICKET.match(line.split(" cursor: ", 1)[1])
+            if found:
+                key, stamp = found[0], line.split(" ", 1)[0]
+    if not key:
+        return None
+    try:
+        age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))).total_seconds()
+    except ValueError:
+        return None
+    return key if age < CLAIM_TTL else None
+
+
+def incident_runner(key, n):
+    """The runner other than N that works incident KEY right now (running it, or just claimed it), else None."""
+    virtual = virtual_claims().get(key)
+    if virtual and virtual != str(n):
+        return virtual
+    fresh = fresh_claims().get(key)
+    if fresh and fresh != str(n):
+        return fresh
+    for m in range(1, RUNNERS + 1):
+        if m != n and active_run(m) == key:
+            return str(m)
+    return None
+
+
+def just_ended(n, key):
+    """Did Runner N end a run on KEY less than 30 minutes ago? Then it does not spin on it again at once."""
+    last = last_run(n)
+    if not last or last[0] != key or not last[1]:
+        return False
+    try:
+        end = dt.datetime.fromisoformat(last[1].replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (dt.datetime.now(dt.timezone.utc) - end).total_seconds() < 1800
+
+
+def incident_step(n, dry):
+    """Step 0. The open incident that no other runner works, oldest and most urgent first. Lane cap, app freeze,
+    rests and the skip sets of the other steps do not apply; only brain-extra-hard and design-pass tickets (which
+    ship-claim refuses) and tickets that wait on a person are left out."""
+    me = f"runner {n}"
+    cands = [t for t in SNAP.get("incidents") or []
+             if t["board"] == "15" and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & (SKIP_ALL | {"design-pass"})]
+    for t in sorted(cands, key=lambda t: (rank(t), t["created"])):
+        if incident_runner(t["key"], n):
+            continue
+        if me in names(t):
+            if just_ended(n, t["key"]):
+                continue
+            record_claim(n, t["key"], dry)
+            return t, "incident"
+        stale = any(live_runner(h) for h in names(t))  # assigned to a runner that is not running it: take it over
+        if try_claim(n, t, "incident-takeover" if stale else "incident", dry):
+            return t, "incident"
+    return None
+
+
 def choose(n, dry):
+    hit = incident_step(n, dry)
+    if hit:
+        return hit
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
     others = {k for k, who in taken.items() if who != str(n)}
@@ -692,6 +811,10 @@ def render(n, t, source):
     ln = lane(t)
     brief_file = HERE / "briefs" / {"app": "app.txt", "ci": "ci.txt", "infra": "infra.txt", "sf": "sf.txt"}[ln]
     brief = (brief_file.read_text() + (HERE / "briefs" / "park.txt").read_text().rstrip()).replace("$n", str(n))
+    if source == "incident":
+        brief_file = HERE / "briefs" / "incident.txt"
+        brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
+        label, model, effort = "brain-hard", "grok-4.7-high", "high"
     return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
             "title": t["title"], "url": url(t), "repo": repo_for(t), "brief_file": str(brief_file), "brief": brief,
             "brain": label, "model": model, "effort": effort, "labels": t["labels"]}
