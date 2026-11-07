@@ -4,6 +4,8 @@
     fleet/park <TICKET> --waits-on <T1[,T2..]>   waits on other tickets: home column, BlockedBy link per blocker, unassigned
     fleet/park <TICKET> --valentin [--comment ID] waits on Valentin: Valentin Review, his name and the red border on ONE marked Question
     fleet/park <TICKET> --unstarted              nothing built, no PR: home column, unassigned
+    fleet/park <TICKET> --release                another runner owns the work (you were co-assigned, e.g. a cross-check): unassigns only you,
+                                                 the ticket and its column stay as they are
     fleet/park --sweep [--apply] [--waits-on KEY=T1,T2 ...] [--valentin KEY[=COMMENT] ...]
     fleet/park --self-test
 
@@ -123,6 +125,27 @@ def park_unstarted(key, t=None):
     note(key, f"Parked by fleet/park: nothing was built and no PR exists. Back in {home}, unassigned. Another run starts it fresh; "
               "fleet/pick rests it until the ticket changes.")
     return f"{key} -> {home}, unassigned"
+
+
+def co_holders(t, me):
+    """(mine, others): the runner logins on t that are the caller, and those that are not."""
+    names = holders(t)
+    return [h for h in names if h.lower() == me.lower()], [h for h in names if h.lower() != me.lower()]
+
+
+def park_release(key, t=None):
+    """Hand a ticket back to the runner that owns it. Moving it home would pull it from that runner, so only the caller leaves."""
+    t = t or get(key)
+    who = os.environ["SHIP_SESSION_NAME"]
+    mine, others = co_holders(t, who)
+    if not mine:
+        raise RuntimeError(f"{key}: {who} is not assigned to it, nothing to release")
+    if not others:
+        raise RuntimeError(f"{key}: no other runner holds it, so releasing would orphan it; use --waits-on, --valentin or --unstarted")
+    vcc("task", "unassign", key, "--agent", mine[0])
+    note(key, f"Released by fleet/park: {mine[0]} no longer holds this ticket; {', '.join(others)} continues. Column unchanged. "
+              "The picker no longer holds this runner for it.")
+    return f"{key} stays in {t.get('section')}, {mine[0]} unassigned, {', '.join(others)} continues"
 
 
 def valentin_id(board):
@@ -287,6 +310,9 @@ def self_test():
     assert classify({**t, "pullRequests": [{"number": 1}]}, [], {}) is None
     assert classify({**t, "pullRequests": [{"number": 1}]}, [], {"HTPR-1": ("waits", ["HTPR-9"])}) == ("waits", ["HTPR-9"])
     assert holders({"assignees": [{"agent": {"displayName": "Runner 11"}}, {"displayName": "Poteto Advisor"}, {"displayName": "Valentin Yeo"}]}) == ["Runner 11"]
+    co = {"assignees": [{"agent": {"displayName": "Infra Runner 3"}}, {"agent": {"displayName": "Runner 6"}}]}
+    assert co_holders(co, "RUNNER 6") == (["Runner 6"], ["Infra Runner 3"]), "the caller leaves, the owner stays"
+    assert co_holders(co, "RUNNER 7") == ([], ["Infra Runner 3", "Runner 6"]), "a runner that is not assigned releases nothing"
     print("fleet/park self-test ok")
 
 
@@ -319,7 +345,7 @@ def main():
         return sweep(apply, forced)
     key = a[0]
     if not TICKET.match(key) or len(a) < 2:
-        sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted")
+        sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release")
     try:
         if a[1] == "--waits-on" and len(a) > 2:
             print(park_waits(key, [x for x in a[2].split(",") if x]))
@@ -328,8 +354,10 @@ def main():
             print(park_valentin(key, c))
         elif a[1] == "--unstarted":
             print(park_unstarted(key))
+        elif a[1] == "--release":
+            print(park_release(key))
         else:
-            sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted")
+            sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release")
     except RuntimeError as e:
         sys.exit(f"fleet/park: {e}")
 
