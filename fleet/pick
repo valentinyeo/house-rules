@@ -80,7 +80,8 @@ CI_LABELS = {"ci", "hypertask ci"}
 SKIP_ALL = {"brain-extra-hard"}
 SKIP_APP = {"design-pass", "cursor bugs 7 nov", "cursor runners 6 nov", "cursor cloud 7 nov"}
 SKIP_INFRA = {"agent feedback"}
-SKIP_SF = {"multiprompt android", "wazig", "postbox", "live chat"}
+# a solo dev keeps a ticket by holding it (assignee), not by label; android needs the shared phone, so it stays with its solo dev
+SKIP_SF = {"multiprompt android", "wazig", "postbox"}
 SF_SKIP_TICKETS = {"IGSH-1816"}
 SF_LEAD = "multi bot opus lead"
 SF_REPOS = {"multiprompt": "multiprompt", "triage": "triage", "chromescribe": "chromescribe",
@@ -235,8 +236,13 @@ def live_runner(name):
     return bool(m) and 1 <= int(m[1]) <= RUNNERS and not paced_off(int(m[1]))
 
 
+def legacy_alive(name):
+    m = re.fullmatch(r"mp runner (\d+)", name)
+    return bool(m) and subprocess.run(["tmux", "has-session", "-t", f"mp-runner-{m[1]}"], capture_output=True).returncode == 0
+
+
 def retired(name):
-    return bool(RETIRED.match(name)) or (bool(re.fullmatch(r"runner \d+", name)) and not live_runner(name))
+    return (bool(RETIRED.match(name)) and not legacy_alive(name)) or (bool(re.fullmatch(r"runner \d+", name)) and not live_runner(name))
 
 
 def orphan(t):
@@ -523,8 +529,6 @@ def sf_eligible(t):
     if labels & (SKIP_SF | CI_LABELS | SKIP_ALL) or t["subs"] or t["waiting"] or t["paid"] or t["key"] in SF_SKIP_TICKETS:
         return False
     if SF_LEAD in names(t):
-        return False
-    if "multiprompt" in labels and t["prio"] == "Urgent":
         return False
     try:
         hold = {l.split()[0] for l in open(SF_HOLD) if l.strip() and not l.startswith("#")}
