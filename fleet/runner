@@ -120,6 +120,13 @@ case "${1:-}" in
       tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n $cmodel"
       timeout 3h "$HOME/.local/bin/cursor-agent" -p --output-format text --model "$cmodel" -f --trust --approve-mcps --workspace "$pick_repo" "$brief" 2>&1 | tee "$runlog"
       echo "$(date -u +%FT%TZ) end" >> "$rlog"
-      if grep -q "RUNNER IDLE" "$runlog"; then echo IDLE > "$STATE/runner-$n.result"; sleep 600; else echo DONE > "$STATE/runner-$n.result"; sleep 30; fi
+      if grep -q "RUNNER IDLE" "$runlog"; then res=IDLE; else res=DONE; fi
+      # One ledger line per finished run. The launcher log keeps no reasons (runner-N.latest.log is cut on the next run), so the
+      # brain tagger reads this to tell a model that could not do the work from a ticket that waits on someone else.
+      reason=$(grep -a -o 'RUNNER IDLE.*' "$runlog" | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300)
+      jq -nc --arg ts "$(date -u +%FT%TZ)" --arg ticket "$pick_ticket" --arg model "$cmodel" --arg result "$res" --argjson runner "$n" --arg reason "$reason" \
+        '{ts:$ts,runner:$runner,ticket:$ticket,model:$model,result:$result,reason:$reason}' >> "$STATE/run-ledger.jsonl" 2>/dev/null || true
+      echo "$res" > "$STATE/runner-$n.result"
+      if [ "$res" = IDLE ]; then sleep 600; else sleep 30; fi
     done ;;
 esac
