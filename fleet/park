@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""Park a ticket a run cannot move, so it never sits In Progress (house rule "No column piles up").
+
+    fleet/park <TICKET> --waits-on <T1[,T2..]>   waits on other tickets: home column, BlockedBy link per blocker, unassigned
+    fleet/park <TICKET> --valentin [--comment ID] waits on Valentin: Valentin Review, his name and the red border on ONE marked Question
+    fleet/park <TICKET> --unstarted              nothing built, no PR: home column, unassigned
+    fleet/park --sweep [--apply] [--waits-on KEY=T1,T2 ...] [--valentin KEY[=COMMENT] ...]
+    fleet/park --self-test
+
+Home column: board 15 Bugs, Features or Improvements by label then title tag; 2060 Todo; 4060 and 11514 Backlog.
+A runner calls it before it ends a run with `RUNNER IDLE`. It writes as the caller (SHIP_SESSION_NAME), never as Valentin.
+--sweep is the one-time cleanup through the same code: it reads the runner launcher logs, finds board 15 tickets still In
+Progress that a runner ended IDLE on, classifies each (open BlockedBy link, waiting on Valentin, no PR at all) and prints the
+plan. Without --apply it writes nothing. A ticket it cannot classify is listed with its newest agent note and left alone,
+unless --waits-on KEY=.. or --valentin KEY names the class. fleet/pick skips a ticket with an open BlockedBy link.
+"""
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = Path.home()
+os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
+RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
+BUILDING = {"15": ("In Progress", "AI Review", "QA"), "2060": ("Doing", "AI Review"),
+            "4060": ("In Progress", "AI Review"), "11514": ("In Progress", "AI Review")}
+HOME_COLUMN = {"2060": "Todo", "4060": "Backlog", "11514": "Backlog"}
+TICKET = re.compile(r"^(HTPR|HYFA|IGSH|YPER4|HYCI)-[0-9]+$")
+RUNNERISH = re.compile(r"^(?:runner \d+|ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
+VALENTIN_REVIEW = "Valentin Review"
+
+
+def vcc(*args, check=True):
+    r = subprocess.run(["vcc", "--json", *args], capture_output=True, text=True, timeout=600)
+    try:
+        out = json.loads(r.stdout[r.stdout.index("{"):])
+    except ValueError:
+        out = None
+    if check and (r.returncode != 0 or out is None or out.get("success") is False):
+        raise RuntimeError(f"vcc {' '.join(args[:3])} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+    return out
+
+
+def home_section(board, labels, title):
+    """Where a ticket that is not being built lives: Bugs, Features or Improvements on board 15, else the board's intake column."""
+    if str(board) != "15":
+        return HOME_COLUMN.get(str(board), "Backlog")
+    text = [l.lower() for l in labels] + [(title or "").lower()[:24]]
+    for word, section in (("bug", "Bugs"), ("feature", "Features"), ("improve", "Improvements")):
+        if any(word in t for t in text):
+            return section
+    return "Bugs"
+
+
+def get(key):
+    return vcc("task", "get", key)["tasks"][0]
+
+
+def holders(t):
+    out = []
+    for a in t.get("assignees") or []:
+        name = ((a.get("agent") or {}).get("displayName") or a.get("displayName") or "").strip()
+        if name and RUNNERISH.match(name.lower()):
+            out.append(name)
+    return out
+
+
+def blockers(key):
+    """Tickets `key` waits on: BlockedBy relations seen from key (direction outgoing), not archived."""
+    out = []
+    for r in vcc("task", "relations", key).get("relations") or []:
+        other = r.get("otherTask") or {}
+        if r.get("relationType") == "BlockedBy" and r.get("direction") == "outgoing" and other.get("status") != "Archive":
+            out.append(other.get("ticketNumber"))
+    return out
+
+
+def note(key, text):
+    vcc("activity", "add", key, text, check=False)
+
+
+def release(key, t):
+    for name in holders(t):
+        vcc("task", "unassign", key, "--agent", name, check=False)
+
+
+def park_waits(key, waits, t=None):
+    t = t or get(key)
+    for w in waits:
+        if not TICKET.match(w) or w == key:
+            raise RuntimeError(f"bad blocker {w!r}")
+        get(w)
+    have = set(blockers(key))
+    for w in waits:
+        if w not in have:
+            vcc("task", "link", key, w, "--type", "BlockedBy")
+    now = set(blockers(key))
+    if not set(waits) <= now:
+        raise RuntimeError(f"{key}: BlockedBy link not on the ticket after linking ({sorted(now)}); not moving it")
+    home = home_section(t.get("projectId"), [l.get("name", "") for l in t.get("labels") or []], t.get("title"))
+    if t.get("section") != home:
+        vcc("task", "move", key, "--section", home)
+    release(key, t)
+    note(key, f"Parked by fleet/park: waits on {', '.join(waits)} (BlockedBy). Back in {home}, unassigned. The picker skips it until every blocker is done. "
+              "Nobody needs to touch it before then.")
+    return f"{key} -> {home}, BlockedBy {', '.join(waits)}, unassigned"
+
+
+def park_unstarted(key, t=None):
+    t = t or get(key)
+    if t.get("pullRequests"):
+        raise RuntimeError(f"{key} has a PR; --unstarted is only for tickets with nothing built")
+    home = home_section(t.get("projectId"), [l.get("name", "") for l in t.get("labels") or []], t.get("title"))
+    if t.get("section") != home:
+        vcc("task", "move", key, "--section", home)
+    release(key, t)
+    note(key, f"Parked by fleet/park: nothing was built and no PR exists. Back in {home}, unassigned. Another run starts it fresh; "
+              "fleet/pick rests it until the ticket changes.")
+    return f"{key} -> {home}, unassigned"
+
+
+def valentin_id(board):
+    for m in vcc("project", "members", "--project", str(board)).get("members") or []:
+        if (m.get("displayName") or "") == "Valentin Yeo" and isinstance(m.get("id"), int):
+            return m["id"]
+    raise RuntimeError("Valentin Yeo not found on the board")
+
+
+def park_valentin(key, comment=None, t=None):
+    t = t or get(key)
+    cid = comment or t.get("blockerCommentId")
+    if not cid:
+        raise RuntimeError(f"{key}: post ONE Question first (vcc comment add {key} --kind question, format in skills/tickets), then run again")
+    if t.get("section") != VALENTIN_REVIEW:
+        vcc("task", "move", key, "--section", VALENTIN_REVIEW)
+    vcc("task", "waiting-on", key, "--user", str(valentin_id(t.get("projectId"))))
+    vcc("task", "blocker-comment", key, "--comment-id", str(cid))
+    note(key, f"Parked by fleet/park: waits on Valentin's answer to comment {cid}. In {VALENTIN_REVIEW}. The picker leaves it alone.")
+    return f"{key} -> {VALENTIN_REVIEW}, waiting on Valentin, Question comment {cid}"
+
+
+# ---------------------------------------------------------------- one-time sweep
+
+def idle_tickets():
+    """Tickets some runner ended IDLE on, from the launcher files fleet/pick reads: runner-N.idle and runner-N.log with runner-N.result."""
+    keys = {}
+    for p in RUNNER_STATE.glob("runner-*.idle"):
+        for line in p.read_text().splitlines():
+            try:
+                stamp, key = line.split()
+            except ValueError:
+                continue
+            keys[key] = max(keys.get(key, ""), stamp)
+    for p in RUNNER_STATE.glob("runner-*.result"):
+        if p.read_text().strip() != "IDLE":
+            continue
+        key = end = None
+        for line in (RUNNER_STATE / p.name.replace(".result", ".log")).read_text().splitlines():
+            stamp, sep, rest = line.partition(" pick: ")
+            m = re.match(r"[A-Z0-9]+-[0-9]+", rest) if sep else None
+            if m:
+                key, end = m[0], stamp.strip()
+            elif key and line.endswith(" end"):
+                end = line.split()[0]
+        if key:
+            keys[key] = max(keys.get(key, ""), end or "")
+    return keys
+
+
+def running_now():
+    """Tickets a runner is working this minute: its newest pick has no end line after it."""
+    out = set()
+    for p in RUNNER_STATE.glob("runner-*.log"):
+        key = None
+        for line in p.read_text().splitlines():
+            _, sep, rest = line.partition(" pick: ")
+            m = re.match(r"[A-Z0-9]+-[0-9]+", rest) if sep else None
+            if m:
+                key = m[0]
+            elif line.endswith(" end"):
+                key = None
+        if key:
+            out.add(key)
+    return out
+
+
+def last_note(key):
+    acts = vcc("task", "agent-log", key, "--limit", "1", check=False) or {}
+    a = (acts.get("activities") or [{}])[0]
+    return " ".join((a.get("text") or "").split())[:160]
+
+
+def later(stamp, seconds):
+    return (dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")) + dt.timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.999Z")
+
+
+def classify(t, waits, forced):
+    if t["ticketNumber"] in forced:
+        return forced[t["ticketNumber"]]
+    if waits:
+        return ("waits", waits)
+    if t.get("waitingOnUserId") or t.get("blockerCommentId"):
+        return ("valentin", t.get("blockerCommentId"))
+    if not t.get("pullRequests"):
+        return ("unstarted", None)
+    return None
+
+
+def sweep(apply, forced):
+    idle, busy = idle_tickets(), running_now()
+    rows = vcc("task", "list", "--project", "15", "--section", "In Progress", "--limit", "100").get("tasks") or []
+    done, left = [], []
+    for row in sorted(rows, key=lambda r: r["ticketNumber"]):
+        key = row["ticketNumber"]
+        if key not in idle or key in busy:
+            continue
+        t = get(key)
+        if t.get("updatedAt", "") > later(idle[key], 60):
+            left.append(f"{key}: changed after the IDLE end ({t['updatedAt']}), left for the picker")
+            continue
+        plan = classify(t, blockers(key), forced)
+        if plan is None:
+            left.append(f"{key} {t['title'][:60]!r} holders={holders(t)} PRs={[p['number'] for p in t.get('pullRequests') or []]}: {last_note(key)}")
+            continue
+        kind, arg = plan
+        desc = {"waits": lambda: f"waits on {arg}", "valentin": lambda: f"waits on Valentin (comment {arg})",
+                "unstarted": lambda: "nothing built, no PR"}[kind]()
+        if not apply:
+            done.append(f"PLAN {key} {t['title'][:60]!r}: {desc}")
+            continue
+        if kind == "waits":
+            done.append("DONE " + park_waits(key, arg, t))
+        elif kind == "valentin":
+            done.append("DONE " + park_valentin(key, arg, t))
+        else:
+            done.append("DONE " + park_unstarted(key, t))
+    print("\n".join(done) or "nothing to park")
+    if left:
+        print("\nNOT CLASSIFIED (left In Progress; name the class with --waits-on KEY=.. or --valentin KEY):")
+        print("\n".join(left))
+
+
+# ---------------------------------------------------------------- main
+
+def self_test():
+    assert home_section(15, ["AI Cost", "Bug", "brain-hard"], "Own AI keys") == "Bugs"
+    assert home_section(15, ["FEATURE 💎", "AI Cost"], "Cap the remaining") == "Features"
+    assert home_section(15, ["IMPROVEMENT ⚒️", "INBOX"], "Rethink") == "Improvements"
+    assert home_section(15, ["brain-medium"], "[FEATURE] Sign in an agent") == "Features"
+    assert home_section(15, [], "something") == "Bugs"
+    assert home_section(2060, [], "x") == "Todo" and home_section("4060", [], "x") == "Backlog" and home_section(11514, [], "x") == "Backlog"
+    t = {"ticketNumber": "HTPR-1", "pullRequests": [], "waitingOnUserId": None, "blockerCommentId": None}
+    assert classify(t, ["HTPR-2"], {}) == ("waits", ["HTPR-2"])
+    assert classify(t, [], {}) == ("unstarted", None)
+    assert classify({**t, "blockerCommentId": 5}, [], {}) == ("valentin", 5)
+    assert classify({**t, "pullRequests": [{"number": 1}]}, [], {}) is None
+    assert classify({**t, "pullRequests": [{"number": 1}]}, [], {"HTPR-1": ("waits", ["HTPR-9"])}) == ("waits", ["HTPR-9"])
+    assert holders({"assignees": [{"agent": {"displayName": "Runner 11"}}, {"displayName": "Poteto Advisor"}, {"displayName": "Valentin Yeo"}]}) == ["Runner 11"]
+    print("fleet/park self-test ok")
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    if a == ["--self-test"]:
+        return self_test()
+    who = os.environ.get("SHIP_SESSION_NAME", "")
+    if not who or who == "Valentins Claude Code":
+        sys.exit("fleet/park: set SHIP_SESSION_NAME to your own agent login (never Valentin's)")
+    if a[0] == "--sweep":
+        forced, apply, i = {}, False, 1
+        while i < len(a):
+            if a[i] == "--apply":
+                apply = True
+            elif a[i] == "--waits-on" and i + 1 < len(a) and "=" in a[i + 1]:
+                k, v = a[i + 1].split("=", 1)
+                forced[k] = ("waits", [x for x in v.split(",") if x])
+                i += 1
+            elif a[i] == "--valentin" and i + 1 < len(a):
+                k, _, c = a[i + 1].partition("=")
+                forced[k] = ("valentin", int(c) if c else None)
+                i += 1
+            else:
+                sys.exit(f"fleet/park: unknown sweep argument {a[i]}")
+            i += 1
+        return sweep(apply, forced)
+    key = a[0]
+    if not TICKET.match(key) or len(a) < 2:
+        sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted")
+    try:
+        if a[1] == "--waits-on" and len(a) > 2:
+            print(park_waits(key, [x for x in a[2].split(",") if x]))
+        elif a[1] == "--valentin":
+            c = a[a.index("--comment") + 1] if "--comment" in a else None
+            print(park_valentin(key, c))
+        elif a[1] == "--unstarted":
+            print(park_unstarted(key))
+        else:
+            sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted")
+    except RuntimeError as e:
+        sys.exit(f"fleet/park: {e}")
+
+
+if __name__ == "__main__":
+    main()

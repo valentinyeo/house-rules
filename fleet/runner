@@ -53,7 +53,7 @@ run_brief() {
   echo "ENGINE (Valentin 2026-11-07): you run in Cursor CLI on the Cursor plan as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Codex, hax or Claude only. No subagents, no helpers." \
        "YOUR TICKET THIS RUN (set by the launcher, overrides every pick rule below): $ticket ($source; claimed for you). Work only on $ticket; do not run pr-drain-pick, ci-pick or any other picker and do not pick another ticket." \
        "The launcher already claimed it for you with claim id \"$SHIP_CLAIM_RESUME\": never run ship-claim again with any other resume text; if a step needs a claim or resume command, use exactly \"$SHIP_CLAIM_RESUME\". A same-runner \"Stepping back\" note is not a blocker: carry on." \
-       "$(cat "$STATE/brief-extra" 2>/dev/null) If it cannot move, end with RUNNER IDLE and the reason. $brief" \
+       "$(cat "$STATE/brief-extra" 2>/dev/null) If it cannot move, park it with fleet/park (last paragraph of this brief), then end with RUNNER IDLE and the reason. $brief" \
        "TICKET: $ticket ($title). LANE: $lane. REPO: $repo."
 }
 

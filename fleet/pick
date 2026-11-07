@@ -13,7 +13,9 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
   e. new work: board 15 (ai-feedback included), then 2060, then 4060
   f. the rest of the CI or infra lane, same cap
 One runner holds one ticket until it is live. brain-extra-hard is skipped everywhere.
-A ticket a runner ended IDLE on rests for 2 hours (runner-N.idle): no branch picks it again for that runner.
+A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
+(updated after the IDLE end) or for 3 days at most; a ticket with a BlockedBy link is governed by that link instead.
+A ticket with an open BlockedBy link, in Valentin Review or waiting on Valentin is never picked (fleet/park puts them there).
 ship-claim runs with SHIP_CLAIM_PICKED=1: this picker already ordered infra against app work, so its infra-first hold is skipped.
 --dry-run never claims and never writes under ~/.local/state. FLEET_PICK_VIRTUAL=<file> makes dry runs
 share virtual claims (so 20 separate dry runs give 20 different tickets); FLEET_PICK_CACHE=<file> reuses one
@@ -44,6 +46,8 @@ LANE_CAP = 4
 CLAIM_TTL = 3 * 3600 + 600  # a run may last 3h (timeout in fleet/runner)
 CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
+REST_MAX = 3 * 86400  # an IDLE rest never outlives this, changed or not
+REST_GRACE = 60  # seconds: the run's own last write may land just after its IDLE end
 
 # board -> (new-work columns, building columns)
 BOARDS = {
@@ -315,6 +319,9 @@ class Pick(Exception):
         self.t, self.source = t, source
 
 
+SKIP = [()]  # the Skip of the pick in progress (a list so try_claim sees the current one)
+
+
 def by_key(key):
     return next((t for t in SNAP["tickets"] if t["key"] == key), None)
 
@@ -337,25 +344,50 @@ def fetch_ticket(key):
 
 
 def last_run(n):
-    """(ticket, end time, result) of the run this runner finished last, from its launcher log and result file."""
+    """(ticket, end time, result) of the run this runner finished last, from its launcher log and result file.
+    The logs hold whole agent transcripts (100 MB and more), so only the tail that holds the last 'pick: <ticket>' line is read."""
     key = end = None
     try:
-        for line in open(RUNNER_STATE / f"runner-{n}.log"):
-            stamp, sep, rest = line.partition(" pick: ")
-            found = TICKET.match(rest) if sep else None
-            if found:
-                key, end = found[0], stamp.strip()
-            elif key and line.rstrip().endswith(" end"):
-                end = line.split()[0]
+        with open(RUNNER_STATE / f"runner-{n}.log", "rb") as f:
+            size = f.seek(0, 2)
+            span = 1 << 21
+            while True:
+                start = max(0, size - span)
+                f.seek(start)
+                data = f.read(size - start)
+                at = len(data)
+                while True:
+                    at = data.rfind(b" pick: ", 0, at)
+                    if at < 0 or TICKET.match(data[at + 7:at + 40].decode("utf-8", "replace")):
+                        break
+                if at >= 0 and (start == 0 or data.rfind(b"\n", 0, at) >= 0):
+                    break
+                if start == 0:
+                    break
+                span *= 4
+        if at >= 0:
+            lines = data[data.rfind(b"\n", 0, at) + 1:].decode("utf-8", "replace").splitlines()
+            key, end = TICKET.match(lines[0].partition(" pick: ")[2])[0], lines[0].split()[0]
+            for line in lines[1:]:
+                if line.rstrip().endswith(" end"):
+                    end = line.split()[0]
         result = (RUNNER_STATE / f"runner-{n}.result").read_text().strip()
     except OSError:
         return None
     return (key, end, result) if key else None
 
 
+def stamp_time(stamp):
+    try:
+        return dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def resting(n, dry):
-    """Tickets this runner ended IDLE on less than 2 hours ago: they wait on someone else, so take other work.
-    IDLE ends are kept in runner-N.idle, so later runs and 'nothing to start' lines do not make it forget."""
+    """Tickets some runner ended IDLE on that have not changed since: they wait on someone else, so every runner takes other work.
+    IDLE ends are kept in runner-N.idle, so later runs and 'nothing to start' lines do not make a runner forget.
+    A runner that just finished still shows in its runner-N.result and log, so its IDLE counts before its file is written."""
     path = RUNNER_STATE / f"runner-{n}.idle"
     seen = {}
     try:
@@ -370,16 +402,49 @@ def resting(n, dry):
         if not dry:
             with open(path, "a") as f:
                 f.write(f"{last[1]} {last[0]}\n")
+    everyone = dict(seen)
+    for m in range(1, RUNNERS + 1):
+        if m == n:
+            continue
+        try:
+            for line in open(RUNNER_STATE / f"runner-{m}.idle"):
+                stamp, key = line.split()
+                everyone[key] = max(everyone.get(key, ""), stamp)
+        except (OSError, ValueError):
+            pass
+        other = last_run(m)
+        if other and other[2] == "IDLE" and other[1]:
+            everyone[other[0]] = max(everyone.get(other[0], ""), other[1])
     now = dt.datetime.now(dt.timezone.utc)
     rest = set()
-    for key, stamp in seen.items():
-        try:
-            when = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-        except ValueError:
+    for key, stamp in everyone.items():
+        when = stamp_time(stamp)
+        if when is None or (now - when).total_seconds() > REST_MAX:
             continue
-        if (now - when).total_seconds() < 7200:
-            rest.add(key)
+        t = by_key(key)
+        if t is None:
+            if (now - when).total_seconds() < 7200:
+                rest.add(key)
+            continue
+        changed = stamp_time(t["updated"])
+        if changed and (changed - when).total_seconds() > REST_GRACE:
+            continue
+        rest.add(key)
     return rest
+
+
+class Skip:
+    """Tickets this pick hands out to nobody: other runners' claims (hard) and tickets resting after an IDLE end.
+    A resting ticket with a BlockedBy link is governed by that link instead (held_back lets it go when the blocker is done).
+    The link is read only when a resting ticket is actually considered, so a busy ledger costs no extra reads."""
+
+    def __init__(self, hard, rest):
+        self.hard, self.rest = hard, rest
+
+    def __contains__(self, key):
+        if key in self.hard:
+            return True
+        return key in self.rest and not relations(key)[0]
 
 
 def lane_count(taken):
@@ -425,9 +490,39 @@ def orphan_ok(t):
     return is_ci(t) or t["board"] != "15" or not set(t["labels"]) & SKIP_APP
 
 
+def is_open(key):
+    """Is this blocker still open? Tickets in a pick column are; any other is read once (done column or archived = closed)."""
+    if by_key(key):
+        return True
+    known = SNAP.setdefault("open", {})
+    if key not in known:
+        d = ht("task", "get", key)
+        try:
+            raw = d["tasks"][0]
+            known[key] = raw.get("status") != "Archive" and not raw.get("sectionIsDone")
+        except (TypeError, KeyError, IndexError):
+            known[key] = True  # unreadable: assume it still blocks
+        save_cache(SNAP)
+    return known[key]
+
+
 def blocked(t):
-    open_now = {x["key"] for x in SNAP["tickets"]}
-    return any(w in open_now for w in relations(t["key"])[0])
+    return any(is_open(w) for w in relations(t["key"])[0])
+
+
+CHECKED = [0]
+
+
+def held_back(t, own=False):
+    """Waits on someone, so no runner takes it: Valentin Review, a marked Question to Valentin (not for the runner's own
+    ticket), or an open BlockedBy link. The relation reads are capped per pick; out of reads, nothing unchecked is taken."""
+    if not own and (t["section"] == "Valentin Review" or t["waiting"]):
+        return True
+    if t["key"] not in SNAP["rel"]:
+        if CHECKED[0] >= BLOCK_LOOKUPS * 2:
+            return True
+        CHECKED[0] += 1
+    return blocked(t)
 
 
 def blocks_app(t):
@@ -452,8 +547,12 @@ def try_claim(n, t, source, dry):
         return True
     if rc == 4:
         own = held_ticket(out)
-        if own and fetch_ticket(own):
-            raise Pick(fetch_ticket(own), "own")
+        mine = fetch_ticket(own) if own else None
+        if mine and own not in SKIP[0] and not held_back(mine, own=True):
+            raise Pick(mine, "own")
+        if mine:
+            log(f"hold {t['key']}: unfinished {own} rests or waits (IDLE and unchanged, or BlockedBy open); park it with fleet/park")
+            return False
         log(f"hold {t['key']}: {out.strip().splitlines()[-1] if out.strip() else 'no reason'}")
     return False
 
@@ -511,13 +610,14 @@ def choose(n, dry):
     taken = {**claim_files(), **virtual_claims()}
     others = {k for k, who in taken.items() if who != str(n)}
     mine_claim = [k for k, who in taken.items() if who == str(n)]
-    skip = others | resting(n, dry)
+    skip = Skip(others, resting(n, dry))
+    SKIP[0] = skip
     building = [t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][1]]
 
     # a. own ticket
     for t in sorted((t for t in building if me in names(t) and t["section"] != "QA" and not set(t["labels"]) & SKIP_ALL),
                     key=lambda t: (BOARD_ORDER[t["board"]], rank(t))):
-        if t["key"] not in skip:
+        if t["key"] not in skip and not held_back(t, own=True):
             return t, "own"
     qa_mine = [t for t in building if me in names(t) and t["section"] == "QA"]
     if qa_mine:
@@ -533,7 +633,7 @@ def choose(n, dry):
     for t in sorted((t for t in building if orphan(t) and t["key"] not in skip and not t["waiting"]
                      and not set(t["labels"]) & (SKIP_ALL | {"design-pass"}) and orphan_ok(t)),
                     key=lambda t: (rank(t), t["updated"])):
-        if (in_lane(t) and full()) or (frozen and not in_lane(t)):
+        if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
             continue
         if try_claim(n, t, "orphan", dry):
             return t, "orphan"
@@ -544,7 +644,7 @@ def choose(n, dry):
         if (not t or t["key"] in skip or set(t["labels"]) & (SKIP_ALL | {"design-pass"})
                 or any(live_runner(h) and h != me for h in names(t))):
             continue
-        if (in_lane(t) and full()) or (frozen and not in_lane(t)):
+        if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
             continue
         if try_claim(n, t, "pr", dry):
             return t, "pr"
@@ -562,9 +662,8 @@ def choose(n, dry):
         for t in cands:
             if tries >= 8:
                 return None
-            if t["board"] in ("4060", "11514") or is_ci(t):
-                if blocked(t):
-                    continue
+            if held_back(t):
+                continue
             tries += 1
             if try_claim(n, t, "board", dry):
                 return t
@@ -592,7 +691,7 @@ def render(n, t, source):
     label, model, effort = brain(t)
     ln = lane(t)
     brief_file = HERE / "briefs" / {"app": "app.txt", "ci": "ci.txt", "infra": "infra.txt", "sf": "sf.txt"}[ln]
-    brief = brief_file.read_text().replace("$n", str(n))
+    brief = (brief_file.read_text() + (HERE / "briefs" / "park.txt").read_text().rstrip()).replace("$n", str(n))
     return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
             "title": t["title"], "url": url(t), "repo": repo_for(t), "brief_file": str(brief_file), "brief": brief,
             "brain": label, "model": model, "effort": effort, "labels": t["labels"]}
