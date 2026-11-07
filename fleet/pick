@@ -583,8 +583,8 @@ def main():
             t, source = choose(n, dry)
         except Pick as p:
             t, source = p.t, p.source
-        if dry and source in ("own", "cross-qa"):
-            record_claim(n, t["key"], True)
+        if source in ("own", "cross-qa"):
+            record_claim(n, t["key"], dry)
         pick = render(n, t, source)
     except (RuntimeError, OSError, ValueError) as e:
         sys.exit(f"fleet/pick: board or claims unreadable ({type(e).__name__}: {e}); do not pick new work")
