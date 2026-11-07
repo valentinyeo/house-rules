@@ -17,7 +17,16 @@ answered, there is no Question anywhere, or the Question asks him to switch a
 flag Off. Clear = agent note, his name off, ticket back to its home column.
 Any other ticket: --clear T --to <home|archive|section id> --why "..." does the same.
 
-usage: blocker-review [--boards 15,4060,2060] [--apply] [--self-test]
+--apply --clear-only does only the clearing: no notes, no parked-column report. The 30 minute timer uses it.
+
+Gate (one definition for the vcc wrapper): who may make Valentin the blocker, and for what.
+  blocker-review --gate --who "Runner 3" --board 15 [--text-stdin]
+Allowed writers: Chief Of Staff and the lead of that board in scopes.json. A runner is refused. With
+--text-stdin the Question text on stdin must also fall in one of his call classes (HIS_CALLS below).
+Exit 0 allowed, 3 refused with the reason on stderr. No board call is made.
+  blocker-review --classify   (Question text on stdin: prints his call classes, exit 1 when none)
+
+usage: blocker-review [--boards 15,4060,2060] [--apply] [--clear-only] [--self-test]
        blocker-review --clear HTPR-1 --to home --why "reason"
 """
 import argparse
@@ -34,7 +43,7 @@ from collections import Counter
 from pathlib import Path
 
 OWNER_ID = 6
-LEADS = {15: "HT Product Lead", 4060: "Infra Lead", 2060: "Mini Boss CEO", 11514: "CI Boss"}
+OVERSEER = "Chief Of Staff"
 SHAPE = ["Now", "Problem", "Fix", "Done when", "Risk", "Decision"]
 MARK = "blocker-review"
 # Where a cleared ticket goes back to. Board 15: Bugs, Features, Improvements.
@@ -44,16 +53,19 @@ ASKS_OFF = re.compile(r"\bswitch\s+[a-z0-9]+(?:-[a-z0-9]+)+\s+to\s+off\b|\bflag\
 
 LINT_PATH = Path(__file__).resolve().parents[2] / "tickets/scripts/ticket-lint"
 lint = importlib.machinery.SourceFileLoader("ticket_lint", str(LINT_PATH)).load_module()
+scopes = importlib.machinery.SourceFileLoader("scopes", str(Path(__file__).resolve().with_name("scopes.py"))).load_module()
+# The lead of a whole board, from scopes.json (view scopes like 2060/postbox are not boards).
+LEADS = {int(k): v["lead"] for k, v in scopes.SCOPES.items() if k.isdigit()}
 
 # House rules, "Never block Valentin on non-decisions": his calls only.
 HIS_CALLS = [
     ("money", re.compile(r"[£$€]\s?\d|\b(cost|costs|pay|paid|price|pricing|billing|subscription|spend|budget|per month|a month|a year)\b", re.I)),
     ("keys", re.compile(r"\b(api key|key|keys|token|secret|password|vault|credential|client id|login client|oauth)\b", re.I)),
     ("going public", re.compile(r"\b(public|publish\w*|launch|play store|app store|store listing|announce|x\.com)\b", re.I)),
-    ("prod data deletion", re.compile(r"\b(delete|deletion|wipe|purge)\b[^.]{0,60}\b(prod|production|customer|real|user)\b", re.I)),
-    ("needs him at his PC or phone", re.compile(r"\b(your (pc|computer|desktop|laptop|phone|machine|windows|account)|at your pc|real slack|only you can|have you secured)\b", re.I)),
+    ("prod data deletion", re.compile(r"\b(delete|deletion|deleting|wipe|purge)\b[^.]{0,60}\b(prod|production|customer|real|user|live)\b|\b(delet\w+|wipe|purge)\b[^.]{0,40}\b(dates?|data)\b", re.I)),
+    ("needs him at his PC or phone", re.compile(r"\b(your (pc|computer|desktop|laptop|phone|machine|windows|account)|at your pc|real slack|only you can|have you secured|unlock\w*|sign(?:ing)? in(?:to)?|log(?:ging)? in to)\b", re.I)),
     ("Hypertask Cloudflare change", re.compile(r"\bcloudflare\b", re.I)),
-    ("product decision", re.compile(r"\b(scope|which (option|design|version|one)|option [ab12]|new (button|screen|element|feature|page)|wireframe|figma)\b", re.I)),
+    ("product decision", re.compile(r"\b(scope|which (option|design|version|one)|option [ab12]|new (button|screen|element|feature|page)|wireframe|figma)\b|\b(remov\w+|drop\w*|hid\w+|renam\w+|add\w*|mov\w+)\b[^.?]{0,30}\b(tab|split|column|menu|screen|button|page|model pickers?)\b", re.I)),
 ]
 
 
@@ -238,6 +250,34 @@ def drift(q_comment, comments):
     return None
 
 
+def may_block_valentin(who, board, text=None):
+    """The one gate: returns None when `who` may make Valentin the blocker, else the reason.
+
+    Only Chief Of Staff and the board's lead (scopes.json) may. With `text` (the Question) it must also
+    fall in a his-call class, so a non-decision is refused even from them."""
+    name = (who or "").split(" | ")[0].strip()
+    lead = LEADS.get(int(board)) if str(board or "").isdigit() else None
+    if name.lower() not in {OVERSEER.lower(), (lead or "").lower()} - {""}:
+        return (f"{name or 'this login'} may not make Valentin the blocker. Hand the ticket to "
+                f"{lead + ' or ' if lead else ''}{OVERSEER} instead: set the waiting person to them "
+                "and add an agent-lane note (vcc activity add) with what you tried and what is left. "
+                "They try to unblock it; only they write the one Question when he is the only one who can.")
+    if text is not None and not his_call(text):
+        return ("this Question is not in a class only Valentin decides (money, keys, going public, prod data "
+                "deletion, his PC or phone, a product decision). Decide it yourself per skills/unblock/learned.md. "
+                "If it is his call but the words miss the classes, add them to HIS_CALLS in blocker-review.")
+    return None
+
+
+def gate(args):
+    text = sys.stdin.read() if args.text_stdin else None
+    why = may_block_valentin(args.who, args.board, plain(text) if text is not None else None)
+    if why:
+        print(f"blocker-review gate: {why}", file=sys.stderr)
+        return 3
+    return 0
+
+
 def home(t, board):
     sections = HOME.get(board, {})
     names = " ".join([t.get("title") or ""] + [l.get("name", "") for l in t.get("labels") or []])
@@ -352,6 +392,17 @@ def self_test():
     _, defects = review(t, good_q, True, [q2, {"createdAt": "2026-10-05", "creatorId": 6, "text": "yes"}, {**q2, "createdAt": "2026-10-06"}])
     assert not any("open Questions" in d for d in defects), "Question before his reply counted as open"
     assert home({"title": "[BUG] x"}, 15) == 4389 and home({"title": "x"}, 4060) == 10414, "wrong home column"
+    assert may_block_valentin("Runner 3", 15) and may_block_valentin("Infra Lead", 15), "runner or other lead passed"
+    assert may_block_valentin("", 15) and may_block_valentin("Runner 3", None), "empty or boardless writer passed"
+    assert not may_block_valentin("Chief Of Staff", 15) and not may_block_valentin("HT Product Lead", 15) \
+        and not may_block_valentin("Infra Lead", 4060) and not may_block_valentin("Chief Of Staff", 99999), "allowed writer refused"
+    assert not may_block_valentin("Chief Of Staff | HTPR-1", 15), "session suffix not stripped"
+    assert may_block_valentin("Chief Of Staff", 15, "Question: Rename the helper function?"), "non-decision passed the gate"
+    for words in ("Question: Remove the Updates tab? My recommendation: Yes.",
+                  "It reached you because deleting live data is your call. Do you approve the proposed dates?",
+                  "The OnePlus test phone is locked. Will you unlock it and sign in?",
+                  "Question: Spend up to $50 to run Strix on a test copy?"):
+        assert his_call(words) and not may_block_valentin("Chief Of Staff", 15, words), ("his call missed", words)
     print("SELF_TEST_OK")
     return 0
 
@@ -360,6 +411,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--boards", default="15,4060,2060")
     p.add_argument("--apply", action="store_true")
+    p.add_argument("--clear-only", action="store_true", help="with --apply: clear only, post no notes, skip the parked report")
+    p.add_argument("--gate", action="store_true", help="may --who make Valentin the blocker on --board? exit 0 or 3")
+    p.add_argument("--classify", action="store_true", help="Question text on stdin: print his call classes, exit 1 when none")
+    p.add_argument("--who", default="")
+    p.add_argument("--board", default="")
+    p.add_argument("--text-stdin", action="store_true")
     p.add_argument("--self-test", action="store_true")
     p.add_argument("--clear", default="", help="clear one ticket by hand after reading it")
     p.add_argument("--to", default="home", help="home, archive, or a section id")
@@ -368,6 +425,12 @@ def main():
     a = p.parse_args()
     if a.self_test:
         return self_test()
+    if a.gate:
+        return gate(a)
+    if a.classify:
+        calls = his_call(plain(sys.stdin.read()))
+        print("; ".join(calls) or "none")
+        return 0 if calls else 1
     if a.clear:
         if not a.why:
             p.error("--clear needs --why: the reason goes in the agent lane")
@@ -416,14 +479,16 @@ def main():
             kinds[re.sub(r"\d+", "N", re.split(r"[:,(]", d)[0].strip())] += 1
         if kind == "HIS-OK" or not a.apply:
             continue
-        if lead != me:
-            others += 1
-            print(f"    left for {lead}: only a board's own lead notes its tickets")
-            continue
         if kind == "CLEAR":
             err = clear(number, board, t, "home", why)
             print(f"    {'CLEAR FAILED: ' + err if err else 'cleared, back to its home column'}")
             failed, cleared = failed + bool(err), cleared + (not err)
+            continue
+        if a.clear_only:
+            continue
+        if lead != me:
+            others += 1
+            print(f"    left for {lead}: only a board's own lead notes its tickets")
             continue
         tag = "[" + hashlib.sha1("|".join([kind] + defects).encode()).hexdigest()[:8] + "]"
         if any(MARK in (e.get("text") or "") and tag in (e.get("text") or "") for e in log):
@@ -442,7 +507,8 @@ def main():
              if a.apply else "")
     print(f"SUMMARY {len(found)} tickets wait on Valentin: {summary}{extra}")
     print(f"PRISTINE {pristine} of {len(found)} tickets that wait on Valentin break no ticket rule")
-    parked(boards)
+    if not a.clear_only:
+        parked(boards)
     return 1 if failed else 0
 
 
