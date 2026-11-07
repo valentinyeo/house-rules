@@ -324,13 +324,12 @@ def self_test():
                        tk("F", "QA", "Runner 3"), tk("G", "Doing", "Runner 4"), tk("H", "AI Review", "Runner 4"),
                        tk("I", "Flag: Everyone", "Runner 5"), tk("J", "Backlog", "HT Product Lead"), tk("K", "Todo"),
                        tk("L", "UX needed", "Runner 6", "HT Design Builder", "HT Product Lead"), tk("M", None, "Runner 7")], pats)
-    assert [(r["ticket"], r["worker"]) for r in held] == [("A", "Runner 1"), ("C", "Runner 2"), ("L", "Runner 6"),
-                                                          ("L", "HT Design Builder")], held
+    assert [(r["ticket"], r["worker"]) for r in held] == [("A", "Runner 1"), ("C", "Runner 2"), ("L", "Runner 6")], held
     qp = plan_queue_fixes(held)
     assert qp[0] == ("A", [["vcc", "task", "unassign", "A", "--agent", "Runner 1"]],
                      "board-health fix: Unassigned from Runner 1: runners hold one ticket until live. YPER4-1371."), qp[0]
-    assert len(qp) == 4 and plan_queue_fixes([]) == [], qp
-    assert [c for c, n in queue_counts(held)] == ["HT Design Builder", "Runner 1", "Runner 2", "Runner 6"]
+    assert len(qp) == 3 and plan_queue_fixes([]) == [], qp
+    assert [c for c, n in queue_counts(held)] == ["Runner 1", "Runner 2", "Runner 6"]
     print("SELF_TEST_OK")
 
 
@@ -338,6 +337,8 @@ FIX_BOARDS = {15, 4060}
 QUEUE_FIX_BOARDS = FIX_BOARDS | {2060, 11514}
 KEEP_COLUMNS = re.compile(r"^(in progress|doing|ai review|qa|agent blocked.*|valentin review)$", re.I)
 SHIPPED = re.compile(r"^(done|flag:|no flag)", re.I)
+# View leads and specialists keep their holds: they are not runners (Chief Of Staff, 2026-11-07).
+QUEUE_EXEMPT = {"postbox dev", "multiprompt android dev", "ht design builder"}
 QUEUE_NOTE = "Unassigned from {who}: runners hold one ticket until live. YPER4-1371."
 HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}, 4060: {"other": 10414}}
 NOTE = "board-health fix:"
@@ -386,7 +387,7 @@ def plan_fixes(board, flow, status):
 
 def queue_rows(tickets, patterns):
     """One row per worker holding an open ticket in a column nobody builds in. Pure.
-    Building columns, Agent Blocked and Valentin Review stay; shipped columns and people stay."""
+    Building columns, Agent Blocked and Valentin Review stay; shipped columns, people and QUEUE_EXEMPT stay."""
     rows = []
     for t in tickets:
         col = t.get("section") or ""
@@ -394,7 +395,7 @@ def queue_rows(tickets, patterns):
             continue
         for a in t.get("assignees") or []:
             who = (a.get("agent") or {}).get("displayName")
-            if who and scopes.is_worker(who, patterns):
+            if who and who.lower() not in QUEUE_EXEMPT and scopes.is_worker(who, patterns):
                 rows.append({"ticket": t["ticketNumber"], "worker": who, "column": col, "title": (t.get("title") or "")[:70]})
     return rows
 

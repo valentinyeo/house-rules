@@ -34,7 +34,7 @@ Worker kinds: a tmux pool (`ht-or-runner-` = Runner N), one exact session (solo 
 
 `--fix` runs the safe fixes first, then scores. Each gets an agent-lane note. Board 15 and 4060 only, except the queue fix below.
 
-Free the queue (YPER4-1371): a runner holds one ticket until live. `board-health --board <15|2060|4060|11514> --plan --only queue` lists every ticket a worker holds in a column nobody builds in (Bugs, Features, Improvements, Backlog, Todo, UX needed, UX Sign-off, Later (parked)) and writes nothing. `--fix --only queue` unassigns them, one agent-lane note each. Agent Blocked, Valentin Review and building columns keep their holds. Workers come from all four fleet boards, so app runners holding board 4060 Backlog tickets count. Boards 2060 and 11514 run it by hand only.
+Free the queue (YPER4-1371): a runner holds one ticket until live. `board-health --board <15|2060|4060|11514> --plan --only queue` lists every ticket a worker holds in a column nobody builds in (Bugs, Features, Improvements, Backlog, Todo, UX needed, UX Sign-off, Later (parked)) and writes nothing. `--fix --only queue` unassigns them, one agent-lane note each. Agent Blocked, Valentin Review and building columns keep their holds. Workers come from all four fleet boards, so app runners holding board 4060 Backlog tickets count. Postbox Dev, Multiprompt Android Dev and HT Design Builder are exempt (view leads and specialist). Boards 2060 and 11514 run it by hand only.
 - Merged ticket before QA: moves to QA (board 15).
 - No PR in AI Review, or PR closed: back to its home column.
 - No brain tag: brain-medium.
