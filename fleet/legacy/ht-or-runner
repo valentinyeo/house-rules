@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+set -u
+export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+STATE=$HOME/.local/state/ht-or-runners
+REPO=$HOME/projects/hypertask
+FIRST=1
+LAST=10
+KEY_ITEM='opencode go'
+KEY_FIELD='API KEY'
+SELF=$(readlink -f "$0")
+GUARD=$HOME/.local/bin/session-policy-guard
+LAUNCH=(hax --provider=codex --model=gpt-6.1-sol --effort=medium)
+mkdir -p "$STATE"
+target() { echo 10; }
+maxcap() { echo 10; }
+validate_targets() {
+  t=$(target); cap=$(maxcap)
+  [[ "$t" =~ ^[1-9][0-9]?$ && "$cap" =~ ^[1-9][0-9]?$ ]] &&
+    [ "$t" -le "$cap" ] && [ "$cap" -le 20 ] || { echo "target/max must satisfy 1 <= target <= max <= 20" >&2; return 1; }
+}
+log() { echo "$(date -u +%FT%TZ) $*" >> "$STATE/keeper.log"; }
+# Valentin 2026-10-30: rest while OpenRouter doubles the DeepSeek 1017 price: Mon-Fri 01:00-04:00 and 06:00-10:00 London.
+china_peak() { return 1; }
+china_peak_old() { local d h at=${1:-now}; d=$(TZ=Europe/London date -d "$at" +%u); h=$((10#$(TZ=Europe/London date -d "$at" +%H))); [ "$d" -le 5 ] && { [ "$h" -ge 1 ] && [ "$h" -lt 4 ] || [ "$h" -ge 6 ] && [ "$h" -lt 10 ]; }; }
+
+green() {
+  local cores load5 avail proc=${HT_HAX_PROC_ROOT:-/proc}
+  GREEN_WHY='resource reading unavailable'
+  cores=$(nproc) && load5=$(awk '{print $2}' "$proc/loadavg") &&
+    avail=$(awk '/MemAvailable/{print int($2/1048576)}' "$proc/meminfo") || return 1
+  [[ "$cores" =~ ^[1-9][0-9]*$ && "$load5" =~ ^[0-9]+([.][0-9]+)?$ && "$avail" =~ ^[0-9]+$ ]] || return 1
+  GREEN_WHY="load5=$load5 cores=$cores avail=${avail}G status=$(head -c 40 "$HOME/.local/state/vps-load/status" 2>/dev/null)"
+  grep -q '^add' "$HOME/.local/state/vps-load/status" 2>/dev/null || return 1
+  awk -v l="$load5" -v c="$cores" 'BEGIN{exit !(l/c<1.0)}' || return 1
+  [ "$avail" -gt 24 ]
+}
+
+GO_LIMIT_RE='HTTP 429|usage limit|rate limit|limit reached|quota exceeded|too many requests'
+CLAUDE_RUNNER=$HOME/.local/lib/hypertask/ht-claude-runner/ht-claude-runner
+go_limited() { return 1; }
+go_limited_old() {
+  local until
+  until=$(cat "$STATE/go-limited-until" 2>/dev/null) || return 1
+  [ "$(date +%s)" -lt "${until:-0}" ]
+}
+mark_go_limit() {
+  [ -s "$1" ] && tail -n 30 "$1" | grep -v "^[[:space:]]*[│|]" | grep -qiE "$GO_LIMIT_RE" || return 0
+  go_limited && return 0
+  echo $(( $(date +%s) + 3600 )) > "$STATE/go-limited-until"
+  log "OpenCode Go limit seen in $1; Claude Sonnet fallback for 60 min"
+}
+claude_ok() { return 1; }
+claude_ok_disabled() {
+  local line used stop
+  line=$("$CLAUDE_RUNNER" status 2>/dev/null | head -1)
+  used=$(sed -nE 's/^claude used: ([0-9]+)%.*/\1/p' <<< "$line")
+  stop=$(sed -nE 's/.*stop at ([0-9]+)%.*/\1/p' <<< "$line")
+  [ -n "$used" ] && [ -n "$stop" ] && [ "$used" -lt "$stop" ]
+}
+admit() {
+  "$GUARD" --project "$REPO" -- "${LAUNCH[@]}" || { log "launch refused by session policy"; return 1; }
+}
+
+start_one() {
+  local n=$1 sess="ht-or-runner-$1"
+  tmux has-session -t "=$sess" 2>/dev/null && { echo "running: $sess"; return 0; }
+  ( cd "$REPO" && SHIP_SESSION_NAME="RUNNER $n" .claude/skills/setup-runner/scripts/setup-runner "$n" ) >>"$STATE/setup-$n.log" 2>&1 \
+    || { log "RUNNER $n: setup-runner failed, not started"; echo "login failed: RUNNER $n"; return 1; }
+  tmux new-session -d -s "$sess" -x 200 -y 50 -c "$REPO" "$SELF $n --loop" || return 1
+  tmux select-pane -t "$sess" -T "RUNNER $n or"
+  log "started $sess"; echo "started: $sess"
+}
+
+case "${1:-}" in
+  check) OPENCODE_API_KEY="$("$HOME/.local/bin/stack-key" "$KEY_ITEM" "$KEY_FIELD" 2>/dev/null)" "$SELF" check-inner ;;
+  check-inner) admit && echo trial-ok ;;
+  top-up)
+    exec 9>"$STATE/.keeper.lock"; flock -n 9 || exit 0
+    [ -f "$STATE/PAUSED" ] && exit 0
+    china_peak && exit 0
+    validate_targets || exit 2
+    live=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | awk '/^ht-or-runner-[0-9]+$/ {n++} END {print n+0}')
+    started=0
+    for n in $(seq $FIRST $LAST); do
+      [ "$live" -ge "$t" ] && break
+      tmux has-session -t "=ht-or-runner-$n" 2>/dev/null && continue
+      [ -f "$STATE/stop-$n" ] && continue
+      [ "$started" -ge 2 ] && break
+      if green; then start_one "$n" && { started=$((started+1)); live=$((live+1)); sleep 20; } || break
+      else log "hold: $GREEN_WHY"; break; fi
+    done
+    [ -e "$STATE/last-start" ] || touch "$STATE/last-start"
+    last=$(stat -c %Y "$STATE/last-start")
+    [ "$started" -gt 0 ] && touch "$STATE/last-start"
+    if [ "$started" -eq 0 ] && [ "$live" -ge "$t" ] && [ $(( $(date +%s) - last )) -ge 900 ] && [ "$t" -lt "$(maxcap)" ] && green; then
+      echo $((t+1)) > "$STATE/target"; touch "$STATE/last-start"; log "target raised to $((t+1)): $GREEN_WHY"
+    fi ;;
+  tick)
+    if china_peak; then
+      for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep '^ht-or-runner-'); do tmux kill-session -t "$s"; log "peak: stopped $s"; done
+    elif ! china_peak "now + 60 min"; then "$SELF" top-up; fi ;;
+  status)
+    echo "target=$(target) max=$(maxcap)"; green && echo "green: $GREEN_WHY" || echo "not green: $GREEN_WHY"
+    tmux ls 2>/dev/null | grep '^ht-or-runner-' || echo "no ht-hax-runner sessions" ;;
+  stop-all)
+    for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep '^ht-or-runner-'); do tmux kill-session -t "$s"; echo "stopped $s"; done ;;
+  ''|-h|--help) echo 'ht-or-runner <1-10> | top-up | check | status | stop-all' ;;
+  *)
+    n=$1
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le $LAST ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
+    [ "${2:-}" = --loop ] || { start_one "$n"; exit; }
+    rlog="$STATE/runner-$n.log"
+    runlog="$STATE/runner-$n.latest.log"
+    unset OPENCODE_API_KEY
+    export HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1
+    export SHIP_SESSION_NAME="RUNNER $n" SHIP_CLAIM_RESUME="tmux attach -t ht-or-runner-$n (OpenCode Go DeepSeek RUNNER $n)"
+    IFS=$'\t' read -r _ident _tokfile < <("$HOME/.agents/skills/ship/scripts/ship-identity")
+    [ "$_ident" = "RUNNER $n" ] && [ -s "$_tokfile" ] || { echo "identity check failed for RUNNER $n" >&2; exit 1; }
+    HT_TOKEN="$(cat "$_tokfile")"; export HT_TOKEN; unset _ident _tokfile
+    brief="APP WORK ONLY (Valentin 2026-11-03, overrides every pick rule below): you ship Hypertask app features, improvements and bugs from board 15. You are banned from CI work: never take a CI-labelled ticket, a Hypertask CI board ticket, a board 4060 ticket, a ci-runner- branch or a PR that only changes tests, checks, workflows or runners; if pr-drain-pick offers one, skip it and pick a board 15 ticket. Your own open PR for a board 15 ticket is never banned, even when its title says [INFRA]: only CI-labelled tickets, Hypertask CI board tickets and ci-runner- branches are CI work. When ship-claim holds you on your own PR, drive that PR to merged, live and Done. CI Boss and its CI runners own all CI work. Found a CI problem or idea? File one ticket on the Hypertask CI board (project 11514, labels CI and Hypertask CI) in plain words, then carry on with your app ticket. Token ladder mode: CODEX (Valentin 2026-11-04: OpenCode Go weekly limit hit, back to hax Codex). You are RUNNER $n, a standing Hypertask runner on hax Codex. Single thread, single brain (Valentin 2026-11-05, YPER4-1352): the launcher chose your model from the ticket's brain tag; you plan, edit code, test in CI and review everything yourself. Never start hax helpers, subagents or any other agent, and never delegate; nested hax is refused. Never use Claude, DeepSeek, OpenCode Go, OpenRouter, any other provider or any other key. No fast mode. Your board identity is RUNNER $n: SHIP_SESSION_NAME is set, so vcc writes as you; check with ~/.agents/skills/ship/scripts/ship-identity before any write. Read ~/projects/hypertask/.claude/skills/ship/SKILL.md fully and follow it end to end from Before anything else, with no ticket given: run its board check, respect claims and stale-ticket rules. Finish before you start: if an open PR on a branch named runner$n/ or runner-$n/ is yours, or a ticket assigned to you where Valentin or HT Product Lead answered after your last comment, this run drives it to merged, live and Done (rebase, rerun failed checks, fix) instead of a new ticket. PR queue first (Valentin 2026-10-28 and 2026-10-29): next run ~/.local/bin/pr-drain-pick; if it prints PR <number> <branch> <ticket> <title>, this run adopts that PR instead of any new ticket: claim its ticket with ship-claim (taking over an idle owner is allowed), check out its branch in your own worktree, rebase on origin/production, fix the red checks, mark it ready, merge, deploy, live proof, Done. A PR whose ticket is already Done or obsolete: close it with a one-line reason on the ticket. Only exception: an urgent Bug or Error Log ticket on board 15 may go first. If pr-drain-pick prints NONE or WAIT (every open PR already has an active owner), pick the top free board 15 ticket without the CI label and without the design-pass label: urgent first, then the rest. Design-pass tickets belong to the Design Builder session (Valentin 2026-11-05); never claim or build one. Your only design-pass work: a design-pass ticket sitting in the QA column that you did not build, where your one job is the independent side-by-side QA with .claude/skills/verify-design (never from Valentin Review, UX needed, UX Sign-off or Agent Blocked), claim it FIRST with ship-claim (resume command: \"$SHIP_CLAIM_RESUME\"), work in your own worktree, one small PR per ticket, QA, merge, deploy, live proof, Done, clean-up. Design QA (Valentin 2026-11-04: the QA step is not good enough): for any ticket with the design-pass label, a Figma link, or a UI change, QA means a live screenshot next to the ticket's Figma frame for each of Light, AMOLED and Graphite 2, attached to the QA comment, with pass or fail per item of the brief. A theme the ticket gives no Figma frame for (for example a Graphite 2 only ticket) is not a spec conflict: compare that theme against production before the change and pass it when nothing changed. Fail on any mismatch, any purple, any sparkle icon, any corner other than 2px or 4px. A mismatch goes back to Bugs, never Done. Never pass QA on your own design ticket: after merge move it to the QA column for another runner. When you pick a ticket from the QA column that another runner built, your one job this run is that side-by-side QA. Design release gate (Valentin 2026-11-04, HTPR-8712): a design-pass, Figma or visible UI change ships behind a ticket flag with defaultMode OWNER_AND_QA, never EVERYONE, even if the repo flag rules say EVERYONE. It goes to Everyone only after a different runner's side-by-side QA passes every brief item, and HT Product Lead switches it. Never remove, rename or remap an existing theme, page, icon set or option unless the ticket names it word for word; if a spec line conflicts with another or with today's app, stop and ask on the ticket in the agent lane instead of guessing. Exactly one ticket this run. Use the unlazy skill (~/.agents/skills/unlazy/SKILL.md): write GATES.md first and prove every gate before your final answer. Run tests in CI only; never run tests or builds on the VPS. A local SIGKILL or exit 137 is not a blocker: push and let CI decide. Name any independent blocker on a separate Blocker: line. On board 15, Flag: Everyone, Flag: Only Me + QA and No Flag all mean done; Flag: Off does not. Close a verified release in its declared mode without widening flags. Record every branch you create with ship-check branch; record none only if you created none. Cleanup judges only this session's recorded branches, never another session's old worktree. Never poll GitHub faster than every 5 minutes (sleep 300 or more, gh watch --interval 300). Never wait longer than 30 minutes in one run: a soak, timer or full-day observation goes in the agent lane with the time to recheck, then end the run. Never message Valentin directly. Work autonomously and talk only on tickets: never session-say, SendMessage or ping HT Product Lead, any manager or any session. Status, retries and blocked notes go in the agent lane (vcc activity add), never in people comments (Valentin 2026-11-04: ticket spam). Post a people comment only when a human must read or decide, and never repeat one you already posted. Stay on your own open PR until it is merged, live and Done; an earlier blocked mark, the old freeze or an old GitHub limit is not a block today: rebase, rerun checks and retry once first; only if that fails with a new exact error, mark the ticket blocked with a plain comment naming that error and end the run (do not take another ticket). A decision, money or keys question: Valentin Review plus a Question for Valentin. Final line: the word RUNNER, then either DONE <ticket> <state>, or IDLE <reason> when nothing can be picked."
+    while :; do
+      if [ -f "$STATE/PAUSED" ] || [ -f "$STATE/stop-$n" ]; then sleep 300; continue; fi
+      if [ "$(cat "$HOME/.local/state/ht-or-runners/engine" 2>/dev/null || echo "${HT_RUNNER_ENGINE:-cursor}")" != cursor ] && grep -q '^hold' "$HOME/.local/state/vps-load/status" 2>/dev/null; then
+        echo "$(date -u +%FT%TZ) gate: vps load hold" >> "$rlog"; sleep 300; continue
+      fi
+      if china_peak; then
+        echo "$(date -u +%FT%TZ) gate: China peak hours, OpenRouter price doubled; resting" >> "$rlog"; sleep 900; continue
+      fi
+      mark_go_limit "$runlog"
+      if go_limited; then
+        if claude_ok; then
+          echo "$(date -u +%FT%TZ) fallback: OpenCode Go limited, Claude Sonnet run" >> "$rlog"
+          tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n sonnet"
+          claude_brief=$(sed "s/\$n/$n/g" "$(dirname "$CLAUDE_RUNNER")/brief.txt")
+          ( unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_SESSION_ID OPENCODE_API_KEY
+            export RUNNER_EVENTS_WAIT_MAX=1
+            timeout 4h claude -p --model sonnet --permission-mode bypassPermissions --output-format stream-json --verbose "$claude_brief" ) > "$STATE/runner-$n.sonnet.log" 2>&1
+          echo "$(date -u +%FT%TZ) fallback run ended" >> "$rlog"
+          sleep 30; continue
+        fi
+        echo "$(date -u +%FT%TZ) gate: OpenCode Go limited and Claude braked; resting" >> "$rlog"; sleep 900; continue
+      fi
+      admit || exit 1
+      unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
+      CODEX_SESSION_ID=$(cat /proc/sys/kernel/random/uuid) || exit 1
+      export CODEX_SESSION_ID
+      recovery=$HOME/.local/lib/hypertask/runner-pickup/runner-pickup
+      recovery_brief=''
+      if [ -x "$recovery" ]; then
+        recovery_brief=$("$recovery" drain "$n") || { log "RUNNER $n: freeze recovery failed"; exit 1; }
+      fi
+      recovery_ticket=${recovery_brief#Resume }; recovery_ticket=${recovery_ticket%%:*}
+      if ! pick=$("$HOME/.local/bin/ht-or-runner-pick" "$n" "$recovery_ticket" 2>>"$rlog"); then
+        echo "$(date -u +%FT%TZ) pick: nothing to start" >> "$rlog"; sleep 900; continue
+      fi
+      IFS=$'\t' read -r pick_ticket pick_model pick_effort pick_source <<< "$pick"
+      LAUNCH=(hax --provider=codex --model="$pick_model" --effort="$pick_effort")
+      echo "$(date -u +%FT%TZ) pick: $pick_ticket $pick_model $pick_effort ($pick_source)" >> "$rlog"
+      run_brief="YOUR TICKET THIS RUN (set by the launcher, overrides every pick rule below): $pick_ticket ($pick_source; claimed for you when new). Work only on $pick_ticket; do not run pr-drain-pick or pick another ticket. The launcher already ran ship-claim for you with claim id \"$SHIP_CLAIM_RESUME\": never run ship-claim again with any other resume text; if a step needs a claim or resume command, use exactly \"$SHIP_CLAIM_RESUME\". A same-runner \"Stepping back\" note is not a blocker: carry on. $(cat \"$STATE/brief-extra\" 2>/dev/null) If it cannot move, end with RUNNER IDLE and the reason. $brief${recovery_brief:+ Recovery: $recovery_brief}"
+      echo "$(date -u +%FT%TZ) start" >> "$rlog"
+      clear; tmux clear-history -t "$TMUX_PANE"
+      tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n or"
+      : > "$runlog"
+      : > "$STATE/runner-$n.result"
+      if [ "$(cat "$HOME/.local/state/ht-or-runners/engine" 2>/dev/null || echo "${HT_RUNNER_ENGINE:-cursor}")" = cursor ]; then
+        case "$pick_model:$pick_effort" in
+          *terra*) cmodel=composer-2.5 ;;
+          *:high) cmodel=grok-4.7-high ;;
+          *) cmodel=grok-4.7-medium ;;
+        esac
+        echo "$(date -u +%FT%TZ) cursor: $pick_ticket $cmodel" >> "$rlog"
+        tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n cursor $cmodel"
+        cbrief="ENGINE (Valentin 2026-11-07): you run in Cursor CLI on the Cursor plan as RUNNER $n. That is allowed; ignore any line below that says Codex or hax only. No subagents, no helpers. $run_brief"
+        timeout 3h "$HOME/.local/bin/cursor-agent" -p --output-format text --model "$cmodel" -f --trust --approve-mcps --workspace "$REPO" "$cbrief" 2>&1 | tee "$runlog"
+        if grep -q "RUNNER IDLE" "$runlog"; then echo IDLE > "$STATE/runner-$n.result"; sleep 600; else echo DONE > "$STATE/runner-$n.result"; sleep 30; fi
+        continue
+      fi
+      (
+        sleep 15
+        tmux send-keys -t "$TMUX_PANE" -l "$run_brief"
+        sleep 1
+        tmux send-keys -t "$TMUX_PANE" C-m
+        result=TIMEOUT
+        provider_retries=0
+        retry_due=1
+        for poll in $(seq 1 480); do
+          sleep 30
+          if completed=$(python3 - "$$" "$REPO" "$recovery_ticket" <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+proc = Path(os.environ.get('HT_HAX_PROC_ROOT', '/proc'))
+try:
+    children = (proc / sys.argv[1] / 'task' / sys.argv[1] / 'children').read_text().split()
+    for child in children:
+        for fd in (proc / child / 'fd').iterdir():
+            path = fd.resolve()
+            if path.suffix != '.jsonl':
+                continue
+            with path.open() as stream:
+                header = json.loads(next(stream))
+                if header.get('type') != 'session' or header.get('version') != 1 or header.get('cwd') != sys.argv[2]:
+                    continue
+                last = tail = None
+                for line in stream:
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if item.get("type") == "user_turn":
+                        continue
+                    tail = item
+                    if item.get('kind') not in ('turn_usage', 'reasoning'):
+                        last = item
+                if tail and tail.get('kind') == 'turn_usage' and last and last.get('kind') == 'assistant' and not last.get('origin'):
+                    final = last.get('text', '').strip().splitlines()
+                    match = re.fullmatch(r'(?:[•*-] )?RUNNER (?:DONE (?P<ticket>(?:HTPR|YPER4|HYFA)-[0-9]+|https://\S+) (?P<state>.+?)(?: rung=\S+)?|IDLE .+)', final[-1]) if final else None
+                    if match:
+                        ticket = sys.argv[3]
+                        project = {'HTPR': '15', 'YPER4': '4060'}.get(ticket.split('-')[0])
+                        url = f'https://app.hypertask.ai/detail/project-{project}/{ticket.split("-")[-1]}'
+                        if ticket and match['ticket'] in (ticket, url) and match['state'] == 'Done':
+                            print('DONE_MATCH')
+                        else:
+                            print('IDLE' if match['ticket'] is None else 'DONE')
+                        sys.exit(0)
+except (OSError, ValueError, StopIteration):
+    pass
+sys.exit(1)
+PYTHON
+          ); then
+            result=${completed%_MATCH}
+            if [ "$completed" = DONE_MATCH ]; then
+              "$recovery" ack "$n" "$recovery_ticket" || log "RUNNER $n: recovery acknowledgement failed"
+            fi
+            break
+          fi
+          prompt=$(tmux capture-pane -p -e -t "$TMUX_PANE" -S -8 2>/dev/null | awk '
+            NF {
+              previous_error = error
+              line = $0
+              gsub(/\033\[[0-9;]*m/, "", line)
+              error = $0 ~ /^\033\[2m/ && line == "[provider error — enter to retry]"
+              last = line
+            }
+            END { if (previous_error && (last == "❯" || last == ">")) print "provider-error" }')
+          if [ "$prompt" = provider-error ] &&
+             [ "$(tmux display-message -p -t "$TMUX_PANE" '#{session_attached} #{cursor_x}')" = '0 2' ]; then
+            if [ "$provider_retries" -ge 3 ]; then
+              echo "$(date -u +%FT%TZ) provider retry limit reached; runner paused" >> "$rlog"
+              touch "$STATE/stop-$n"
+              result=PROVIDER_ERROR
+              break
+            fi
+            if [ "$poll" -ge "$retry_due" ] &&
+               [ "$(tmux if-shell -F -t "$TMUX_PANE" '#{&&:#{==:#{session_attached},0},#{==:#{cursor_x},2}}' \
+                    "send-keys -t '$TMUX_PANE' C-m ; display-message -p provider-retried")" = provider-retried ]; then
+              provider_retries=$((provider_retries + 1))
+              echo "$(date -u +%FT%TZ) provider retry $provider_retries/3" >> "$rlog"
+              retry_due=$((poll + (1 << provider_retries)))
+            fi
+          fi
+        done
+        printf '%s\n' "$result" > "$STATE/runner-$n.result"
+        tmux capture-pane -p -t "$TMUX_PANE" -S - | tee -a "$rlog" > "$runlog"
+        tmux send-keys -t "$TMUX_PANE" C-d
+      ) </dev/null >/dev/null 2>&1 &
+      watcher=$!
+      "${LAUNCH[@]}"
+      kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
+      echo "$(date -u +%FT%TZ) end" >> "$rlog"
+      if grep -qx IDLE "$STATE/runner-$n.result"; then sleep 900; else sleep 30; fi
+    done ;;
+esac

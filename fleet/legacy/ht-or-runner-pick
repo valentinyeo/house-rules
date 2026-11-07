@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Pick and claim one board 15 ticket for RUNNER n before hax starts; print TICKET<TAB>MODEL<TAB>EFFORT<TAB>SOURCE.
+
+Valentin 2026-11-05 (YPER4-1352): the ticket's brain tag picks the brain. brain-light = Terra,
+brain-medium = Sol medium, brain-hard = Sol high, brain-extra-hard = skipped. No tag = Sol medium.
+Exit 0 with a line when a ticket is ready; exit 1 with a reason on stderr when nothing can be picked.
+--dry-run picks without claiming.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+HOME = os.path.expanduser("~")
+CLAIM = f"{HOME}/.agents/skills/ship/scripts/ship-claim"
+DRAIN = f"{HOME}/.local/bin/pr-drain-pick"
+PICK_SECTIONS = {"Bugs", "Improvements", "Features"}
+SKIP_LABELS = {"ci", "hypertask ci", "design-pass", "brain-extra-hard", "ai-feedback", "cursor bugs 7 nov", "cursor runners 6 nov", "cursor cloud 7 nov"}
+BRAINS = [
+    ("brain-hard", ("gpt-6.1-sol", "high")),
+    ("brain-medium", ("gpt-6.1-sol", "medium")),
+    ("brain-light", ("gpt-6.1-terra", "medium")),
+]
+DEFAULT = ("gpt-6.1-sol", "medium")
+TICKET = re.compile(r"\b(?:HTPR|HYFA)-[0-9]+\b")
+
+
+def run(*cmd):
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    return p.returncode, p.stdout + p.stderr
+
+
+def task(ticket):
+    rc, out = run("hypertask", "task", "get", ticket, "--json")
+    try:
+        return json.loads(out[out.index("{"):])["tasks"][0] if rc == 0 else None
+    except (ValueError, KeyError, IndexError):
+        return None
+
+
+def label_names(t):
+    return {(l.get("name") or "").strip().lower() for l in (t or {}).get("labels") or []}
+
+
+def brain(names):
+    for label, choice in BRAINS:
+        if label in names:
+            return choice
+    return DEFAULT
+
+
+def skipped(t):
+    return not t or bool(label_names(t) & SKIP_LABELS)
+
+
+def emit(ticket, t, source):
+    model, effort = brain(label_names(t))
+    print(f"{ticket}\t{model}\t{effort}\t{source}")
+    sys.exit(0)
+
+
+def claim(ticket, dry):
+    if dry:
+        return 0, "dry run"
+    return run(CLAIM, ticket, os.environ.get("SHIP_CLAIM_RESUME", ""))
+
+
+def held(out):
+    m = re.search(r"(?:still has open PRs|unfinished merged work):?\s*(.*)", out)
+    if not m:
+        return None
+    found = TICKET.findall(m.group(1))
+    if found:
+        return found[0]
+    for pr in re.findall(r"/pull/([0-9]+)", m.group(1)):
+        rc, title = run("gh", "pr", "view", pr, "-R", "hypertask-ai/hypertask", "--json", "title", "--jq", ".title")
+        found = TICKET.findall(title) if rc == 0 else []
+        if found:
+            return found[0]
+    return None
+
+
+def try_claim(ticket, source, dry):
+    t = task(ticket)
+    if not t or (label_names(t) & (SKIP_LABELS - ({"cursor cloud 7 nov", "ai-feedback"} if source == "pr" else set()))):
+        return
+    rc, out = claim(ticket, dry)
+    if rc == 0:
+        emit(ticket, t, source)
+    if rc == 4:
+        own = held(out)
+        if own:
+            emit(own, task(own), "own")
+        sys.exit(f"hold: {out.strip().splitlines()[-1] if out.strip() else 'no reason'}")
+
+
+STATE = f"{HOME}/.local/state/ht-or-runners"
+
+
+def idle_on(n, hours=2):
+    """Own ticket this runner ended IDLE on in the last `hours`: it waits on someone else, so offer cross QA instead."""
+    try:
+        if open(f"{STATE}/runner-{n}.result").read().strip() != "IDLE":
+            return ""
+        picks = [l for l in open(f"{STATE}/runner-{n}.log") if " pick: " in l and l.rstrip().endswith("(own)")]
+    except OSError:
+        return ""
+    if not picks:
+        return ""
+    import datetime
+    stamp, rest = picks[-1].split(" pick: ", 1)
+    age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    return rest.split()[0] if age.total_seconds() < hours * 3600 else ""
+
+
+FAILED = f"{STATE}/qa-failed.json"
+FAILED_HOURS = 6
+RECENT_HOURS = 2
+TAIL_BYTES = 4_000_000
+PICK = re.compile(r"^(\S+Z) pick: ((?:HTPR|HYFA)-[0-9]+) \S+ \S+ \((\S+)\)$")
+
+
+def log_picks(m):
+    """(ticket, source, utc datetime) for every pick line in the tail of runner m's log, oldest first."""
+    import datetime
+    try:
+        with open(f"{STATE}/runner-{m}.log", "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - TAIL_BYTES))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    found = []
+    for line in text.splitlines():
+        hit = PICK.match(line.strip())
+        if hit:
+            found.append((hit[2], hit[3], datetime.datetime.fromisoformat(hit[1].replace("Z", "+00:00"))))
+    return found
+
+
+def age_hours(when):
+    import datetime
+    return (datetime.datetime.now(datetime.timezone.utc) - when).total_seconds() / 3600
+
+
+def qa_avoid():
+    """QA tickets not worth offering as cross QA: a cross-qa run on them ended IDLE in the last 6 h, or any runner took them as cross-qa in the last 2 h."""
+    import datetime
+    try:
+        failed = json.load(open(FAILED))
+    except (OSError, ValueError):
+        failed = {}
+    recent = set()
+    for m in range(1, 11):
+        picks = log_picks(m)
+        for ticket, source, when in picks:
+            if source == "cross-qa" and age_hours(when) < RECENT_HOURS:
+                recent.add(ticket)
+        try:
+            ended_idle = open(f"{STATE}/runner-{m}.result").read().strip() == "IDLE"
+        except OSError:
+            ended_idle = False
+        if ended_idle and picks and picks[-1][1] == "cross-qa":
+            failed[picks[-1][0]] = picks[-1][2].strftime("%Y-%m-%dT%H:%M:%SZ")
+    keep = {}
+    for ticket, stamp in failed.items():
+        try:
+            when = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            continue
+        if age_hours(when) < FAILED_HOURS:
+            keep[ticket] = stamp
+    try:
+        tmp = f"{FAILED}.{os.getpid()}"
+        json.dump(keep, open(tmp, "w"), indent=1)
+        os.replace(tmp, FAILED)
+    except OSError:
+        pass
+    return set(keep) | recent
+
+
+PIPELINE = ("QA", "AI Review", "In Progress")
+OWNERS = {f"runner {n}" for n in range(1, 11)} | {"ht design builder"}
+DEAD = {f"runner {n}" for n in range(16, 20)} | {""}
+SKIP_OWN = {"ci", "hypertask ci", "brain-extra-hard"}
+
+
+def listed(section):
+    rc, out = run("hypertask", "task", "list", "--project", "15", "--section", section, "--limit", "100", "--json")
+    try:
+        found = json.loads(out[out.index("{"):])["tasks"] if rc == 0 else []
+    except (ValueError, KeyError):
+        return []
+    return [t for t in found if TICKET.fullmatch(t.get("ticketNumber") or "")]
+
+
+def agents(t):
+    return {((a.get("agent") or {}).get("displayName") or "").lower() for a in t.get("assignees") or [] if a.get("agent")}
+
+
+def adopt(ticket):
+    resume = os.environ.get("SHIP_CLAIM_RESUME", "")
+    rc, _ = run("vcc", "task", "assign", ticket, "--self")
+    if rc != 0:
+        return False
+    rc, _ = run("vcc", "activity", "add", ticket, f"Claimed. Session working it now. Claim id: [{resume}]\nAdopted from a runner that no longer works it; staying on it until it is live. Resume: {resume}")
+    return rc == 0
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a != "--dry-run"]
+    dry = "--dry-run" in sys.argv
+    if not args or not args[0].isdigit():
+        sys.exit("usage: ht-or-runner-pick <n> [recovery-ticket] [--dry-run]")
+    recovery = args[1] if len(args) > 1 and TICKET.fullmatch(args[1]) else ""
+    if recovery:
+        emit(recovery, task(recovery), "recovery")
+    pipeline = []
+    for section in PIPELINE:
+        pipeline += listed(section)
+    me = f"runner {args[0]}"
+    stuck = idle_on(args[0])
+    mine = [t for t in pipeline if me in agents(t) and not (label_names(t) & SKIP_OWN)]
+    for t in mine:
+        if t["ticketNumber"] != stuck and t.get("section") != "QA":
+            emit(t["ticketNumber"], task(t["ticketNumber"]), "own")
+    if mine:
+        avoid = qa_avoid()
+        others = [q for q in pipeline if q.get("section") == "QA" and q["ticketNumber"] not in avoid and (agents(q) - DEAD - {me}) and not (label_names(q) & SKIP_OWN) and not skipped(q)]
+        if others:
+            q = others[int(args[0]) % len(others)]
+            emit(q["ticketNumber"], task(q["ticketNumber"]), "cross-qa")
+        print("own ticket waits on independent QA: " + " ".join(t["ticketNumber"] for t in mine), file=sys.stderr)
+    for t in pipeline:
+        if not (agents(t) - DEAD) and not skipped(t):
+            if dry or adopt(t["ticketNumber"]):
+                emit(t["ticketNumber"], task(t["ticketNumber"]), "orphan")
+    rc, out = run(DRAIN)
+    parts = out.split()
+    if rc == 0 and parts[:1] == ["PR"] and len(parts) >= 4 and TICKET.fullmatch(parts[3]):
+        try_claim(parts[3], "pr", dry)
+    rank = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
+    tasks = []
+    for section in ("Bugs", "Improvements", "Features"):
+        tasks += listed(section)
+    tasks.sort(key=lambda t: rank.get(t.get("priority") if isinstance(t.get("priority"), str) else (t.get("priority") or {}).get("Priority_Value"), 4))
+    tried = 0
+    for t in tasks:
+        number = t.get("ticketNumber") or ""
+        if not TICKET.fullmatch(number) or t.get("section") not in PICK_SECTIONS or any(a.get("agent") for a in t.get("assignees") or []) or skipped(t):
+            continue
+        try_claim(number, "board", dry)
+        tried += 1
+        if tried >= 6:
+            break
+    sys.exit("none: no free ticket without CI, design-pass or brain-extra-hard")
+
+
+if __name__ == "__main__":
+    main()

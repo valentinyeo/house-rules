@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+# Software Factory runner picker (Valentin 2026-11-06): runners a, b, c take board 2060 work that has no
+# dedicated session. Multiprompt, Multiprompt Android, Postbox (Wazig) and Live Chat have their own sessions;
+# CI belongs on Fleet CI 11514. The brain tag picks the model.
+import json, os, subprocess, sys, time
+
+STATE = os.path.expanduser('~/.local/state/multibot')
+OWNERS = os.path.join(STATE, 'owners.json')
+# One ticket per line, then the reason. Tickets waiting on CI or other work leave the pool until removed.
+HOLD = os.path.join(STATE, 'hold.txt')
+RUNNERS = ('a', 'b', 'c')
+RANK = {'Urgent': 0, 'High': 1, 'Medium': 2, 'Low': 3}
+DEDICATED = {'multiprompt', 'multiprompt android', 'wazig', 'postbox', 'live chat', 'ci', 'hypertask ci'}
+BRAINS = [('brain-hard', 'gpt-6.1-sol high'), ('brain-medium', 'gpt-6.1-sol medium'), ('brain-light', 'gpt-6.1-terra medium')]
+P = os.path.expanduser('~/projects/')
+REPOS = {'triage': 'triage', 'chromescribe': 'chromescribe', 'calorie tracker mcp': 'calorie-mcp-proto',
+         'valentin yeo site': 'valentinyeocom', 'yeo ux site': 'yeoux-site', 'pecunia': 'pecunia',
+         'endless testing': 'endless-testing', 'claude cro': 'claude-cro', 'screencast2': 'screencast2-go',
+         'token ladder': 'token-ladder', 'upwork auto applier': 'upwork-auto-applier'}
+
+
+def tasks(section):
+    out, offset = [], 0
+    while True:
+        r = subprocess.run(['hypertask', 'task', 'list', '--project', '2060', '--section', section,
+                            '--limit', '100', '--offset', str(offset), '--json'],
+                           capture_output=True, text=True, check=True).stdout
+        page = json.loads(r).get('tasks', [])
+        out += page
+        if len(page) < 100:
+            return out
+        offset += 100
+
+
+def labels(t):
+    return {(l.get('name') or '').lower() for l in t.get('labels', [])}
+
+
+def priority(t):
+    p = t.get('priority')
+    if isinstance(p, dict):
+        p = p.get('Priority_Value')
+    return RANK.get(p or 'Medium', 2), p or 'None'
+
+
+def brain(t):
+    names = labels(t)
+    return next((b for tag, b in BRAINS if tag in names), 'gpt-6.1-sol medium')
+
+
+def repo(t):
+    return P + next((d for l, d in REPOS.items() if l in labels(t)), '')
+
+
+def line(t):
+    return (f"NEXT {t['ticketNumber']} {priority(t)[1]} https://app.hypertask.ai/detail/project-2060/{t['uniqueIndex']} "
+            f"BRAIN {brain(t).replace(' ', ':')} DIR {repo(t)} {t['title']}")
+
+
+def load():
+    try:
+        return json.load(open(OWNERS))
+    except FileNotFoundError:
+        return {}
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit('usage: mb-pick <runner-letter> [--claim TICKET] | mb-pick --list')
+    me = sys.argv[1]
+    if me != '--list' and me not in RUNNERS:
+        print(f'NOTHING_TO_PICK runner {me} is stood down (only {", ".join(RUNNERS)} run)')
+        return
+    owners = load()
+    if len(sys.argv) == 4 and sys.argv[2] == '--claim':
+        owners[me] = {'ticket': sys.argv[3], 'at': int(time.time())}
+        os.makedirs(STATE, exist_ok=True)
+        json.dump(owners, open(OWNERS, 'w'), indent=1)
+        print(f'CLAIMED {sys.argv[3]} for runner {me}')
+        return
+    taken = {v.get('ticket') for k, v in owners.items() if k != me}
+    try:
+        held_back = {l.split()[0] for l in open(HOLD) if l.strip() and not l.startswith('#')}
+    except FileNotFoundError:
+        held_back = set()
+    taken |= held_back
+    pool = [t for s in ('Todo', 'Doing') for t in tasks(s)
+            if not (labels(t) & DEDICATED) and not t.get('sub_tasks') and t['ticketNumber'] not in taken
+            and 'brain-extra-hard' not in labels(t)
+            and not t.get('blockerCommentId') and not t.get('waitingOnUserId')]
+    pool.sort(key=lambda t: (priority(t)[0], 0 if t['section'] == 'Doing' else 1, t['createdAt']))
+    if me == '--list':
+        for t in pool:
+            print(t['ticketNumber'], priority(t)[1], brain(t), t['section'], repo(t), t['title'][:60])
+        return
+    own = owners.get(me, {}).get('ticket')
+    held = [t for t in pool if t['ticketNumber'] == own]
+    if held:
+        print(line(held[0]))
+        return
+    if os.path.exists(os.path.join(STATE, 'freeze')):
+        print('NOTHING_TO_PICK frozen: finish or hand back your current ticket, then stop')
+        return
+    print(line(pool[0]) if pool else 'NOTHING_TO_PICK')
+
+
+main()

@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+# Multiprompt desktop runner nudger (IGSH-1816). Valentin 2026-11-07: MP Runner 1..3 run Cursor CLI in plain tmux
+# sessions mp-runner-N. Model per ticket brain tag: light composer-2.5, medium grok-4.7-medium, hard grok-4.7-high (never fast),
+# extra-hard skipped. Only Grok 4.7 and Composer 2.5 allowed in Cursor, never a fast id, never auto.
+# Idle = no "ctrl+c to stop" in the pane on two ticks in a row. Same model: nudge with tmux paste. New ticket or model: fresh session.
+import json, os, re, shlex, subprocess, sys, time
+
+STATE = os.path.expanduser('~/.local/state/mp-runners')
+RUNNERS = os.path.join(STATE, 'runners.json')
+OWNERS = os.path.join(STATE, 'owners.json')
+BRIEFS = os.path.join(STATE, 'briefs')
+LOG = os.path.join(STATE, 'watch.log')
+PICK = os.path.expanduser('~/.local/bin/mp-pick')
+CURSOR = os.path.expanduser('~/.local/bin/cursor-agent')
+REPO = os.path.expanduser('~/projects/multiprompt')
+MODELS = {'light': 'composer-2.5', 'medium': 'grok-4.7-medium', 'hard': 'grok-4.7-high'}
+ALLOWED = {'composer-2.5', 'grok-4.7-medium', 'grok-4.7-high'}
+BUSY = 'ctrl+c to stop'
+CODEX = {'light': 'gpt-6.1-terra:medium', 'medium': 'gpt-6.1-sol:medium', 'hard': 'gpt-6.1-sol:high'}
+ENGINES = ('cursor', 'codex')
+
+
+def log(text):
+    with open(LOG, 'a') as f:
+        f.write(time.strftime('%Y-%m-%dT%H:%M ', time.gmtime()) + text + '\n')
+
+
+def guard(model):
+    if model in CODEX.values():
+        return model
+    if model not in ALLOWED or 'fast' in model or not re.fullmatch(r'grok-4\.7-(medium|high)|composer-2\.5', model):
+        raise SystemExit(f'mp-watch: refused model {model!r}; Cursor runners use only grok-4.7-medium, grok-4.7-high or composer-2.5')
+    return model
+
+
+def model_for(brain, engine='cursor'):
+    table = CODEX if engine == 'codex' else MODELS
+    if brain not in table:
+        return None
+    return guard(table[brain])
+
+
+def tmux(*args):
+    return subprocess.run(['tmux', *args], capture_output=True, text=True)
+
+
+def load(path):
+    try:
+        return json.load(open(path))
+    except FileNotFoundError:
+        return {}
+
+
+def save_runner(n, **kw):
+    runners = load(RUNNERS)
+    runners.setdefault(n, {}).update(kw)
+    json.dump(runners, open(RUNNERS, 'w'), indent=1)
+
+
+def pane_state(n):
+    s = f'mp-runner-{n}'
+    if tmux('has-session', '-t', s).returncode:
+        return 'missing'
+    if tmux('display', '-p', '-t', s, '#{pane_current_command}').stdout.strip() in ('bash', 'sh', 'zsh'):
+        return 'exited'
+    for _ in range(3):
+        text = tmux('capture-pane', '-p', '-t', s, '-S', '-15').stdout
+        if BUSY in text or re.search(r'^\s*[\u2800-\u28ff]{1,2} \w', text, re.M):
+            return 'busy'
+        time.sleep(1.5)
+    return 'idle'
+
+
+def brief(n, pick, held, model):
+    who = f'MP Runner {n}'
+    tab = f'[MB] Runner {n}'
+    engine_line = (f'ENGINE (Valentin 2026-11-07, fleet-switch YPER4-1364): you run in hax Codex on {model} as {tab} (board login {who}), in tmux session mp-runner-{n}. '
+                   'Codex subscription only; never a model id containing fast, no paid key, no router. '
+                   if model in CODEX.values() else
+                   f'ENGINE (Valentin 2026-11-07): you run in Cursor CLI on model {model} as {tab} (board login {who}), in tmux session mp-runner-{n}. '
+                   'That is allowed; ignore any line that says Codex or hax only. '
+                   'Token ladder: Cursor plan, Grok 4.7 or Composer 2.5 only; never a model id containing fast, never auto, no paid key, no router. ')
+    rules = (engine_line +
+             'Unlazy: before work write your gates (what done means), then prove each one with evidence (commit SHA, PR link, CI result) before you say done. '
+             f'Board writes only as yourself: CEO_AGENT="{who}" ~/projects/ceo/bin/ceo-ht, never plain hypertask. '
+             'Repo ~/projects/multiprompt, fresh branch from origin/master in your own git worktree, one PR on valentinyeo/multiprompt. '
+             'Follow the repo CLAUDE.md: changelog.d fragment, no version bumps, no zig builds or heavy tests on this server, '
+             'only node --test tools/<name>.test.js locally; CI on the PR is the test. Poll gh pr checks no faster than every 300 seconds. '
+             'Green and gates met: gh pr merge -R valentinyeo/multiprompt --squash, then post a short caveman done comment with proof and move the ticket to Done. '
+             'People comments are caveman, short bullets, full https links. Never ask Valentin for a fact. '
+             'Never do CI work: a CI snag goes on board 11514 (search first, +1 or file), link your ticket BlockedBy it, wait. A red check that your own PR causes (master is green for it) is NOT CI work: fix it in your PR this turn. '
+             'Only Multiprompt desktop tickets. Never Android, never Urgent or brain-extra-hard, never a ticket another runner or the lead holds. '
+             'Money lock: a ticket that needs a paid service or a paid call waits for Valentin; hand it back, never build or merge it. '
+             'Commit and push your work before every turn ends; never leave uncommitted changes. '
+             'Single thread: no helpers, no subagents. Stuck after two tries: comment why, run ' + PICK + f' {n} --release, then end your turn with RUNNER IDLE and the reason. '
+             'Never start another ticket in this session: the watcher picks the next one and restarts you on the model its brain tag needs.')
+    if held:
+        return f'MP watcher: you are idle on {pick}. Keep driving it until merged and live. Then run {PICK} {n} --release and end your turn with RUNNER IDLE. {rules}'
+    return (f'MP watcher: you are {who}. Your ticket: {pick}. It is claimed for you. Move it to Doing now. '
+            f'Read the ticket and its comments. It may already have an open PR from an earlier runner: continue that PR, never open a second one. If its PR is already merged, check it live and move it to Done. Otherwise build it, drive it until merged and live. Then run {PICK} {n} --release and end your turn with RUNNER IDLE. {rules}')
+
+
+def launch(n, ticket, model, text, workdir=REPO):
+    guard(model)
+    s = f'mp-runner-{n}'
+    os.makedirs(BRIEFS, exist_ok=True)
+    path = os.path.join(BRIEFS, f'{n}.txt')
+    open(path, 'w').write(text)
+    if not tmux('has-session', '-t', s).returncode:
+        tmux('send-keys', '-t', s, 'C-c')
+        time.sleep(1)
+        tmux('send-keys', '-t', s, 'C-c')
+        time.sleep(2)
+        tmux('kill-session', '-t', s)
+    tmux('new-session', '-d', '-s', s, '-c', workdir, '-x', '200', '-y', '50')
+    engine = 'codex' if model in CODEX.values() else 'cursor'
+    if engine == 'codex':
+        cmodel, effort = model.split(':')
+        cmd = (f'export PATH=$HOME/.local/bin:$PATH SHIP_SESSION_NAME={shlex.quote(f"MP Runner {n}")}; '
+               f'unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID HAX_SUBAGENT_DEPTH; '
+               f'hax --provider=codex --model={shlex.quote(cmodel)} --effort={shlex.quote(effort)}')
+        tmux('send-keys', '-t', s, cmd, 'Enter')
+        time.sleep(15)
+        nudge(n, text)
+    else:
+        cmd = (f'export PATH=$HOME/.local/bin:$PATH; {CURSOR} --model {shlex.quote(model)} -f --trust --approve-mcps '
+               f'"$(cat {shlex.quote(path)})"')
+        tmux('send-keys', '-t', s, cmd, 'Enter')
+    save_runner(n, name=f'[MB] Runner {n}', engine=engine, tmux=s, model=model, ticket=ticket, workdir=workdir,
+                started=int(time.time()))
+    log(f'{n} launched {ticket} on {model} in {workdir}')
+
+
+def nudge(n, text):
+    s = f'mp-runner-{n}'
+    r = subprocess.run(['tmux', 'load-buffer', '-b', f'mp-{n}', '-'], input=text, text=True)
+    if r.returncode:
+        return False
+    tmux('paste-buffer', '-p', '-d', '-b', f'mp-{n}', '-t', s)
+    time.sleep(1)
+    return not tmux('send-keys', '-t', s, 'Enter').returncode
+
+
+def parse(pick):
+    m = re.match(r'(NEXT|HELD) (\S+) .*BRAIN (\S+)', pick)
+    return (m.group(1), m.group(2), m.group(3)) if m else (None, None, None)
+
+
+def main():
+    os.makedirs(STATE, exist_ok=True)
+    runners = load(RUNNERS)
+    if not runners:
+        log('no runners.json')
+        return
+    for n, r in sorted(runners.items()):
+        if r.get('engine') not in ENGINES:
+            log(f'{n} engine {r.get("engine")}, skipped')
+            continue
+        idle_file = os.path.join(STATE, f'idle-{n}')
+        state = pane_state(n)
+        if state == 'busy':
+            if os.path.exists(idle_file):
+                os.remove(idle_file)
+            continue
+        if state == 'idle' and not os.path.exists(idle_file):
+            open(idle_file, 'w').close()
+            continue
+        out = subprocess.run([PICK, n], capture_output=True, text=True).stdout.strip().splitlines()
+        pick = out[-1] if out else ''
+        kind, ticket, brain = parse(pick)
+        if not kind:
+            log(f'{n} {state}, pick said: {pick}')
+            continue
+        model = model_for(brain, r.get('engine'))
+        if not model:
+            subprocess.run([PICK, n, '--release'], capture_output=True)
+            log(f'{n} skipped {ticket}: brain {brain} has no runner model')
+            continue
+        held = kind == 'HELD'
+        if not held:
+            subprocess.run([PICK, n, '--claim', ticket], capture_output=True)
+        text = brief(n, pick.split(' ', 1)[1], held, model)
+        if held and state == 'idle' and r.get('model') == model and r.get('ticket') == ticket:
+            ok = nudge(n, text)
+            log(f'{n} nudged {ticket} on {model} ({"ok" if ok else "failed"})')
+        else:
+            workdir = load(OWNERS).get(n, {}).get('workdir') or REPO
+            launch(n, ticket, model, text, workdir if os.path.isdir(workdir) else REPO)
+        if os.path.exists(idle_file):
+            os.remove(idle_file)
+
+
+if __name__ == '__main__':
+    main()
