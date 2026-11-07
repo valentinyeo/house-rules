@@ -29,15 +29,17 @@ def _pattern(agent):
     return re.compile(re.escape(agent).replace(r"\{n\}", r"(\d+)").replace(r"\{x\}", r"([a-z])"), re.I)
 
 
-def _state_rows(path):
+def _state_rows(path, agent=None):
     try:
         data = json.loads(Path(os.path.expanduser(path)).read_text())
     except (OSError, ValueError):
         return []
-    rows = data.values() if isinstance(data, dict) else data
+    rows = data.items() if isinstance(data, dict) else enumerate(data)
     # mp-runners/runners.json names the pane "tmux", older state files "session".
-    rows = [dict(r, session=r.get("session") or r.get("tmux")) for r in rows if isinstance(r, dict)]
-    return [r for r in rows if r["session"] and r.get("name")]
+    # Its "name" is the display tab ("[MB] Runner 1"); the board login comes from the
+    # scope's "agent" template ("MP Runner {n}", {n} = the row's key) when given.
+    rows = [dict(r, key=str(k), session=r.get("session") or r.get("tmux")) for k, r in rows if isinstance(r, dict)]
+    return [r for r in rows if r["session"] and (r.get("name") or agent)]
 
 
 def workers(scope, live_sessions=None):
@@ -46,10 +48,11 @@ def workers(scope, live_sessions=None):
     patterns, live, always = [], set(), set()
     for w in scope["workers"]:
         if w.get("state"):
-            for r in _state_rows(w["state"]):
-                patterns.append(_pattern(r["name"]))
+            for r in _state_rows(w["state"], w.get("agent")):
+                name = w["agent"].replace("{n}", r["key"]) if w.get("agent") else r["name"]
+                patterns.append(_pattern(name))
                 if r["session"] in live_sessions:
-                    live.add(r["name"].lower())
+                    live.add(name.lower())
             continue
         patterns.append(_pattern(w["agent"]))
         if w.get("always"):
