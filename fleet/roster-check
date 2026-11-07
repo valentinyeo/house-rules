@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Roster check: live agent sessions with no row in fleet/roster.json. Read only.
+
+Prints NOT-IN-ROSTER per tmux session that runs an agent (claude, hax, codex, cursor) but has no row.
+Pool rows match by pattern ({n} digits, {x} one letter). Exit 1 when any session is missing.
+Multibot chats are not tmux sessions; they join once `mp-layout list` exists.
+"""
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROSTER = json.loads((Path(__file__).resolve().parent / "roster.json").read_text())
+AGENT = re.compile(r"(^|/)(claude|hax|codex|cursor-agent)( |$)")
+
+
+def pattern(name):
+    return re.compile("^" + re.escape(name).replace(r"\{n\}", r"\d+").replace(r"\{x\}", "[a-z]") + "$")
+
+
+def main():
+    pats = [pattern(r["name"]) for r in ROSTER["rows"]]
+    ps = subprocess.run(["ps", "-eo", "pid=,ppid=,args="], capture_output=True, text=True).stdout.splitlines()
+    kids, args = {}, {}
+    for line in ps:
+        parts = line.split(None, 2)
+        if len(parts) == 3:
+            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+            args[int(parts[0])] = parts[2]
+
+    def runs_agent(pid):
+        stack = [pid]
+        while stack:
+            p = stack.pop()
+            if AGENT.search(args.get(p, "")):
+                return True
+            stack += kids.get(p, [])
+        return False
+
+    panes = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+                           capture_output=True, text=True).stdout.split("\n")
+    missing = sorted({s for s, pid in (l.split() for l in panes if l.strip())
+                      if runs_agent(int(pid)) and not any(p.match(s) for p in pats)})
+    for s in missing:
+        print(f"NOT-IN-ROSTER {s}")
+    print(f"ROSTER-CHECK: {len(missing)} live agent sessions without a row.")
+    sys.exit(1 if missing else 0)
+
+
+if __name__ == "__main__":
+    main()
