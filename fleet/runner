@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One launcher for every runner (YPER4-1371). Valentin 2026-11-07: one pool, Runner 1..N, every runner subscription used
 # at once. Each runner runs the engine the pacer (poteto-2-advisor bin/pacer) writes to engine-N: cursor (Cursor CLI on the
-# Cursor plan), codex (hax on Codex) or opencode (hax on OpenCode Go, DeepSeek 4.1 Flash). No engine-N: the engine file,
+# Cursor plan), codex (hax on Codex), opencode (hax on OpenCode Go, DeepSeek 4.1 Flash) or claude (Claude Code headless on
+# the Claude subscription, never an API key). No engine-N: the engine file,
 # else cursor. The engine is read when the picker runs, so a change lands between tickets.
 # Generalised from ht-or-runner (copy in fleet/legacy/): same PAUSED file, stop-N files, top-up, load gate, tick and
 # log format. The ticket, repo, brief, engine and model come from fleet/pick; this script only runs the agent.
@@ -27,7 +28,7 @@ validate_targets() {
 }
 log() { echo "$(date -u +%FT%TZ) $*" >> "$STATE/keeper.log"; }
 engine() { cat "$STATE/engine-${1:-0}" 2>/dev/null || cat "$STATE/engine" 2>/dev/null || echo "${HT_RUNNER_ENGINE:-cursor}"; }
-known_engine() { case $1 in cursor|codex|opencode) return 0 ;; *) return 1 ;; esac; }
+known_engine() { case $1 in cursor|codex|opencode|claude) return 0 ;; *) return 1 ;; esac; }
 
 # One stack-key read per runner process, kept in this shell only (house rule: keys once per job, never in a loop).
 opencode_key() {
@@ -43,11 +44,13 @@ launch() {
     cursor) base=("$HOME/.local/bin/cursor-agent" -p --output-format text --model "$model" -f --trust --approve-mcps --workspace "$repo") ;;
     codex) base=("$HOME/.local/bin/hax" --provider=codex --model="$model" --effort="$effort" --no-session -p) ;;
     opencode) base=("$HOME/.local/bin/hax" --provider=opencode-go --model="$model" --effort="$effort" --no-session -p) ;;
+    claude) base=("$HOME/.local/bin/claude" -p --model "$model" --effort "$effort" --permission-mode bypassPermissions
+                  --no-session-persistence --output-format text --disallowedTools Agent Task) ;;
     *) echo "unknown engine: $eng" >&2; return 2 ;;
   esac
   if [ "${LAUNCH_DRY:-}" = 1 ]; then
     printf 'cd %q &&' "$repo"
-    [ "$eng" = cursor ] || printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1'
+    case $eng in codex|opencode) printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1' ;; claude) printf ' (ANTHROPIC_* unset: subscription login)' ;; esac
     [ "$eng" = opencode ] && printf ' OPENCODE_API_KEY=<from stack-key, %s>' "$([ -n "${OC_KEY:-}" ] && echo loaded || echo 'not loaded')"
     printf ' timeout 3h'; printf ' %q' "${base[@]}"
     if [ "$eng" = cursor ]; then printf ' <brief, %d chars>\n' "${#brief}"; else printf ' < <brief, %d chars on stdin>\n' "${#brief}"; fi
@@ -57,6 +60,8 @@ launch() {
   [ "$eng" = opencode ] && [ -z "${OC_KEY:-}" ] && { echo "no OpenCode Go key loaded" >&2; return 1; }
   (
     cd "$repo" || exit 1
+    # Claude runs on the subscription login only: no API key, token or base URL may reach it.
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID
     export HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1
     unset OPENCODE_API_KEY
     [ "$eng" = opencode ] && export OPENCODE_API_KEY="$OC_KEY"
@@ -96,6 +101,7 @@ run_brief() {
   case $eng in
     cursor) engine_line="you run in Cursor CLI on the Cursor plan as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Codex, hax or Claude only. No subagents, no helpers." ;;
     codex) engine_line="you run in hax on the Codex plan ($model, effort $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok or Claude only. Single thread: never start hax helpers, subagents or any other agent." ;;
+    claude) engine_line="you run in Claude Code on the Claude subscription ($model, effort $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok, Codex or hax only. Single thread: never use the Agent or Task tool, never start subagents, helpers or any other agent, and never use an API key." ;;
     opencode) engine_line="you run in hax on the OpenCode Go plan with DeepSeek 4.1 Flash (effort $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok, Codex or Claude only. Single thread: never start hax helpers, subagents or any other agent, and never use any other provider or key." ;;
   esac
   echo "ENGINE (Valentin 2026-11-07): $engine_line" \
@@ -138,7 +144,7 @@ case "${1:-}" in
     # Proves the launch path for one engine without a ticket: prints the command; --noop also runs it on a one-line
     # brief in an empty directory and checks the reply.
     eng=${2:-}; model=${3:-}; effort=${4:-medium}
-    known_engine "$eng" && [ -n "$model" ] || { echo 'fleet/runner launch-check <cursor|codex|opencode> <model> <effort> [--noop]' >&2; exit 2; }
+    known_engine "$eng" && [ -n "$model" ] || { echo 'fleet/runner launch-check <cursor|codex|opencode|claude> <model> <effort> [--noop]' >&2; exit 2; }
     [ "$eng" = opencode ] && { opencode_key || { echo "no OpenCode Go key from stack-key" >&2; exit 1; }; }
     dir=$(mktemp -d); noop="Reply with exactly this line and nothing else: RUNNER_LAUNCH_OK"
     LAUNCH_DRY=1 launch "$eng" "$model" "$effort" "$dir" "$noop"
@@ -181,8 +187,9 @@ case "${1:-}" in
       clear; tmux clear-history -t "$TMUX_PANE"
       : > "$runlog"
       : > "$STATE/runner-$n.result"
-      # The pacer reads this line to count runner-hours per plan: "cursor: TICKET MODEL" or "hax: TICKET MODEL", nothing after.
-      echo "$(date -u +%FT%TZ) $([ "$pick_engine" = cursor ] && echo cursor || echo hax): $pick_ticket $pick_model" >> "$rlog"
+      # The pacer reads this line to count runner-hours per plan: "cursor|hax|claude: TICKET MODEL", nothing after.
+      case $pick_engine in cursor|claude) run_tag=$pick_engine ;; *) run_tag=hax ;; esac
+      echo "$(date -u +%FT%TZ) $run_tag: $pick_ticket $pick_model" >> "$rlog"
       tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n $pick_engine $pick_model"
       cmodel=$pick_model
       started_at=$(date +%s)
