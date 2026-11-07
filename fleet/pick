@@ -20,8 +20,11 @@ One runner holds one ticket until it is live. brain-extra-hard is skipped everyw
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for 3 days at most; a ticket with a BlockedBy link is governed by that link instead.
 A ticket with an open BlockedBy link, in Valentin Review or waiting on Valentin is never picked (fleet/park puts them there).
+A runner whose own unfinished ticket rests or waits (ship-claim HOLD names it) gets that ticket back with source "park" and
+briefs/park-job.txt: decide the fleet/park mode, run it, end. A ticket is handed back at most once per REST_MAX (ledger
+STATE/parks, any runner, written when the job is handed out), so a park run that fails to park cannot loop.
 ship-claim runs with SHIP_CLAIM_PICKED=1: this picker already ordered infra against app work, so its infra-first hold is skipped.
---dry-run never claims and never writes under ~/.local/state. FLEET_PICK_VIRTUAL=<file> makes dry runs
+--dry-run never claims and never writes under ~/.local/state; it asks `ship-claim hold` (read only) so it sees the same holds. FLEET_PICK_VIRTUAL=<file> makes dry runs
 share virtual claims (so 20 separate dry runs give 20 different tickets); FLEET_PICK_CACHE=<file> reuses one
 board snapshot. Exit 0 with a pick, exit 1 with the reason on stderr.
 """
@@ -55,6 +58,7 @@ CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
 REST_MAX = 3 * 86400  # an IDLE rest never outlives this, changed or not
 REST_GRACE = 60  # seconds: the run's own last write may land just after its IDLE end
+PARK_BRAIN = ("brain-light", "grok-4.7-medium", "medium")  # a park run reads one ticket and runs fleet/park
 
 # board -> (new-work columns, building columns)
 BOARDS = {
@@ -316,11 +320,13 @@ def adopt(n, t, why):
     return rc == 0
 
 
-def ship_claim(n, key, incident=False):
+def ship_claim(n, key, incident=False, dry=False):
+    """Claim key for Runner N. A dry run asks `ship-claim hold` instead: the same holds, read only, no claim."""
     env = dict(os.environ, SHIP_SESSION_NAME=f"RUNNER {n}", SHIP_CLAIM_PICKED="1")
     if incident:
         env["SHIP_CLAIM_INCIDENT"] = "1"  # ship-claim re-reads the ticket and honours it only for a real open incident
-    r = subprocess.run([str(SHIP_CLAIM), key, env.get("SHIP_CLAIM_RESUME", "")], capture_output=True, text=True, env=env, timeout=900)
+    args = ["hold", key] if dry else [key, env.get("SHIP_CLAIM_RESUME", "")]
+    r = subprocess.run([str(SHIP_CLAIM), *args], capture_output=True, text=True, env=env, timeout=900)
     return r.returncode, r.stdout + r.stderr
 
 
@@ -556,29 +562,60 @@ def blocks_app(t):
     return any(PREFIX_BOARD.get(k.split("-")[0]) in ("15", "2060") for k in relations(t["key"])[1])
 
 
+def park_ledger():
+    """{ticket: stamp of its newest park job}, any runner. One line per job: ISO stamp, ticket, runner."""
+    seen = {}
+    try:
+        for line in open(STATE / "parks"):
+            stamp, key = line.split()[:2]
+            seen[key] = max(seen.get(key, ""), stamp)
+    except (OSError, ValueError):
+        pass
+    return seen
+
+
+def parkable(t, ledger=None):
+    """Is t, the unfinished ticket that blocks a runner, due a park job? It must sit in a building column and be nobody else's claim.
+    A ticket gets one job per REST_MAX, so a park run that did not park cannot be retried within the rest window."""
+    if t["section"] not in BOARDS[t["board"]][1] or t["key"] in SKIP[0].hard:
+        return False
+    when = stamp_time((park_ledger() if ledger is None else ledger).get(t["key"], ""))
+    return when is None or (dt.datetime.now(dt.timezone.utc) - when).total_seconds() > REST_MAX
+
+
+def record_park(n, key):
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / "parks", "a") as f:
+        f.write(f"{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} {key} {n}\n")
+
+
 def try_claim(n, t, source, dry):
     """Claim t for Runner N. Returns True when it is ours, raises Pick for an own ticket found by a refusal."""
-    if dry:
+    adopting = t["board"] == "2060" or source in ("orphan", "incident-takeover")
+    if dry and adopting:
         record_claim(n, t["key"], True)
         return True
-    if t["board"] == "2060" or source in ("orphan", "incident-takeover"):
+    if adopting:
         ok = adopt(n, t, "Adopted from a runner that no longer works it; staying on it until it is live" if source != "board" else "Picked by fleet/pick")
         if ok and t["board"] == "2060" and t["section"] == "Todo":
             ceo(n, "task", "move", t["key"], "--section", "Doing")
         if ok:
             record_claim(n, t["key"], False)
         return ok
-    rc, out = ship_claim(n, t["key"], source == "incident")
+    rc, out = ship_claim(n, t["key"], source == "incident", dry)
     if rc == 0:
-        record_claim(n, t["key"], False)
+        record_claim(n, t["key"], dry)
         return True
     if rc == 4 and source != "incident":
         own = held_ticket(out)
         mine = fetch_ticket(own) if own else None
         if mine and own not in SKIP[0] and not held_back(mine, own=True):
             raise Pick(mine, "own")
+        if mine and "unfinished merged work" in out and parkable(mine):  # an open-PR hold is not cleared by parking
+            raise Pick(mine, "park")
         if mine:
-            log(f"hold {t['key']}: unfinished {own} rests or waits (IDLE and unchanged, or BlockedBy open); park it with fleet/park")
+            log(f"hold {t['key']}: unfinished {own} rests or waits (IDLE and unchanged, or BlockedBy open); its park job already ran "
+                f"within the rest window or {own} is not in a building column. Park it with fleet/park")
             return False
         log(f"hold {t['key']}: {out.strip().splitlines()[-1] if out.strip() else 'no reason'}")
     return False
@@ -811,6 +848,10 @@ def render(n, t, source):
     ln = lane(t)
     brief_file = HERE / "briefs" / {"app": "app.txt", "ci": "ci.txt", "infra": "infra.txt", "sf": "sf.txt"}[ln]
     brief = (brief_file.read_text() + (HERE / "briefs" / "park.txt").read_text().rstrip()).replace("$n", str(n))
+    if source == "park":
+        brief_file = HERE / "briefs" / "park-job.txt"
+        brief = brief_file.read_text().replace("$n", str(n)) + "\n" + (HERE / "briefs" / "park.txt").read_text().rstrip()
+        label, model, effort = PARK_BRAIN
     if source == "incident":
         brief_file = HERE / "briefs" / "incident.txt"
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
@@ -820,11 +861,39 @@ def render(n, t, source):
             "brain": label, "model": model, "effort": effort, "labels": t["labels"]}
 
 
+def self_test():
+    """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
+    job's brief and model. Needs no board, no network."""
+    global STATE
+    import tempfile
+    STATE = Path(tempfile.mkdtemp())
+    t = {"key": "HTPR-1", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium"}
+    SKIP[0] = Skip(set(), set())
+    assert parkable(t), "a resting building ticket with no job yet is due one"
+    record_park(3, "HTPR-1")
+    assert not parkable(t), "a job handed out within REST_MAX is not repeated, whatever its outcome"
+    old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=REST_MAX + 60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert parkable(t, {"HTPR-1": old}), "the window ends after REST_MAX"
+    assert not parkable({**t, "section": "Bugs"}, {}), "only building columns"
+    assert parkable({**t, "key": "HTPR-9"}), "a job for one ticket does not block another"
+    SKIP[0] = Skip({"HTPR-1"}, set())
+    assert not parkable(t, {}), "another runner's claim is never parked"
+    SKIP[0] = Skip(set(), set())
+    job = render(5, t, "park")
+    assert job["source"] == "park" and job["model"] == "grok-4.7-medium" and job["brain"] == "brain-light"
+    assert "PARK RUN" in job["brief"] and "fleet/park <TICKET> --waits-on" in job["brief"] and "$n" not in job["brief"]
+    assert "ENGINE" not in job["brief"] and job["brief_file"].endswith("briefs/park-job.txt")
+    assert "PARK RUN" not in render(5, t, "board")["brief"]
+    print("fleet/pick self-test ok")
+
+
 def main():
     global SNAP
     args = [a for a in sys.argv[1:]]
     if "--check-access" in args:
         return check_access()
+    if args == ["--self-test"]:
+        return self_test()
     dry = "--dry-run" in args
     pos = [a for a in args if not a.startswith("--")]
     if len(pos) != 1 or not pos[0].isdigit() or not 1 <= int(pos[0]) <= max(RUNNERS, 1):
@@ -841,8 +910,10 @@ def main():
             t, source = choose(n, dry)
         except Pick as p:
             t, source = p.t, p.source
-        if source in ("own", "cross-qa"):
+        if source in ("own", "cross-qa", "park"):
             record_claim(n, t["key"], dry)
+        if source == "park" and not dry:
+            record_park(n, t["key"])
         pick = render(n, t, source)
     except (RuntimeError, OSError, ValueError) as e:
         sys.exit(f"fleet/pick: board or claims unreadable ({type(e).__name__}: {e}); do not pick new work")
