@@ -39,7 +39,7 @@ FREEZE = Path(os.environ.get("SHIP_FREEZE_FILE") or RUNNER_STATE / "app-freeze")
 HYPERTASK_REPO = HOME / "projects/hypertask"
 PROJECTS = HOME / "projects"
 LANE_CAP = 4
-CLAIM_TTL = 1800
+CLAIM_TTL = 3 * 3600 + 600  # a run may last 3h (timeout in fleet/runner)
 CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
 
