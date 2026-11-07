@@ -45,7 +45,7 @@
   },
   "2108": {
     "board": 2108, "lead": "HT Growth Lead", "alarm_board": 4060,
-    "repos": ["hypertask-ai/astro", "hypertask-ai/docs"],
+    "repos": ["hypertask-ai/astro"],
     "workers": [{"agent": "HT Growth Lead", "always": true}]
   },
   "2128": {
