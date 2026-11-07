@@ -43,6 +43,16 @@
     "repos": ["valentinyeo/ai-chatbot", "hypertask-ai/docs"],
     "workers": [{"agent": "HT Support Lead", "always": true}]
   },
+  "2108": {
+    "board": 2108, "lead": "HT Growth Lead", "alarm_board": 4060,
+    "repos": ["hypertask-ai/astro", "hypertask-ai/docs"],
+    "workers": [{"agent": "HT Growth Lead", "always": true}]
+  },
+  "2128": {
+    "board": 2128, "lead": "HT Growth Lead", "alarm_board": 4060,
+    "repos": [],
+    "workers": [{"agent": "HT Growth Lead", "always": true}]
+  },
   "2060/multi-bot": {
     "board": 2060, "view": "6334f64c-8a04-449d-a7ad-7fcb5be23b4a", "lead": "Multi Bot Opus Lead", "alarm_board": 2060,
     "repos": ["valentinyeo/multiprompt"],
