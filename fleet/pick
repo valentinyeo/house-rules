@@ -14,9 +14,9 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      an incident it is not running right now (log) is handed it again; an incident another runner is running is left alone.
   a. my own ticket in a building column on any board
   b. an orphan in a building column (nobody holds it, or only a retired login, or a runner the pacer stopped)
-  c. the PR queue (pr-drain-pick rules)
+  c. Urgent new work on any board, then the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
-  e. new work: board 15 (ai-feedback included), then 2060, then 4060
+  e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 4060
   f. the rest of the CI or infra lane, same cap
 One runner holds one ticket until it is live. brain-extra-hard is skipped everywhere.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
@@ -819,18 +819,7 @@ def choose(n, dry):
         if try_claim(n, t, "orphan", dry):
             return t, "orphan"
 
-    # c. PR queue
-    for p, key in pr_candidates(n, others):
-        t = fetch_ticket(key)
-        if (not t or t["key"] in skip or set(t["labels"]) & (SKIP_ALL | {"design-pass"})
-                or any(live_runner(h) and h != me for h in names(t))):
-            continue
-        if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
-            continue
-        if try_claim(n, t, "pr", dry):
-            return t, "pr"
-
-    # d, e, f. new work
+    # new work, ordered by priority across every board (Valentin 2026-11-07: use the priority field)
     new = [t for t in SNAP["tickets"] if t["key"] not in skip and t["key"] not in mine_claim and eligible_new(t)
            and free_for(t, me)]
     new.sort(key=lambda t: (rank(t), t["created"]))
@@ -850,6 +839,23 @@ def choose(n, dry):
                 return t
         return None
 
+    # c0. Urgent app work on any board goes before the PR queue
+    if not frozen:
+        t = attempt(sorted((x for x in app_new if x["prio"] == "Urgent"), key=lambda t: (t["created"], BOARD_ORDER[t["board"]])))
+        if t:
+            return t, "board"
+
+    # c. PR queue
+    for p, key in pr_candidates(n, others):
+        t = fetch_ticket(key)
+        if (not t or t["key"] in skip or set(t["labels"]) & (SKIP_ALL | {"design-pass"})
+                or any(live_runner(h) and h != me for h in names(t))):
+            continue
+        if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
+            continue
+        if try_claim(n, t, "pr", dry):
+            return t, "pr"
+
     if not full():
         # one relations read per ticket is slow, so only the top BLOCK_LOOKUPS non-Urgent tickets are checked
         pref = [t for t in lane_new if t["prio"] == "Urgent"]
@@ -858,7 +864,7 @@ def choose(n, dry):
         if t:
             return t, "ci-lane"
     if not frozen:
-        t = attempt(sorted(app_new, key=lambda t: (BOARD_ORDER[t["board"]], rank(t), t["created"])))
+        t = attempt(sorted(app_new, key=lambda t: (rank(t), BOARD_ORDER[t["board"]], t["created"])))
         if t:
             return t, "board"
     if not full():
