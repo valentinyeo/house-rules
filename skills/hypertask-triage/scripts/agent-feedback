@@ -234,7 +234,7 @@ def main():
     if a.dry_run:
         print(f"would file on board {board} section {section}: {title}")
         return
-    labels = f"Infra,{label},Feedback: {cluster(tool + ' ' + note)}" if own else f"{label},brain-medium"
+    labels = f"Infra,{label},brain-light,Feedback: {cluster(tool + ' ' + note)}" if own else f"{label},brain-medium"
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(description(a.kind, place))
     r = run("vcc", "task", "create", "--project", str(board), "--section", section,
