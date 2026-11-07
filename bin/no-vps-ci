@@ -15,7 +15,15 @@ for u in $units; do
   if [ $check = 1 ]; then echo "FOUND $u ($state, $active)"; continue; fi
   sudo -n systemctl disable --now "$u" >/dev/null 2>&1 && echo "$(date -u +%FT%TZ) off $u" >> "$LOG" || echo "$(date -u +%FT%TZ) FAIL $u" >> "$LOG"
 done
-for pid in $(pgrep -f 'Runner\.(Listener|Worker)|act_runner'); do
+uunits=$(systemctl --user list-unit-files --no-legend 'act-runner*' 'actions.runner*' 2>/dev/null | awk '{print $1}')
+for u in $uunits; do
+  state=$(systemctl --user is-enabled "$u" 2>/dev/null); active=$(systemctl --user is-active "$u" 2>/dev/null)
+  [ "$state" != enabled ] && [ "$active" != active ] && continue
+  found=1
+  if [ $check = 1 ]; then echo "FOUND user $u ($state, $active)"; continue; fi
+  systemctl --user disable --now "$u" >/dev/null 2>&1 && echo "$(date -u +%FT%TZ) off user $u" >> "$LOG" || echo "$(date -u +%FT%TZ) FAIL user $u" >> "$LOG"
+done
+for pid in $(pgrep -f '[R]unner\.(Listener|Worker)|[a]ct_runner|[a]ct-runner run'); do
   found=1
   if [ $check = 1 ]; then echo "FOUND pid $pid $(ps -o user=,args= -p "$pid" | cut -c1-100)"; continue; fi
   echo "$(date -u +%FT%TZ) kill $pid $(ps -o user=,args= -p "$pid" | cut -c1-100)" >> "$LOG"
