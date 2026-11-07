@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scopes  # noqa: E402
 
 KEY = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
+NOT_KEYS = {"DEV", "RUNNER", "AGENT", "CURSOR", "CODEX", "WORKER", "INFRA-RUNNER"}
 BOTS = ("dependabot", "renovate")
 BUILD = {"in progress", "doing", "ai review"}
 QUEUE = {"bugs", "improvements", "features", "backlog", "todo"}
@@ -55,9 +56,15 @@ def open_prs(repo):
         return []
 
 
+def first_key(text):
+    for k in KEY.findall(text):
+        if k.rsplit("-", 1)[0] not in NOT_KEYS:
+            return k
+    return None
+
+
 def ticket_key(pr):
-    m = KEY.search(pr["title"]) or KEY.search(pr["headRefName"].upper())
-    return m.group(1) if m else None
+    return first_key(pr["title"]) or first_key(pr["headRefName"].upper())
 
 
 def is_bot(pr):
