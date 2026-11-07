@@ -15,15 +15,22 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      takes it first, whatever it holds (the house rule names grok-4.7 high; other engines skip step 0). Lane cap, app freeze, rests, queue brake and holds do not apply (ship-claim runs with
      SHIP_CLAIM_INCIDENT=1). Model grok-4.7-high, brief briefs/incident.txt in front of the app brief. A runner assigned to
      an incident it is not running right now (log) is handed it again; an incident another runner is running is left alone.
-  a. my own ticket in a building column on any board
-  b. an orphan in a building column (nobody holds it, or only a retired login, or a runner the pacer stopped)
+  a. my own ticket in a building column on any board, QA included (the merging runner does the live check; a design-pass
+     QA ticket waits for another runner's cross-qa)
+  b. an orphan in a building column, QA included (nobody holds it, or only a retired login, or a runner the pacer
+     stopped that runs nothing now; a stopped runner keeps the ticket it is running until that run ends)
+  WIP cap: the pool's pipeline (building columns on every fleet board plus new-work tickets with an open PR, one unit
+     per ticket, minus incidents, open BlockedBy, waits on a person, design-pass and work outside the pool) at or over
+     the live runners closes c0, d, e and f. Then only the PR queue and new-work tickets with an open PR remain.
+     Logged as "wip: N of M, new work closed".
   c. Urgent new work on any board, then the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
   e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 4060
   f. the rest of the CI or infra lane, same cap
 One runner holds one ticket until it is live. brain-extra-hard is skipped everywhere.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
-(updated after the IDLE end) or for 3 days at most; a ticket with a BlockedBy link is governed by that link instead.
+(updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
+a ticket with a BlockedBy link is governed by that link instead.
 A ticket with an open BlockedBy link, in Valentin Review or waiting on Valentin is never picked (fleet/park puts them there).
 A runner whose own unfinished ticket rests or waits (ship-claim HOLD names it) gets that ticket back with source "park" and
 briefs/park-job.txt: decide the fleet/park mode, run it, end. A ticket is handed back at most once per REST_MAX (ledger
@@ -65,6 +72,8 @@ CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
 REST_MAX = 3 * 86400  # an IDLE rest never outlives this, changed or not
 REST_GRACE = 60  # seconds: the run's own last write may land just after its IDLE end
+# an IDLE rest on a ticket nobody waits on (no BlockedBy, no Valentin wait) ends after this: back to its holder or the orphan lane
+SHORT_REST = 2 * 3600
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
 
@@ -249,9 +258,20 @@ def paced_off(n):
         return False
 
 
+RUNNING = {}
+
+
+def running(n):
+    if n not in RUNNING:
+        RUNNING[n] = active_run(n)
+    return RUNNING[n]
+
+
 def live_runner(name):
+    """Runner N works: the pacer has not stopped it, or it still runs the ticket it had when the stop came (the stop
+    lands between tickets). A stopped runner that runs nothing holds its tickets in name only: they are orphans."""
     m = re.fullmatch(r"runner (\d+)", name)
-    return bool(m) and 1 <= int(m[1]) <= RUNNERS and not paced_off(int(m[1]))
+    return bool(m) and 1 <= int(m[1]) <= RUNNERS and (not paced_off(int(m[1])) or running(int(m[1])) is not None)
 
 
 def legacy_alive(name):
@@ -541,11 +561,13 @@ def resting(n, dry):
             continue
         t = by_key(key)
         if t is None:
-            if (now - when).total_seconds() < 7200:
+            if (now - when).total_seconds() < SHORT_REST:
                 rest.add(key)
             continue
         changed = stamp_time(t["updated"])
         if changed and (changed - when).total_seconds() > REST_GRACE:
+            continue
+        if (now - when).total_seconds() > REST_GRACE + SHORT_REST and not t["waiting"] and t["section"] != "Valentin Review":
             continue
         rest.add(key)
     return rest
@@ -704,8 +726,8 @@ def try_claim(n, t, source, dry):
     return False
 
 
-def pr_candidates(n, taken):
-    """pr-drain-pick rules: draft PRs and red PRs idle for 6 hours, unowned or with a stale claim."""
+def open_prs():
+    """Every open PR to production on hypertask-ai/hypertask, read once per pick."""
     if SNAP["prs"] is None:
         tok = subprocess.run(["gh-app-token"], capture_output=True, text=True).stdout.strip()
         if not tok:
@@ -721,6 +743,19 @@ def pr_candidates(n, taken):
                         "red": any(c.get("conclusion") in ("FAILURE", "TIMED_OUT") or c.get("state") in ("FAILURE", "ERROR")
                                    for c in p.get("statusCheckRollup") or [])} for p in prs]
         save_cache(SNAP)
+    return SNAP["prs"]
+
+
+def pr_ticket(p):
+    if p["branch"].startswith(("dependabot/", "renovate/")):
+        return None
+    m = TICKET.search(p["title"]) or TICKET.search(p["branch"].upper())
+    return m[0] if m else None
+
+
+def pr_candidates(n, taken):
+    """pr-drain-pick rules: draft PRs and red PRs idle for 6 hours, unowned or with a stale claim."""
+    open_prs()
     now = dt.datetime.now(dt.timezone.utc)
     frozen = FREEZE.exists()
     out = []
@@ -843,6 +878,69 @@ def incident_step(n, dry):
     return None
 
 
+# ---------------------------------------------------------------- WIP cap (one runner, one ticket, until it is live)
+
+def live_workers():
+    return [m for m in range(1, RUNNERS + 1) if live_runner(f"runner {m}")]
+
+
+def pool_skip(workers):
+    """Brains no live runner's engine can do: nobody in the pool can finish those, so they are not the pool's pipeline."""
+    can = {b for m in workers for b in ENGINES.get(runner_engine(m) or "", {}).get("brains", {})}
+    return BASE_SKIP | {f"brain-{b}" for b in ("light", "medium", "hard") if b not in can}
+
+
+def pipeline_reason(t, skip_brains, pr):
+    """Why t is not a unit of the pool's pipeline, or None when it is. A unit is work some lane that stays open under the
+    cap can take (own, orphan, cross-qa, PR queue, finish), so a closed cap can always drain."""
+    labels = set(t["labels"])
+    if INCIDENT_LABEL in labels:
+        return "incident"
+    if labels & skip_brains:
+        return "brain"
+    if t["waiting"] or t["section"] == "Valentin Review":
+        return "waits on a person"
+    if any(not re.fullmatch(r"runner \d+", h) and not retired(h) for h in names(t)):
+        return "outside the pool"
+    if t["key"] in SNAP["rel"] and blocked(t):
+        return "blocked"
+    held = any(live_runner(h) for h in names(t))
+    if t["section"] in BOARDS[t["board"]][1]:
+        if "design-pass" in labels:
+            return "design-pass"
+        if not held and not orphan_ok(t):
+            return "not for the pool"
+        return None
+    if pr and not held and eligible_new(t):
+        return None
+    return "no lane"
+
+
+def pipeline():
+    """(units, workers, excluded {reason: [keys]}): tickets in a building column on any fleet board plus tickets in a
+    new-work column with an open PR, one unit per ticket key, against live pool runners."""
+    workers = live_workers()
+    skip_brains = pool_skip(workers)
+    with_pr = {pr_ticket(p) for p in open_prs()} - {None}
+    units, excluded = set(), {}
+    for t in SNAP["tickets"]:
+        building = t["section"] in BOARDS[t["board"]][1]
+        if not building and t["key"] not in with_pr:
+            continue
+        why = pipeline_reason(t, skip_brains, t["key"] in with_pr)
+        if why:
+            excluded.setdefault(why, []).append(t["key"])
+        else:
+            units.add(t["key"])
+    return units, workers, excluded
+
+
+def wip_line(units, workers, excluded):
+    left = ", ".join(f"{why} {len(keys)}" for why, keys in sorted(excluded.items()))
+    state = "closed" if len(units) >= len(workers) else "open"
+    return f"wip: {len(units)} of {len(workers)}, new work {state}" + (f" (not counted: {left})" if left else "")
+
+
 def choose(n, dry):
     hit = incident_step(n, dry)
     if hit:
@@ -856,7 +954,9 @@ def choose(n, dry):
     building = [t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][1]]
 
     # a. own ticket
-    for t in sorted((t for t in building if me in names(t) and t["section"] != "QA" and not set(t["labels"]) & SKIP_ALL),
+    # a merged ticket waiting for its live check is its merging runner's; a design-pass one needs another runner's QA
+    for t in sorted((t for t in building if me in names(t) and not set(t["labels"]) & SKIP_ALL
+                     and not (t["section"] == "QA" and "design-pass" in t["labels"])),
                     key=lambda t: (BOARD_ORDER[t["board"]], rank(t))):
         if t["key"] not in skip and not held_back(t, own=True):
             return t, "own"
@@ -879,6 +979,13 @@ def choose(n, dry):
         if try_claim(n, t, "orphan", dry):
             return t, "orphan"
 
+    # WIP cap: while the pool's pipeline is at or over its live runners, nothing new starts; only the PR queue and
+    # tickets that already have an open PR (finish before you start)
+    units, workers, excluded = pipeline()
+    wip = wip_line(units, workers, excluded)
+    log(wip)
+    closed = len(units) >= len(workers)
+
     # new work, ordered by priority across every board (Valentin 2026-11-07: use the priority field)
     new = [t for t in SNAP["tickets"] if t["key"] not in skip and t["key"] not in mine_claim and eligible_new(t)
            and free_for(t, me)]
@@ -900,7 +1007,7 @@ def choose(n, dry):
         return None
 
     # c0. Urgent app work on any board goes before the PR queue
-    if not frozen:
+    if not frozen and not closed:
         t = attempt(sorted((x for x in app_new if x["prio"] == "Urgent"), key=lambda t: (t["created"], BOARD_ORDER[t["board"]])))
         if t:
             return t, "board"
@@ -916,6 +1023,14 @@ def choose(n, dry):
         if try_claim(n, t, "pr", dry):
             return t, "pr"
 
+    if closed:
+        with_pr = {pr_ticket(p) for p in open_prs()}
+        finish = [t for t in new if t["key"] in units and t["key"] in with_pr
+                  and not (in_lane(t) and full()) and not (frozen and not in_lane(t))]
+        t = attempt(sorted(finish, key=lambda t: (rank(t), t["created"])))
+        if t:
+            return t, "pr"
+        raise SystemExit(f"none: {wip}")
     if not full():
         # one relations read per ticket is slow, so only the top BLOCK_LOOKUPS non-Urgent tickets are checked
         pref = [t for t in lane_new if t["prio"] == "Urgent"]
@@ -1032,7 +1147,85 @@ def self_test():
     assert brain(hard)[1:] == ("gpt-6.1-sol", "medium"), "the per-engine allocation sets the codex model"
     set_engine("cursor")
     assert brain(hard)[1] == "grok-4.7-high", "a per-engine allocation without cursor: the built-in map, not the old shape"
+    wip_self_test()
     print("fleet/pick self-test ok")
+
+
+def wip_self_test():
+    """The stop lands between tickets, the short rest, and the WIP cap: closed means only own, orphan, PR queue and
+    finish work, and every counted unit is something an open lane can take."""
+    global RUNNERS, FREEZE, SNAP, try_claim
+    now = dt.datetime.now(dt.timezone.utc)
+    iso = lambda h: (now - dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    held = {"key": "HTPR-1", "board": "15", "section": "In Progress", "labels": [], "holders": [("runner 12", True)]}
+    RUNNING.clear()
+    (STATE / "stop-12").write_text("pacer\n")
+    (STATE / "runner-12.log").write_text(f"{iso(0.5)} cursor: HTPR-1 composer-2.5 medium\n")
+    assert not orphan(held), "a stopped runner keeps the ticket it is running: the stop lands between tickets"
+    RUNNING.clear()
+    with open(STATE / "runner-12.log", "a") as f:
+        f.write(f"{iso(0.1)} end\n")
+    assert orphan(held), "a stopped runner that runs nothing holds its tickets in name only"
+    RUNNING.clear()
+    (STATE / "stop-12").unlink()
+    (STATE / "runner-12.log").unlink()
+
+    RUNNERS, FREEZE = 3, STATE / "app-freeze"
+    (STATE / "stop-3").write_text("pacer\n")
+
+    def tk(key, section, *holders, labels=(), waiting=False):
+        return {"key": key, "idx": 1, "board": PREFIX_BOARD[key.split("-")[0]], "section": section, "title": "x",
+                "labels": list(labels), "prio": "Medium", "holders": [[h, True] for h in holders], "waiting": waiting,
+                "subs": False, "paid": False, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"}
+
+    def pr(num, key, draft=False):
+        return {"number": num, "title": f"{key} x", "draft": draft, "branch": f"runner-1/{key.lower()}",
+                "updated": iso(0.2), "red": False}
+
+    SNAP = {"tickets": [tk("HTPR-10", "In Progress"), tk("HTPR-11", "In Progress"), tk("HTPR-12", "In Progress", waiting=True)],
+            "rel": {}, "prs": [], "incidents": []}
+    (STATE / "runner-1.idle").write_text(f"{iso(3)} HTPR-10\n{iso(1)} HTPR-11\n{iso(3)} HTPR-12\n")
+    assert resting(2, True) == {"HTPR-11", "HTPR-12"}, "an IDLE rest on work nobody waits on ends after SHORT_REST"
+    (STATE / "runner-1.idle").unlink()
+
+    tickets = [tk("HTPR-20", "In Progress", "runner 9"), tk("HTPR-21", "AI Review", "runner 1"),
+               tk("HTPR-22", "QA", labels=["design-pass"]), tk("HTPR-23", "In Progress", labels=["incident"]),
+               tk("HTPR-24", "In Progress", "postbox dev"), tk("HTPR-25", "Bugs"), tk("HTPR-26", "Bugs"),
+               tk("HTPR-27", "AI Review", "runner 9"), tk("HYCI-1", "Backlog"), tk("HTPR-29", "QA", "runner 3")]
+    SNAP = {"tickets": tickets, "rel": {t["key"]: [[], []] for t in tickets}, "prs": [pr(999991, "HTPR-21"),
+            pr(999992, "HTPR-25"), pr(999993, "HTPR-21")], "incidents": [], "open": {}}
+    SNAP["rel"]["HTPR-27"] = [["HYCI-1"], []]
+    units, workers, excluded = pipeline()
+    assert workers == [1, 2], "a runner the pacer stopped is no worker"
+    assert units == {"HTPR-20", "HTPR-21", "HTPR-25", "HTPR-29"}, units
+    assert excluded == {"design-pass": ["HTPR-22"], "incident": ["HTPR-23"], "outside the pool": ["HTPR-24"],
+                        "blocked": ["HTPR-27"]}, excluded
+    assert wip_line(units, workers, excluded).startswith("wip: 4 of 2, new work closed"), wip_line(units, workers, excluded)
+
+    claimed = []
+    real_claim = try_claim
+    try_claim = lambda n, t, source, dry: claimed.append((t["key"], source)) or True
+    try:
+        t, source = choose(2, True)
+        assert source == "orphan" and t["key"] in ("HTPR-20", "HTPR-29"), (t["key"], source)
+        SNAP["tickets"] = [x for x in tickets if x["key"] not in ("HTPR-20", "HTPR-23", "HTPR-29")]
+        t, source = choose(2, True)
+        assert (t["key"], source) == ("HTPR-25", "pr"), (t["key"], source, "closed: a new-work ticket with an open PR is finished, not started")
+        SNAP["tickets"].append(tk("HTPR-31", "In Progress", "runner 1"))
+        SNAP["prs"] = [pr(999991, "HTPR-21")]
+        try:
+            choose(2, True)
+            raise AssertionError("closed WIP started new work")
+        except SystemExit as e:
+            assert "wip: 2 of 2, new work closed" in str(e), e
+        SNAP["tickets"] = [x for x in SNAP["tickets"] if x["key"] != "HTPR-31"]
+        t, source = choose(2, True)
+        assert source == "board" and t["key"] in ("HTPR-25", "HTPR-26"), "open WIP: new work starts again"
+        SNAP["tickets"].append(tk("HTPR-32", "QA", "runner 2"))
+        assert choose(2, True)[1] == "own", "a merged ticket waiting for its live check goes back to its runner"
+    finally:
+        try_claim = real_claim
+        (STATE / "stop-3").unlink()
 
 
 def main():
