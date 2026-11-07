@@ -3,6 +3,7 @@
   "15": {
     "board": 15, "lead": "HT Product Lead", "alarm_board": 4060,
     "repos": ["hypertask-ai/hypertask"],
+    "pick_logs": {"dir": "~/.local/state/ht-or-runners", "agent": "Runner {n}"},
     "workers": [
       {"tmux_prefix": "ht-or-runner-", "agent": "Runner {n}"},
       {"agent": "HT Design Builder", "always": true},

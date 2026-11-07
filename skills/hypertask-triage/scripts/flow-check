@@ -25,6 +25,11 @@ open over 6 hours, not Urgent or not In Progress; CI-DONE means CI is fixed
 but the ticket still waits; CI-NO-TICKET is a CI failure blocker with no CI
 ticket, so CI Boss never hears of it.
 
+Spin: the runner picker logs each pick. A ticket picked 6 or more times
+in 12 hours without a column change is SPINNING: its runner waits on
+something that never comes, so the tick restarts it on the same ticket.
+Only scopes with pick_logs in scopes.json measure it.
+
 Valentin, 2026-11-05: "20 tickets in progress. That's impossible. We don't
 have that many runners."
 
@@ -36,6 +41,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,6 +83,77 @@ BLOCKER = re.compile(r"^\W*(blocker|blocked|waiting on ci|ci block)", re.I)
 CI_FAIL = re.compile(r"\b(ci|feature-flag-gate|test-shard\d*|visual regression|workflow|hosted (?:retry|run|check)\w*"
                      r"|github checks?|check runs?|required checks?)\b[^.]{0,80}"
                      r"\b(fail\w*|red|stuck|timed out|cancel\w*|queued)\b", re.I)
+
+
+SPIN_HOURS = 12
+SPIN_PICKS = 6
+PICK = re.compile(r"^(\S+Z) pick: ([A-Z][A-Z0-9]*-\d+) \S+ \S+ \((\S+)\)$")
+
+
+def log_picks(text, runner):
+    """(ticket, runner, utc time) per pick line; tmux captures and other noise do not match."""
+    out = []
+    for line in text.splitlines():
+        hit = PICK.match(line.strip())
+        if hit:
+            out.append((hit[2], runner, datetime.fromisoformat(hit[1].replace("Z", "+00:00"))))
+    return out
+
+
+def pool_picks(scope):
+    """Every pick in the scope's runner logs. Only runner-N.log files, never runner-N.latest.log."""
+    spec = scope.get("pick_logs")
+    if not spec:
+        return None
+    folder = Path(spec["dir"]).expanduser()
+    picks = []
+    for path in sorted(folder.glob("runner-*.log")):
+        m = re.fullmatch(r"runner-(\d+)\.log", path.name)
+        if not m:
+            continue
+        text = subprocess.run(["grep", "-a", " pick: ", str(path)], capture_output=True).stdout.decode("utf-8", "replace")
+        picks += log_picks(text, spec["agent"].replace("{n}", m.group(1)))
+    return picks
+
+
+def spinning(picks, moved, now):
+    """{ticket: (runner, picks)} for tickets picked SPIN_PICKS+ times since max(now - SPIN_HOURS, last column move).
+    moved: {ticket: utc time of its last column change}; a missing ticket counts the whole window."""
+    since = now.timestamp() - SPIN_HOURS * 3600
+    counts = {}
+    for ticket, runner, when in picks:
+        floor = max(since, moved[ticket].timestamp()) if moved.get(ticket) else since
+        if when.timestamp() > floor:
+            counts.setdefault(ticket, Counter())[runner] += 1
+    return {t: (c.most_common(1)[0][0], sum(c.values())) for t, c in counts.items() if sum(c.values()) >= SPIN_PICKS}
+
+
+def spin_reason(log):
+    text = next((a.get("text") or "" for a in log if not (a.get("text") or "").lower().startswith("board-health")), "")
+    return " ".join(re.sub(r"<[^>]+>", " ", text).split()[:10])
+
+
+def spins(scope, info, now):
+    """SPINNING rows. info: {ticket: (agent log, column moved at)} already fetched for the flow columns."""
+    picks = pool_picks(scope)
+    if picks is None:
+        return None
+    window = now.timestamp() - SPIN_HOURS * 3600
+    often = Counter(t for t, _, when in picks if when.timestamp() > window)
+    fresh = [t for t, n in often.items() if n >= SPIN_PICKS]
+    with ThreadPoolExecutor(6) as ex:
+        known = dict(info)
+        known.update({num: (log, moved) for num, log, moved in ex.map(
+            lambda n: details({"ticketNumber": n}), [t for t in fresh if t not in info])})
+    moved = {}
+    for t in fresh:
+        stamp = known[t][1]
+        try:
+            moved[t] = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            pass
+    return [{"ticket": t, "runner": r, "picks": n, "reason": spin_reason(known[t][0])}
+            for t, (r, n) in sorted(spinning(picks, moved, now).items(), key=lambda x: -x[1][1])]
 
 
 def ci_block(log):
@@ -308,6 +385,7 @@ def run(key):
                       "writer": writer(t)} for t in bare],
         "qa": len(cols.get("QA", [])),
         "qa_cap": cfg.get("qa_cap"),
+        "spin": spins(scope, info, now),
     }
     return rows, summary
 
@@ -360,6 +438,9 @@ def show(rows, s):
             seen = "never on these CI tickets" if h is None else f"last note {h:.0f}h ago on these CI tickets"
             quiet = h is None or h > CI_SLOW_HOURS
             print(f"{'CI-BOSS-QUIET' if quiet else 'CI-BOSS'}: {seen}")
+    for r in s.get("spin") or []:
+        print(f"SPINNING     {url.format(b=s['board'], n=r['ticket'].rsplit('-', 1)[1])}  {r['runner']} picked it "
+              f"{r['picks']} times, no column change. Last note: {r['reason']}")
     by_col = {}
     for t in s["no_brain"]:
         by_col[t["column"]] = by_col.get(t["column"], 0) + 1
@@ -408,6 +489,20 @@ def self_test():
     assert ci_verdict(task(1, pri="Normal"), now)[0] == "CI-SLOW"
     assert ci_verdict(task(1, sec="Later (parked)"), now)[0] == "CI-SLOW"
     assert ci_verdict(task(1, sec="Done"), now)[0] == "CI-DONE"
+    text = "\n".join(f"2026-11-05T{h:02d}:00:00Z pick: HTPR-1 gpt-6.1-sol medium (own)" for h in range(14, 20))
+    text += "\n2026-11-05T15:00:00Z pick: HTPR-2 gpt-6.1-sol high (own)" * 5
+    text += "\n  2026-11-05T16:00:00Z pick: HTPR-3 gpt-6.1-sol high (cross-qa)" * 6
+    text += "\nxx pick: HTPR-1 x\n2026-11-05T16:00:00Z pr-drain-pick: HTPR-1 a b (own)\n2026-11-04T09:00:00Z pick: HTPR-4 a b (own)"
+    picks = log_picks(text, "Runner 7")
+    assert len(picks) == 6 + 5 + 6 + 1, f"noise lines counted as picks: {len(picks)}"
+    spun = spinning(picks, {}, now)
+    assert spun == {"HTPR-1": ("Runner 7", 6), "HTPR-3": ("Runner 7", 6)}, f"6 picks must spin, 5 must not: {spun}"
+    moved = {"HTPR-1": datetime(2026, 11, 5, 16, 30, tzinfo=timezone.utc)}
+    assert "HTPR-1" not in spinning(picks, moved, now), "a ticket that changed column still spins"
+    assert "HTPR-4" not in spinning(picks * 6, {}, now), "picks older than 12 hours counted"
+    assert spin_reason([{"text": "board-health fix: ready to close"}, {"text": "<p>Waiting on an independent cross QA run</p>"}]) \
+        == "Waiting on an independent cross QA run", "own board-health note used as the reason"
+    assert spins({"key": "4060"}, {}, now) is None, "a scope with no pick logs must not measure spin"
     print("SELF_TEST_OK")
 
 

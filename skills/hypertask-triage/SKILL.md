@@ -14,7 +14,7 @@ Default board: your fleet's product board (Hypertask: 15). Software Factory: its
 
 ## How often to run it
 Two layers. The script runs on a timer, the chief session works what it cannot fix.
-- Script, every hour at :05: timer `ht-board-health` runs `board-health --fix --apply` for 15 and 4060, `--apply` for 11514, and a read-only run for 2060 and each Software Factory view scope. Safe fixes happen even when no chief is awake. Output: `~/.local/state/board-health/last-<scope>.log` (`/` becomes `-`). Alarms bump at most once a day.
+- Script, every hour at :05: timer `ht-board-health` runs `board-health --fix --apply --dispatch` for 15 and 4060, `--apply` for 11514, and a read-only run for 2060 and each Software Factory view scope. Safe fixes happen even when no chief is awake. Output: `~/.local/state/board-health/last-<scope>.log` (`/` becomes `-`). Alarms bump at most once a day.
 - Chief session, every hour at :20: read the last logs, work each red line. The script runs at :05, so the log is fresh by :20. A session cron dies with its session, so check `CronList` at every shift start and recreate it when missing: `CronCreate` cron `20 * * * *`, prompt `/hypertask-triage step 0: read ~/.local/state/board-health/last-*.log, work every red line, rerun board-health until GREEN`. Never more often: runners take about an hour per ticket.
 - Full clean-up (steps 1 to 7): once a day at 08:00 London, a second session cron `0 8 * * *`, prompt `/hypertask-triage`. The blocker check also runs alone at 07:30.
 - Right away after big changes: a runner restart or a batch of merges.
@@ -60,6 +60,20 @@ Each line shows "Was N, now M" since the last run. `TREND` shows tickets being b
 - A lead's or CI Boss's line: one agent-lane note on its alarm ticket, with the tickets. Never do runner work yourself.
 - Red over a day prints `ESCALATE`. `--apply` files or bumps one Urgent "Board health" alarm on 4060.
 - Same line red on three runs in a row? The owner's loop is broken. Fix that loop's skill or script, not the tickets.
+  `--dispatch` does this by itself. It files one ticket on 4060, "Board health: <scope> <check> red 3 runs".
+  Infra Runners pull it and fix the tool, script or picker behind the line. CI lines go to 11514 for CI Runners.
+  A rerun adds nothing. Still red a day later: one +1. Line green again: a green note on that ticket.
+
+The loop, every hour:
+- The script fixes the safe things (`--fix`).
+- It dispatches tool fixes to Infra Runners (`--dispatch`).
+- The lead works the judgment lines: QA proof, pristine, idle runners.
+
+`spin`: a runner restarted 6 times in 12 hours on one ticket that never changed column.
+- The picker log shows each pick: `~/.local/state/ht-or-runners/runner-N.log`. Board 15 only, set by `pick_logs` in `scopes.json`.
+- The line names the ticket, runner, pick count and the newest agent-log note. That note is the wait.
+- `stale` misses it: each restart writes a fresh note.
+- The lead unassigns it and posts the wait as a Blocker. The lasting fix: the picker releases a spinning ticket.
 - The steps below are the detail behind each line. Run one when its line is red.
 
 ## 1. Dry run

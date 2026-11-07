@@ -11,10 +11,15 @@ wrong-status (columns against PRs and the live deploy), blocker-review
 agent-identities. The assignee owns a ticket. Tickets being built never
 exceed workers; QA has its own cap. --fix runs the safe fixes first.
 
+--dispatch makes red lines start their own fixing: a line red 3 runs in
+a row files one ticket for the Infra Runners on board 4060 (CI lines on
+11514), or adds a +1 once a day. A dispatched line that turns green gets
+a note on its ticket.
+
 Valentin, 2026-11-06: "the outcome of the skill is to force the chief of
 staff to fix all of this, and make sure that the system is running smoothly".
 
-usage: board-health [--board 15] [--fix] [--apply] [--alarm-board 4060] [--self-test]
+usage: board-health [--board 15] [--fix] [--apply] [--dispatch] [--alarm-board 4060] [--self-test]
 Exit 0 GREEN, 1 RED.
 """
 import argparse
@@ -53,6 +58,8 @@ INVARIANTS = {
                 "keep its most recent ticket, unassign the rest; --fix does it"),
     "outside": ("only runners, Design Builder and Speed Runner hold tickets being built", "lead",
                 "leads hand the ticket to a runner"),
+    "spin": ("no runner is restarted 6 times in 12 hours on a ticket that never changes column", "lead",
+             "the picker must release a spinning ticket; until then unassign it and post the wait as a Blocker"),
     "stale": ("every In Progress ticket moved in the last 3 hours", "lead", "wake the runner or reassign"),
     "overdue": ("no ticket over its wait limit in QA, AI Review or Agent Blocked", "lead",
                 "drive the PR or live proof today"),
@@ -129,6 +136,9 @@ def measure_flow(flow):
                      f"idle: {', '.join(idle) or 'none'}; waiting: {len(o['orphans'])} orphans, {s.get('queue', 0)} queued")
     stale = [r["ticket"] for r in rows if r["verdict"] == "STALE"]
     m["stale"] = (len(stale), " ".join(stale))
+    if s.get("spin") is not None:
+        m["spin"] = (len(s["spin"]), " ".join(f"{r['ticket']} ({r['runner']}, {r['picks']} picks: {r['reason']})"
+                                              for r in s["spin"]))
     over = [r["ticket"] for r in rows if r["verdict"] == "OVERDUE"]
     m["overdue"] = (len(over), " ".join(over))
     m["blocked_cap"] = (int(bool(s["blocked_over_cap"])), "")
@@ -183,18 +193,124 @@ def measure_rest(blockers, chatter, identities, status, board=None, prq=None):
     return m
 
 
+def count_runs(old, measured, now):
+    """Runs in a row each key was red. A state file from before run counting seeds it with its hours red,
+    since the loop runs hourly."""
+    seed = {k: int((now - datetime.fromisoformat(v)).total_seconds() // 3600) for k, v in old["first"].items()}
+    runs = old.get("runs", seed)
+    return {k: runs.get(k, 0) + 1 for k, (bad, _) in measured.items() if bad}
+
+
 def track(board, measured, numbers, now):
-    """Returns (hours red per key, bad count per key last run, headline numbers last run, last run time)."""
+    """Returns (hours red per key, bad count per key last run, headline numbers last run, last run time, runs red)."""
     STATE.mkdir(parents=True, exist_ok=True)
     path = STATE / f"{board}.json"
     old = json.load(open(path)) if path.exists() else {}
     if "first" not in old:
         old = {"first": old, "last": {}}
     first = {k: old["first"].get(k, now.isoformat()) for k, (bad, _) in measured.items() if bad}
-    json.dump({"first": first, "last": {k: bad for k, (bad, _) in measured.items()}, "numbers": numbers,
-               "at": now.isoformat()}, open(path, "w"), indent=1)
+    runs = count_runs(old, measured, now)
+    json.dump({"first": first, "runs": runs, "last": {k: bad for k, (bad, _) in measured.items()},
+               "numbers": numbers, "at": now.isoformat()}, open(path, "w"), indent=1)
     red_for = {k: (now - datetime.fromisoformat(v)).total_seconds() / 3600 for k, v in first.items()}
-    return red_for, old["last"], old.get("numbers", {}), old.get("at")
+    return red_for, old["last"], old.get("numbers", {}), old.get("at"), runs
+
+
+DISPATCH_RUNS = 3
+DISPATCH_BOARD = {"ci": 11514, "ci_boss": 11514}
+DISPATCH_LABELS = "brain-medium,Cluster: Board Hygiene"
+DISPATCH_NOTE = "board-health dispatch:"
+TICKET_LINT = HERE.parent.parent / "tickets/scripts/ticket-lint"
+DISPATCH_FIX = {
+    "spin": "## Fix\n- The runner picker releases a ticket after six spins.\n"
+            "- A spin is a pick with no column change since.\n- On release it posts a Blocker naming the wait.\n"
+            "- It unassigns the runner.\n- The ticket goes to its home column or the QA queue.\n"
+            "- Any runner can then take it.\n",
+}
+DISPATCH_BODY = ("## Problem\n- One board health check is red three runs in a row.\n"
+                 "- The title names the board and the check.\n"
+                 "- The agent lane holds the rule, the count and the owner.\n\n{fix}\n"
+                 "## Done when\n- Board health shows this check green.\n- Board health posts a green note here.\n\n"
+                 "## Risk\n- Low. Only our own tools change.\n\n## Decision\nnone\n")
+DISPATCH_GENERIC_FIX = ("## Fix\n- Find the tool, script or picker that keeps it red.\n"
+                        "- Fix that, so the check turns green by itself.\n- Never fix the tickets one by one.\n")
+
+
+TITLE_NAME = {"ci": "build checks", "ci_boss": "build checks owner"}
+
+
+def dispatch_title(scope, key):
+    return f"Board health: {scope} {TITLE_NAME.get(key, key.replace('_', ' '))} red {DISPATCH_RUNS} runs"
+
+
+def dispatch_body(key):
+    return DISPATCH_BODY.format(fix=DISPATCH_FIX.get(key, DISPATCH_GENERIC_FIX))
+
+
+def dispatch(scope, measured, runs, record, now, ops, lead=None):
+    """File or +1 one fix ticket per line red DISPATCH_RUNS runs in a row; note when a dispatched line turns green.
+    record: {key: {"ticket", "bumped"}} from the last run. ops: find(board) -> {title: ticket},
+    create(board, title, body) -> ticket or None, note(ticket, text). Returns (new record, report lines)."""
+    record, lines, found = dict(record), [], {}
+    for key, rec in list(record.items()):
+        if key in measured and not measured[key][0]:
+            ops.note(rec["ticket"], f"{DISPATCH_NOTE} {key} is green on {scope} now. Close this once the fix is live.")
+            lines.append(f"DISPATCH green note {rec['ticket']} {key}")
+            del record[key]
+    for key, (bad, detail) in measured.items():
+        if not bad or runs.get(key, 0) < DISPATCH_RUNS:
+            continue
+        rec = record.get(key)
+        if rec and (now - datetime.fromisoformat(rec["bumped"])).total_seconds() < 86400:
+            continue
+        board, title = DISPATCH_BOARD.get(key, 4060), dispatch_title(scope, key)
+        if board not in found:
+            found[board] = ops.find(board)
+        rule, owner, fix = INVARIANTS[key]
+        info = (f"{DISPATCH_NOTE} {key} red {runs[key]} runs in a row on {scope}. Rule: {rule}. "
+                f"Now: {detail or bad}. Owner {lead if owner == 'lead' else owner}: {fix}.")
+        ticket = found[board].get(title)
+        if ticket:
+            ops.note(ticket, "+1 " + info)
+            lines.append(f"DISPATCH +1 {ticket} {key}")
+        else:
+            ticket = ops.create(board, title, dispatch_body(key))
+            if not ticket:
+                lines.append(f"DISPATCH failed {key}")
+                continue
+            ops.note(ticket, info)
+            found[board][title] = ticket
+            lines.append(f"DISPATCH filed {ticket} {key} https://app.hypertask.ai/detail/project-{board}/"
+                         f"{ticket.rsplit('-', 1)[1]}")
+        record[key] = {"ticket": ticket, "bumped": now.isoformat()}
+    return record, lines
+
+
+class LiveOps:
+    def find(self, board):
+        tasks = json.loads(run_text(["hypertask", "--json", "task", "list", "--project", str(board), "--status",
+                                     "Normal", "--search", "Board health", "--limit", "100"]) or "{}").get("tasks", [])
+        return {t["title"]: t["ticketNumber"] for t in tasks}
+
+    def create(self, board, title, body):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(body)
+        r = subprocess.run(["vcc", "task", "create", "--project", str(board), "--labels", DISPATCH_LABELS,
+                            "--title", title, "--description-file", f.name, "--markdown"], capture_output=True, text=True)
+        os.unlink(f.name)
+        num = re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", r.stdout)
+        return num.group(0) if num and not r.returncode else None
+
+    def note(self, ticket, text):
+        subprocess.run(["vcc", "activity", "add", ticket, text], capture_output=True, text=True)
+
+
+def run_dispatch(scope, measured, runs, now, lead):
+    path = STATE / f"{scope.replace('/', '-')}-dispatch.json"
+    record = json.load(open(path)) if path.exists() else {}
+    record, lines = dispatch(scope, measured, runs, record, now, LiveOps(), lead)
+    json.dump(record, open(path, "w"), indent=1)
+    return lines
 
 
 def headline(numbers, before, at):
@@ -309,6 +425,48 @@ def self_test():
     assert plan["C"][0][0][-1] == "brain-medium" and "app feedback reporter" in plan["C"][1]
     assert "A" not in plan and plan["B"][0] == [["vcc", "task", "unassign", "B", "--agent", "Runner 1"]], "kept the wrong ticket"
     assert "HTPR-6" not in {n for n, _, _ in plan_fixes(4060, None, st)}, "merged moves to QA only on board 15"
+    spin = {"rows": [], "summary": {**flow["summary"], "spin": [
+        {"ticket": "HTPR-9", "runner": "Runner 7", "picks": 6, "reason": "Waiting on cross QA"}]}}
+    assert measure(spin, "", None)["spin"][0] == 1 and "spin" not in measure(flow, "", None), "spin measured wrong"
+    now = datetime(2026, 11, 7, 12, tzinfo=timezone.utc)
+    seeded = count_runs({"first": {"qa": "2026-11-07T07:30:00+00:00"}, "last": {}}, {"qa": (3, ""), "wip": (1, "")}, now)
+    assert seeded == {"qa": 5, "wip": 1}, f"old state must seed runs from hours red: {seeded}"
+    assert count_runs({"first": {}, "runs": {"qa": 2}}, {"qa": (3, ""), "wip": (0, "")}, now) == {"qa": 3}
+
+    class Fake:
+        def __init__(self):
+            self.tickets, self.notes = {4060: {}, 11514: {}}, []
+
+        def find(self, board):
+            return dict(self.tickets[board])
+
+        def create(self, board, title, body):
+            num = f"T{board}-{len(self.tickets[board]) + 1}"
+            self.tickets[board][title] = num
+            return num
+
+        def note(self, ticket, text):
+            self.notes.append((ticket, text))
+
+    ops, red = Fake(), {"spin": (2, "HTPR-9 (Runner 7)"), "wip": (1, ""), "ci_boss": (1, "never"), "qa": (0, "")}
+    rec, out = dispatch("15", red, {"spin": 3, "wip": 2, "ci_boss": 3}, {}, now, ops, "HT Product Lead")
+    assert ops.tickets[4060] == {"Board health: 15 spin red 3 runs": "T4060-1"}, f"spin must file once on 4060: {ops.tickets}"
+    assert list(ops.tickets[11514]) == ["Board health: 15 build checks owner red 3 runs"], "CI lines go to Fleet CI, never 4060"
+    assert "wip" not in rec and len(ops.notes) == 2, "a line red only 2 runs was dispatched"
+    again = dispatch("15", red, {"spin": 4, "wip": 2, "ci_boss": 4}, rec, now, ops, "HT Product Lead")
+    assert again[0]["spin"] == rec["spin"] and sum(len(t) for t in ops.tickets.values()) == 2, "rerun refiled spin"
+    assert [n for n in ops.notes if n[0] == "T4060-1"] == ops.notes[:1], "rerun the same hour added a note"
+    later = now.replace(day=8, hour=13)
+    rec2, out = dispatch("15", red, {"spin": 30}, again[0], later, ops, "HT Product Lead")
+    assert out == ["DISPATCH +1 T4060-1 spin"] and ops.notes[-1][1].startswith("+1 "), out
+    rec3, out = dispatch("15", {"spin": (0, ""), "wip": (0, "")}, {}, rec2, later, ops)
+    assert out == ["DISPATCH green note T4060-1 spin"] and "spin" not in rec3 and "is green" in ops.notes[-1][1], out
+    assert "ci_boss" in rec3, "a line not measured this run is not green"
+    assert dispatch("15", {"spin": (0, "")}, {}, rec3, later, ops)[1] == [], "green note posted twice"
+    for key in INVARIANTS:
+        for text, flags in ((dispatch_title("2060/multi-bot", key), []), (dispatch_body(key), ["--shape"])):
+            r = subprocess.run([str(TICKET_LINT), *flags, "-"], input=text, capture_output=True, text=True)
+            assert not r.returncode, f"ticket-lint refused the {key} dispatch: {r.stderr}"
     print("SELF_TEST_OK")
 
 
@@ -381,6 +539,8 @@ def main():
     p.add_argument("--board", type=int, default=15)
     p.add_argument("--apply", action="store_true", help="file or bump the alarm when a line is red over a day")
     p.add_argument("--fix", action="store_true", help="run the safe fixes, then score again")
+    p.add_argument("--dispatch", action="store_true",
+                   help="file or +1 one fix ticket for Infra Runners per line red 3 runs in a row")
     p.add_argument("--scope", help="a key in scopes.json: a board view one lead owns, e.g. 2060/postbox")
     p.add_argument("--alarm-board", type=int, help="default: the scope's alarm board")
     p.add_argument("--self-test", action="store_true")
@@ -417,7 +577,7 @@ def main():
     numbers = {"being built": (s.get("ownership") or {}).get("active"), "in QA": s.get("qa"),
                "problems": sum(b for b, _ in measured.values())}
     numbers = {k: v for k, v in numbers.items() if v is not None}
-    red_for, last, before, at = track(name.replace("/", "-"), measured, numbers, now)
+    red_for, last, before, at, runs = track(name.replace("/", "-"), measured, numbers, now)
     lines, head, escalate = scorecard(name, measured, red_for, last, sc["lead"])
     print("\n".join(lines))
     if not a.fix and whole and a.board in FIX_BOARDS:
@@ -428,6 +588,8 @@ def main():
     print(head)
     if escalate and a.apply:
         print(alarm(name, alarm_board, lines, escalate))
+    if a.dispatch:
+        print("\n".join(run_dispatch(name, measured, runs, now, sc["lead"])) or "DISPATCH nothing new")
     return 0 if not any(b for b, _ in measured.values()) else 1
 
 
