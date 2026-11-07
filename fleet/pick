@@ -55,6 +55,8 @@ LANE_CAP = 4
 CLAIM_TTL = 3 * 3600 + 600  # a run may last 3h (timeout in fleet/runner)
 FRESH_CLAIM = 120  # seconds: a claim younger than this has not started its run yet, so the log cannot show it
 INCIDENT_LABEL = "incident"
+# 11514: the release pipeline is broken (production deploys or production CI fail), so no fix can ship
+INCIDENT_BOARDS = ("15", "11514")
 INCIDENT_DONE = {"done", "archive", "archived", "flag: everyone", "flag: only me + qa"}
 CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
@@ -150,18 +152,21 @@ def list_section(board, section):
 def list_incidents():
     """Open board 15 tickets labelled incident, in any column (the column snapshot misses Valentin Review, Agent Blocked
     and the like). Done, archived and settled-flag tickets are dropped."""
-    rows, offset = [], 0
-    while True:
-        d = ht("task", "list", "--project", "15", "--labels", INCIDENT_LABEL, "--limit", "100", "--offset", str(offset))
-        if not d or not isinstance(d.get("tasks"), list):
-            raise RuntimeError("board 15 incident label unreadable")
-        rows += d["tasks"]
-        offset += len(d["tasks"])
-        if len(d["tasks"]) < 100:
-            break
-    return [slim(t, "15") for t in rows
-            if TICKET.fullmatch(t.get("ticketNumber") or "") and not t.get("sectionIsDone")
-            and (t.get("status") or "Normal") == "Normal" and (t.get("section") or "").lower() not in INCIDENT_DONE]
+    out = []
+    for board in INCIDENT_BOARDS:
+        rows, offset = [], 0
+        while True:
+            d = ht("task", "list", "--project", board, "--labels", INCIDENT_LABEL, "--limit", "100", "--offset", str(offset))
+            if not d or not isinstance(d.get("tasks"), list):
+                raise RuntimeError(f"board {board} incident label unreadable")
+            rows += d["tasks"]
+            offset += len(d["tasks"])
+            if len(d["tasks"]) < 100:
+                break
+        out += [slim(t, board) for t in rows
+                if TICKET.fullmatch(t.get("ticketNumber") or "") and not t.get("sectionIsDone")
+                and (t.get("status") or "Normal") == "Normal" and (t.get("section") or "").lower() not in INCIDENT_DONE]
+    return out
 
 
 def load_snapshot():
@@ -768,7 +773,7 @@ def incident_step(n, dry):
     ship-claim refuses) and tickets that wait on a person are left out."""
     me = f"runner {n}"
     cands = [t for t in SNAP.get("incidents") or []
-             if t["board"] == "15" and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & (SKIP_ALL | {"design-pass"})]
+             if t["board"] in INCIDENT_BOARDS and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & (SKIP_ALL | {"design-pass"})]
     for t in sorted(cands, key=lambda t: (rank(t), t["created"])):
         if incident_runner(t["key"], n):
             continue
@@ -884,7 +889,7 @@ def render(n, t, source):
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + (HERE / "briefs" / "park.txt").read_text().rstrip()
         label, model, effort = ("brain-light", *paced_models().get("park", PARK_BRAIN[1:]))
     if source == "incident":
-        brief_file = HERE / "briefs" / "incident.txt"
+        brief_file = HERE / "briefs" / ("release-stop.txt" if t["board"] == "11514" else "incident.txt")
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
         label, model, effort = ("brain-hard", *paced_models().get("incident", ("grok-4.7-high", "high")))
     return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
