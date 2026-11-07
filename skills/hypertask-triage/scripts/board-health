@@ -794,7 +794,8 @@ def main():
         fixable = plan_fixes(a.board, f, status) + plan_queue_fixes(held.result())
         if fixable:
             print(f"FIXABLE {len(fixable)} safe fixes waiting: rerun with --plan to read them, --fix to run them")
-    print(fleet_line())
+    if whole and a.board in QUEUE_FIX_BOARDS:  # one fleet read, only on the four fleet boards
+        print(fleet_line())
     print(headline(numbers, before, at))
     print(head)
     if escalate and a.apply:
