@@ -5,7 +5,7 @@
     fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 4060, 11514?
 
 Valentin 2026-11-07: one pool, Runner 1..N, each runner on the engine the pacer gives it (engine-N, else the engine file,
-else cursor): cursor (Cursor plan), codex (hax on Codex) or opencode (hax on OpenCode Go). The model per brain tag (and for
+else cursor): cursor (Cursor plan), codex (hax on Codex), opencode (hax on OpenCode Go) or claude (Claude Code on the Claude plan). The model per brain tag (and for
 park and incident runs) comes from the pacer's ~/.local/state/pacing/allocation.json when it is under an hour old; else the
 built-in ENGINES map, which is the house-rules brain map. A brain the runner's engine skips is never handed to it, and a
 ticket held by a runner whose engine skips its brain counts as an orphan, so a runner that can do it adopts it. This
@@ -104,9 +104,12 @@ ENGINES = {
                   park=("gpt-6.1-terra", "medium"), incident=None),
     "opencode": dict(plan="opencode", brains={"light": ("deepseek-v4.1-flash", "low"), "medium": ("deepseek-v4.1-flash", "high")},
                      park=("deepseek-v4.1-flash", "low"), incident=None),
+    "claude": dict(plan="claude", brains={"light": ("sonnet", "medium"), "medium": ("sonnet", "medium"),
+                                          "hard": ("claude-opus-5-5", "medium")},
+                   park=("sonnet", "medium"), incident=None),
 }
 ENGINE = "cursor"
-RUN_START = re.compile(r"^\S+ (?:cursor|hax): (.*)$")
+RUN_START = re.compile(r"^\S+ (?:cursor|hax|claude): (.*)$")
 TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|YPER4|HYCI)-([0-9]+)\b")
 RETIRED = re.compile(r"^(?:ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 PR_REPO = "hypertask-ai/hypertask"
@@ -997,8 +1000,10 @@ def self_test():
     (STATE / "engine-12").write_text("opencode\n")
     assert orphan(hard_held), "a hard ticket held by an OpenCode runner is an orphan: a runner that can do it adopts it"
     assert not orphan(held), "a medium ticket held by an OpenCode runner stays with it"
-    (STATE / "engine-12").write_text("claude\n")
+    (STATE / "engine-12").write_text("gemini\n")
     assert runner_engine(12) is None, "an unknown engine name is refused, not guessed"
+    (STATE / "engine-12").write_text("claude\n")
+    assert runner_engine(12) == "claude", "claude is a known engine"
     (STATE / "engine-12").unlink()
     (STATE / "engine").write_text("codex\n")
     assert runner_engine(12) == "codex", "no engine-N file: the pool-wide engine file"
@@ -1012,6 +1017,12 @@ def self_test():
     SNAP_BACKUP = globals().get("SNAP")
     globals()["SNAP"] = {"incidents": [{**t, "labels": []}]}
     assert incident_step(5, True) is None, "OpenCode never takes an incident"
+    globals()["SNAP"] = SNAP_BACKUP
+    set_engine("claude")
+    assert "brain-hard" not in SKIP_ALL and "brain-extra-hard" in SKIP_ALL
+    assert brain(hard)[1:] == ("claude-opus-5-5", "medium") and brain(t)[1:] == ("sonnet", "medium")
+    globals()["SNAP"] = {"incidents": [{**t, "labels": []}]}
+    assert incident_step(5, True) is None, "Claude never takes an incident"
     globals()["SNAP"] = SNAP_BACKUP
     set_engine("codex")
     assert "brain-hard" not in SKIP_ALL and brain(hard)[1:] == ("gpt-6.1-sol", "high")
