@@ -4,7 +4,9 @@
     fleet/pick <N> [--dry-run] [--json]    pick (and claim) one ticket for Runner N
     fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 4060, 11514?
 
-Valentin 2026-11-07: one pool, Runner 1..N, all on Cursor CLI with Grok. This replaces ht-or-runner-pick,
+Valentin 2026-11-07: one pool, Runner 1..N, all on Cursor CLI with Grok. The model per brain tag (and for park and
+incident runs) comes from the pacer's ~/.local/state/pacing/allocation.json when it is under an hour old and names
+Cursor; else the built-in map. This replaces ht-or-runner-pick,
 ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/). Order:
   0. a live incident (YPER4-1375): an open board 15 ticket labelled incident that no live runner works. Any runner takes it
      first, whatever it holds. Lane cap, app freeze, rests, queue brake and holds do not apply (ship-claim runs with
@@ -59,6 +61,8 @@ BLOCK_LOOKUPS = 20
 REST_MAX = 3 * 86400  # an IDLE rest never outlives this, changed or not
 REST_GRACE = 60  # seconds: the run's own last write may land just after its IDLE end
 PARK_BRAIN = ("brain-light", "grok-4.7-medium", "medium")  # a park run reads one ticket and runs fleet/park
+ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
+ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
 
 # board -> (new-work columns, building columns)
 BOARDS = {
@@ -245,11 +249,24 @@ def in_lane(t):
     return lane(t) in ("ci", "infra")
 
 
+def paced_models():
+    """Model per brain tag (light, medium, hard, park, incident) from the pacer (poteto-2-advisor bin/pacer, every 15 min).
+    Used only when the allocation is fresh and its engine is Cursor; otherwise the built-in map above applies."""
+    try:
+        a = json.loads(ALLOCATION.read_text())
+        if a.get("engine") != "cursor" or time.time() - float(a["at"]) > ALLOCATION_MAX_AGE:
+            return {}
+        return {k: (v["id"], v["effort"]) for k, v in (a.get("models") or {}).items() if v and v.get("id") and v.get("effort")}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
 def brain(t):
+    paced = paced_models()
     for label, model, effort in BRAINS:
         if label in t["labels"]:
-            return label, model, effort
-    return "brain-medium", "composer-2.5", "medium"
+            return (label, *paced.get(label.split("-", 1)[1], (model, effort)))
+    return ("brain-medium", *paced.get("medium", ("composer-2.5", "medium")))
 
 
 def sf_repo(t):
@@ -851,11 +868,11 @@ def render(n, t, source):
     if source == "park":
         brief_file = HERE / "briefs" / "park-job.txt"
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + (HERE / "briefs" / "park.txt").read_text().rstrip()
-        label, model, effort = PARK_BRAIN
+        label, model, effort = ("brain-light", *paced_models().get("park", PARK_BRAIN[1:]))
     if source == "incident":
         brief_file = HERE / "briefs" / "incident.txt"
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
-        label, model, effort = "brain-hard", "grok-4.7-high", "high"
+        label, model, effort = ("brain-hard", *paced_models().get("incident", ("grok-4.7-high", "high")))
     return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
             "title": t["title"], "url": url(t), "repo": repo_for(t), "brief_file": str(brief_file), "brief": brief,
             "brain": label, "model": model, "effort": effort, "labels": t["labels"]}
@@ -864,9 +881,10 @@ def render(n, t, source):
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
-    global STATE
+    global STATE, ALLOCATION
     import tempfile
     STATE = Path(tempfile.mkdtemp())
+    ALLOCATION = STATE / "allocation.json"
     t = {"key": "HTPR-1", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium"}
     SKIP[0] = Skip(set(), set())
     assert parkable(t), "a resting building ticket with no job yet is due one"
@@ -884,6 +902,19 @@ def self_test():
     assert "PARK RUN" in job["brief"] and "fleet/park <TICKET> --waits-on" in job["brief"] and "$n" not in job["brief"]
     assert "ENGINE" not in job["brief"] and job["brief_file"].endswith("briefs/park-job.txt")
     assert "PARK RUN" not in render(5, t, "board")["brief"]
+    hard = {**t, "labels": ["brain-hard"]}
+    assert brain(hard)[1:] == ("grok-4.7-high", "high"), "no allocation: the built-in map"
+    m = {"light": {"id": "composer-2.5", "effort": "medium"}, "medium": {"id": "composer-2.5", "effort": "medium"},
+         "hard": {"id": "grok-4.7-medium", "effort": "medium"}, "park": {"id": "composer-2.5", "effort": "low"}}
+    ALLOCATION.write_text(json.dumps({"at": time.time(), "engine": "cursor", "models": m}))
+    assert brain(hard)[1:] == ("grok-4.7-medium", "medium"), "a fresh Cursor allocation sets the model"
+    assert render(5, t, "park")["model"] == "composer-2.5", "the allocation sets the park model"
+    ALLOCATION.write_text(json.dumps({"at": time.time() - 7200, "engine": "cursor", "models": m}))
+    assert brain(hard)[1] == "grok-4.7-high", "a stale allocation is ignored"
+    ALLOCATION.write_text(json.dumps({"at": time.time(), "engine": "hax", "models": m}))
+    assert brain(hard)[1] == "grok-4.7-high", "an allocation for another engine is ignored: only Cursor runs here"
+    ALLOCATION.write_text("{not json")
+    assert brain(hard)[1] == "grok-4.7-high", "a broken allocation is ignored"
     print("fleet/pick self-test ok")
 
 

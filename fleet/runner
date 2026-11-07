@@ -14,7 +14,9 @@ LAST=$(jq -r '.runners // 20' "$HERE/roster.json" 2>/dev/null || echo 20)
 [[ "$LAST" =~ ^[1-9][0-9]?$ ]] || LAST=20
 mkdir -p "$STATE"
 target() { cat "$STATE/target" 2>/dev/null || echo "$LAST"; }
-maxcap() { echo "$LAST"; }
+# The pacer (poteto-2-advisor bin/pacer) writes pace-cap: the most runners the subscriptions sustain. The auto-raise in
+# top-up never passes it; runners above it find a stop-N file marked "pacer" and stop between tickets.
+maxcap() { local p; p=$(cat "$STATE/pace-cap" 2>/dev/null); [[ "$p" =~ ^[1-9][0-9]?$ ]] && [ "$p" -lt "$LAST" ] && echo "$p" || echo "$LAST"; }
 validate_targets() {
   t=$(target); cap=$(maxcap)
   [[ "$t" =~ ^[1-9][0-9]?$ && "$cap" =~ ^[1-9][0-9]?$ ]] &&
