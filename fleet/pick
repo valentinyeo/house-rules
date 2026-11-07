@@ -67,7 +67,7 @@ SF_REPOS = {"multiprompt": "multiprompt", "triage": "triage", "chromescribe": "c
             "upwork auto applier": "upwork-auto-applier"}
 SF_HOLD = HOME / ".local/state/multibot/hold.txt"
 BRAINS = (("brain-hard", "grok-4.7-high", "high"), ("brain-medium", "grok-4.7-medium", "medium"),
-          ("brain-light", "composer-2.5", "medium"))
+          ("brain-light", "grok-4.7-medium", "medium"))
 TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|YPER4|HYCI)-([0-9]+)\b")
 RETIRED = re.compile(r"^(?:ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 PR_REPO = "hypertask-ai/hypertask"
