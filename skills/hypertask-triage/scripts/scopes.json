@@ -53,6 +53,11 @@
     "repos": [],
     "workers": [{"agent": "HT Growth Lead", "always": true}]
   },
+  "8525": {
+    "board": 8525, "lead": "Faceless Manager", "alarm_board": 8525,
+    "repos": ["valentinyeo/faceless-channels"],
+    "workers": [{"agent": "Faceless Manager", "always": true}]
+  },
   "2060/multi-bot": {
     "board": 2060, "view": "6334f64c-8a04-449d-a7ad-7fcb5be23b4a", "lead": "Multi Bot Opus Lead", "alarm_board": 2060,
     "repos": ["valentinyeo/multiprompt"],
