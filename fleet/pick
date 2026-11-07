@@ -13,7 +13,7 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      SHIP_CLAIM_INCIDENT=1). Model grok-4.7-high, brief briefs/incident.txt in front of the app brief. A runner assigned to
      an incident it is not running right now (log) is handed it again; an incident another runner is running is left alone.
   a. my own ticket in a building column on any board
-  b. an orphan in a building column (nobody holds it, or only a retired login)
+  b. an orphan in a building column (nobody holds it, or only a retired login, or a runner the pacer stopped)
   c. the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
   e. new work: board 15 (ai-feedback included), then 2060, then 4060
@@ -217,9 +217,17 @@ def names(t):
     return [h[0] for h in t["holders"]]
 
 
+def paced_off(n):
+    """The pacer stopped Runner n (stop-n file marked "pacer"): it will not run again until the pacer frees it."""
+    try:
+        return (RUNNER_STATE / f"stop-{n}").read_text().startswith("pacer")
+    except OSError:
+        return False
+
+
 def live_runner(name):
     m = re.fullmatch(r"runner (\d+)", name)
-    return bool(m) and 1 <= int(m[1]) <= RUNNERS
+    return bool(m) and 1 <= int(m[1]) <= RUNNERS and not paced_off(int(m[1]))
 
 
 def retired(name):
@@ -881,10 +889,11 @@ def render(n, t, source):
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
-    global STATE, ALLOCATION
+    global STATE, ALLOCATION, RUNNER_STATE
     import tempfile
     STATE = Path(tempfile.mkdtemp())
     ALLOCATION = STATE / "allocation.json"
+    RUNNER_STATE = STATE
     t = {"key": "HTPR-1", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium"}
     SKIP[0] = Skip(set(), set())
     assert parkable(t), "a resting building ticket with no job yet is due one"
@@ -915,6 +924,12 @@ def self_test():
     assert brain(hard)[1] == "grok-4.7-high", "an allocation for another engine is ignored: only Cursor runs here"
     ALLOCATION.write_text("{not json")
     assert brain(hard)[1] == "grok-4.7-high", "a broken allocation is ignored"
+    held = {**t, "holders": [("runner 12", None)]}
+    assert not orphan(held), "a live runner's ticket is not an orphan"
+    (STATE / "stop-12").write_text("pacer\n")
+    assert orphan(held), "a ticket held by a runner the pacer stopped is an orphan: live runners adopt it"
+    (STATE / "stop-12").write_text("manual\n")
+    assert not orphan(held), "a hand-made stop file does not hand the ticket away"
     print("fleet/pick self-test ok")
 
 
