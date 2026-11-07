@@ -65,7 +65,7 @@ INVARIANTS = {
                 "drive the PR or live proof today"),
     "blocked_cap": ("Agent Blocked at or under its cap", "lead", "clear the column today; only broken tools stay"),
     "brain": ("every open ticket has one brain tag", "lead",
-              "--fix tags brain-medium; then make the writer named here set the tag"),
+              "the brain tagger (poteto-2-advisor bin/brain-tagger, every 30 min) tags it; make the writer named here set it"),
     "ci": ("no ticket waits on a slow, closed or missing CI ticket", "CI Boss",
            "CI Boss works its Urgent CI tickets; triage files the missing ones"),
     "ci_boss": ("CI Boss wrote on the blocking CI tickets in the last 6 hours", "Chief Of Staff",
@@ -313,7 +313,7 @@ def self_test():
     assert plan["HTPR-6"][0] == [["vcc", "task", "move", "HTPR-6", "QA"]]
     assert plan["HTPR-7"][0] == [["vcc", "task", "update", "HTPR-7", "--section", "4389"]]
     assert plan["HTPR-5"][0] == [] and "ready to close" in plan["HTPR-5"][1]
-    assert plan["C"][0][0][-1] == "brain-medium" and "app feedback reporter" in plan["C"][1]
+    assert "C" not in plan, "board-health must not default-tag: the brain tagger owns untagged tickets"
     assert "A" not in plan and plan["B"][0] == [["vcc", "task", "unassign", "B", "--agent", "Runner 1"]], "kept the wrong ticket"
     assert "HTPR-6" not in {n for n, _, _ in plan_fixes(4060, None, st)}, "merged moves to QA only on board 15"
     pats = [scopes._pattern(p) for p in ("Runner {n}", "HT Design Builder")]
@@ -383,9 +383,7 @@ def plan_fixes(board, flow, status):
                                 "Runner checks it live, then Done."))
     if flow:
         s = flow["summary"]
-        for t in s["no_brain"]:
-            plan.append((t["ticket"], [["vcc", "task", "update", t["ticket"], "--add-labels", "brain-medium"]],
-                         f"{NOTE} tagged brain-medium, the default. Written by {t.get('writer')}: that tool should set it."))
+        # No default brain tag here: bin/brain-tagger judges every untagged ticket. A blanket brain-medium would hide them from it.
         idle = {r["ticket"]: r.get("idle_h") for r in flow["rows"]}
         for who, nums in ((s.get("ownership") or {}).get("doubles") or {}).items():
             keep = min(nums, key=lambda n: idle.get(n) if idle.get(n) is not None else 1e9)
