@@ -185,15 +185,21 @@ case "${1:-}" in
       echo "$(date -u +%FT%TZ) $([ "$pick_engine" = cursor ] && echo cursor || echo hax): $pick_ticket $pick_model" >> "$rlog"
       tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n $pick_engine $pick_model"
       cmodel=$pick_model
+      started_at=$(date +%s)
       launch "$pick_engine" "$pick_model" "$pick_effort" "$pick_repo" "$brief" 2>&1 | tee "$runlog"
+      rc=${PIPESTATUS[0]}
       echo "$(date -u +%FT%TZ) end" >> "$rlog"
-      if grep -q "RUNNER IDLE" "$runlog"; then res=IDLE; else res=DONE; fi
+      # A run that errors or ends within two minutes never started (wrong flag, auth, usage limit): FAIL rests 15 minutes
+      # instead of picking the same ticket again at once.
+      if grep -q "RUNNER IDLE" "$runlog"; then res=IDLE
+      elif [ "$rc" -ne 0 ] || [ $(( $(date +%s) - started_at )) -lt 120 ]; then res=FAIL
+      else res=DONE; fi
       # One ledger line per finished run. The launcher log keeps no reasons (runner-N.latest.log is cut on the next run), so the
       # brain tagger reads this to tell a model that could not do the work from a ticket that waits on someone else.
       reason=$(grep -a -o 'RUNNER IDLE.*' "$runlog" | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300)
       jq -nc --arg ts "$(date -u +%FT%TZ)" --arg ticket "$pick_ticket" --arg engine "$pick_engine" --arg model "$cmodel" --arg result "$res" --argjson runner "$n" --arg reason "$reason" \
         '{ts:$ts,runner:$runner,ticket:$ticket,engine:$engine,model:$model,result:$result,reason:$reason}' >> "$STATE/run-ledger.jsonl" 2>/dev/null || true
       echo "$res" > "$STATE/runner-$n.result"
-      if [ "$res" = IDLE ]; then sleep 600; else sleep 30; fi
+      case $res in IDLE) sleep 600 ;; FAIL) sleep 900 ;; *) sleep 30 ;; esac
     done ;;
 esac
