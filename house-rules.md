@@ -13,6 +13,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 2. Install or verify pstack from its official source only: https://github.com/cursor/plugins/tree/main/pstack (Claude Code: `/plugin marketplace add cursor/plugins`, then `/plugin install pstack@cursor-plugins`). Never copy pstack content.
 3. Install or verify caveman from its official marketplace only (Claude Code): `claude plugin marketplace add JuliusBrussee/caveman && claude plugin install caveman@caveman`. Never hand-copy caveman skills. Codex and hax follow the caveman rules below via their synced AGENTS.md.
 4. Find your project. Hypertask department leads run `/board-identity` through its final startup check. Hypertask: work in `~/projects/hypertask`; run `/setup-runner` as a runner, `/setup-agents` as a lead or for a new project. Other projects: run that repo's own setup skill.
+   Take your role from the roster. Open `fleet/roster.json`. Find your session name. Load its `role_skill`. No row? Note "not in roster" in Chief Of Staff's agent lane. Take no work. Enforcer: `fleet/roster-check`. (2026-11-07, why: who assigns each session its role)
 5. Board login only through your setup skill. Never paste tokens. Keys come from `~/.local/bin/stack-key` on hypertask-vps and are never printed.
 6. Model rules below apply: fast mode off, no model routers.
 7. Report blockers to your own project's lead.
