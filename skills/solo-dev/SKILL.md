@@ -135,7 +135,7 @@ Chat and handoff notes cannot replace board maintenance.
 
 - Spend money, raise a spending limit or add a paid service. "Saves money" is still money: ask first.
 - Print, commit or publish a secret. Keys only via `stack-key`, once per job.
-- Use GitHub-hosted runners on a private repo.
+- Run CI, builds or tests on this VPS, or add a runner here. CI runs only on GitHub-hosted runners (see house rules, Doing the work).
 - Hand-replace a running app. Releases reach Valentin through the in-app update.
 - Touch x.com/valentinyeo.
 

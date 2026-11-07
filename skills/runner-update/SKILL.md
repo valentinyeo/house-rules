@@ -7,7 +7,7 @@ description: Runner status and top-up for a project manager. Use when asked for 
 
 Check [manager-shift](../manager-shift/SKILL.md) before this work batch.
 
-Your job as manager: keep your project's runners full. Report only after you act.
+Your job as manager: check the shared runner pool and fix gaps (see house rules: One shared runner pool; Pace every subscription). Report only after you act.
 
 You start no runners (Design, Growth or Finance lead)? Stop here. Do not count runners or read the ladder.
 
@@ -30,7 +30,7 @@ For each runner: active (working a ticket now) or idle. For every idle one, name
 ## 3. Act
 
 - Launching = your project's own launcher (table above). No add-runner skill needed.
-- Codex (hax) is never braked. Only server load limits it. While load says `add`, start hax runners up to target (Hypertask: `ht-hax-runner top-up`; SF: `hax-runner <n>`).
+- Pacing, runner counts and reserves: see house rules, Models and harnesses (Pace every subscription). The pacer owns them. While load says `add` and the pacer wants more, start hax runners with your launcher (Hypertask: `ht-hax-runner top-up`; SF: `hax-runner <n>`).
 - Claude runners follow the ladder. Claude is scarce: brake only Claude.
 - Restart dead or stuck runners. Unstick panes waiting on a prompt.
 - Idle for "no tickets"? Get tickets written or groomed. That is your gap to close.

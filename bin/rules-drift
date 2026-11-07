@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""rules-drift: one source of truth for standing rules.
+
+house-rules.md is the only place a standing rule lives. Every other instruction source
+agents read on this server may only point to it or hold project-only rules. This script
+greps those other sources for banned stale phrases (texts that once contradicted house
+rules) and exits 1 with file:line for every hit.
+
+  rules-drift               scan, print hits, log to ~/.local/state/rules-drift.log, exit 1 on any hit
+  rules-drift --self-check  prove the scanner on fixtures (hit, no hit, allow marker, house-rules block skip)
+
+A line that must keep a banned phrase (for example a rule that forbids it) ends with
+the marker `rules-drift:ok`. Run every 5 minutes from house-rules-sync.
+Read only: it never edits a source and starts no build, test or CI job.
+"""
+import glob
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+HOME = os.path.expanduser("~")
+LOG = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")), "rules-drift.log")
+ALLOW = "rules-drift:ok"
+
+# (regex, why it is banned). Case-insensitive. Add a phrase here when a stale text is found.
+BANNED = [
+    (r"self-hosted runners?", "CI runs only on GitHub-hosted runners; no runner on this server (house rules, Doing the work, 2026-11-03 and 2026-11-08)"),
+    (r"private-repo jobs run only", "stale: private repos may use GitHub-hosted minutes (house rules, Doing the work, 2026-11-03)"),
+    (r"never on github-hosted", "stale: CI runs only on GitHub-hosted runners (house rules, Doing the work, 2026-11-03)"),
+    (r"codex first, always eligible", "stale pre-2026-11-07 pacing; the pacer owns it (house rules, Models and harnesses, Pace every subscription)"),
+    (r"85% stop", "stale pre-2026-11-07 reserve; the pacer owns it (house rules, Models and harnesses, Pace every subscription)"),
+    (r"70% manager reserve", "stale pre-2026-11-07 reserve; the pacer owns it (house rules, Models and harnesses, Pace every subscription)"),
+    (r"always eligible despite quota", "stale pre-2026-11-07 pacing; the pacer owns it (house rules, Models and harnesses, Pace every subscription)"),
+]
+BANNED_RE = [(re.compile(p, re.I), why) for p, why in BANNED]
+
+BEGIN = "<!-- house-rules:begin"
+END = "<!-- house-rules:end -->"
+
+
+def sources():
+    """Real files to scan. Dedupe by realpath so symlinked skills and worktrees count once."""
+    paths = []
+    paths += [os.path.join(HOME, ".claude/CLAUDE.md")]
+    paths += sorted(glob.glob(os.path.join(HOME, ".claude/reference/*.md")))
+    paths += sorted(glob.glob(os.path.join(HOME, ".claude/rules/*.md")))
+    paths += [os.path.join(HOME, ".codex/AGENTS.md"), os.path.join(HOME, ".config/hax/AGENTS.md")]
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        paths += sorted(glob.glob(os.path.join(HOME, "projects", "*", name)))
+    for d in (os.path.join(HOME, ".claude/skills"), os.path.join(HOME, ".local/share/house-rules/skills")):
+        paths += sorted(glob.glob(os.path.join(d, "*", "SKILL.md")))
+    seen, out = set(), []
+    for p in paths:
+        if not os.path.isfile(p):
+            continue
+        rp = os.path.realpath(p)
+        if rp in seen or rp == os.path.realpath(os.path.join(HOME, ".local/share/house-rules/house-rules.md")):
+            continue
+        seen.add(rp)
+        out.append(p)
+    return out
+
+
+def hook_texts():
+    """Texts the token-ladder hooks print into prompts. Returns [(label, text)]."""
+    tl = os.path.join(HOME, "projects/token-ladder/bin/token-ladder")
+    out = []
+    if not os.path.isfile(tl):
+        return out
+    for sub in ("hook-prompt",):  # session-start refreshes reserve.json; bash and agent print only on a denial
+        try:
+            r = subprocess.run([sys.executable, tl, sub], input="{}", capture_output=True, text=True, timeout=20)
+            out.append(("token-ladder " + sub, (r.stdout or "") + (r.stderr or "")))
+        except Exception:
+            pass
+    return out
+
+
+def scan_text(label, text, hits, skip_block=False):
+    inblock = False
+    for n, line in enumerate(text.splitlines(), 1):
+        if skip_block:
+            if line.startswith(BEGIN):
+                inblock = True
+                continue
+            if inblock:
+                if line == END:
+                    inblock = False
+                continue
+        if ALLOW in line:
+            continue
+        for rx, why in BANNED_RE:
+            m = rx.search(line)
+            if m:
+                hits.append((label, n, m.group(0), why, line.strip()[:160]))
+
+
+def scan(files, hooks):
+    hits = []
+    for p in files:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                scan_text(p, f.read(), hits, skip_block=p.endswith("AGENTS.md"))
+        except OSError:
+            pass
+    for label, text in hooks:
+        scan_text(label, text, hits)
+    return hits
+
+
+def log(lines):
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with open(LOG, "a") as f:
+        for ln in lines:
+            f.write(f"{stamp} {ln}\n")
+
+
+def self_check():
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        bad = os.path.join(d, "bad.md")
+        with open(bad, "w") as f:
+            f.write("fine line\n")
+            for p, _ in BANNED:
+                f.write(re.sub(r"\\", "", p.replace("?", "")) + " here\n")
+            f.write("self-hosted runners allowed rules-drift:ok\n")
+        hits = scan([bad], [])
+        want = len(BANNED)
+        if len(hits) != want:
+            print(f"FAIL: expected {want} hits, got {len(hits)}: {hits}")
+            ok = False
+        if any(h[1] == 1 or h[1] == want + 2 for h in hits):
+            print("FAIL: clean line or allow-marked line was flagged")
+            ok = False
+        agents = os.path.join(d, "AGENTS.md")
+        with open(agents, "w") as f:
+            f.write(BEGIN + " test -->\nself-hosted runners inside the synced block\n" + END + "\nclean after\n")
+        if scan([agents], []):
+            print("FAIL: the synced house-rules block was scanned")
+            ok = False
+        agents2 = os.path.join(d, "x", "AGENTS.md")
+        os.makedirs(os.path.dirname(agents2))
+        with open(agents2, "w") as f:
+            f.write(BEGIN + " test -->\nclean\n" + END + "\nself-hosted runners outside the block\n")
+        if len(scan([agents2], [])) != 1:
+            print("FAIL: a hit outside the synced block was missed")
+            ok = False
+    print("self-check " + ("PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
+def main():
+    if "--self-check" in sys.argv[1:]:
+        return self_check()
+    files = sources()
+    hits = scan(files, hook_texts())
+    for label, n, phrase, why, text in hits:
+        print(f"{label}:{n}: \"{phrase}\" banned: {why}. Line: {text}")
+    if hits:
+        log([f"HIT {h[0]}:{h[1]} \"{h[2]}\"" for h in hits])
+        print(f"rules-drift: {len(hits)} hit(s) in {len(files)} sources")
+        return 1
+    log([f"clean ({len(files)} sources)"])
+    print(f"rules-drift: clean ({len(files)} sources)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
