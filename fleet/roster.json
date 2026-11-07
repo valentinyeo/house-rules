@@ -1,6 +1,7 @@
 {
  "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name and loads role_skill. No row: it reports 'not in roster' to Chief Of Staff and takes no work. kind: chief, lead, view-lead, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371.",
  "_updated": "2026-11-07 switch",
+ "runners": 20,
  "rows": [
   {
    "name": "poteto-2-advisor",

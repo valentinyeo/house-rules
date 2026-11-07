@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# One launcher for every runner (YPER4-1371). Valentin 2026-11-07: one pool, Runner 1..N, all on Cursor CLI with Grok.
+# Generalised from ht-or-runner (copy in fleet/legacy/): same PAUSED file, stop-N files, top-up, load gate, tick and
+# log format. The ticket, repo, brief and model now come from fleet/pick; this script only runs the agent.
+#   fleet/runner <N> | top-up | tick | status | stop-all | check
+set -u
+export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+STATE=$HOME/.local/state/ht-or-runners
+HERE=$(dirname "$(readlink -f "$0")")
+SELF=$(readlink -f "$0")
+PICK=$HERE/pick
+FIRST=1
+LAST=$(jq -r '.runners // 20' "$HERE/roster.json" 2>/dev/null || echo 20)
+[[ "$LAST" =~ ^[1-9][0-9]?$ ]] || LAST=20
+mkdir -p "$STATE"
+target() { cat "$STATE/target" 2>/dev/null || echo "$LAST"; }
+maxcap() { echo "$LAST"; }
+validate_targets() {
+  t=$(target); cap=$(maxcap)
+  [[ "$t" =~ ^[1-9][0-9]?$ && "$cap" =~ ^[1-9][0-9]?$ ]] &&
+    [ "$t" -le "$cap" ] && [ "$cap" -le 40 ] || { echo "target/max must satisfy 1 <= target <= max <= 40" >&2; return 1; }
+}
+log() { echo "$(date -u +%FT%TZ) $*" >> "$STATE/keeper.log"; }
+engine() { cat "$STATE/engine" 2>/dev/null || echo "${HT_RUNNER_ENGINE:-cursor}"; }
+
+green() {
+  local cores load5 avail proc=${HT_HAX_PROC_ROOT:-/proc}
+  GREEN_WHY='resource reading unavailable'
+  cores=$(nproc) && load5=$(awk '{print $2}' "$proc/loadavg") &&
+    avail=$(awk '/MemAvailable/{print int($2/1048576)}' "$proc/meminfo") || return 1
+  [[ "$cores" =~ ^[1-9][0-9]*$ && "$load5" =~ ^[0-9]+([.][0-9]+)?$ && "$avail" =~ ^[0-9]+$ ]] || return 1
+  GREEN_WHY="load5=$load5 cores=$cores avail=${avail}G status=$(head -c 40 "$HOME/.local/state/vps-load/status" 2>/dev/null)"
+  grep -q '^add' "$HOME/.local/state/vps-load/status" 2>/dev/null || return 1
+  awk -v l="$load5" -v c="$cores" 'BEGIN{exit !(l/c<1.0)}' || return 1
+  [ "$avail" -gt 24 ]
+}
+
+start_one() {
+  local n=$1 sess="ht-or-runner-$1"
+  tmux has-session -t "=$sess" 2>/dev/null && { echo "running: $sess"; return 0; }
+  ( cd "$HOME/projects/hypertask" && SHIP_SESSION_NAME="RUNNER $n" .claude/skills/setup-runner/scripts/setup-runner "$n" ) >>"$STATE/setup-$n.log" 2>&1 \
+    || { log "RUNNER $n: setup-runner failed, not started"; echo "login failed: RUNNER $n"; return 1; }
+  tmux new-session -d -s "$sess" -x 200 -y 50 -c "$HOME/projects/hypertask" "$SELF $n --loop" || return 1
+  tmux select-pane -t "$sess" -T "RUNNER $n"
+  log "started $sess"; echo "started: $sess"
+}
+
+# The words every run starts with: the ticket the picker chose, then the lane's brief, then the repo.
+run_brief() {
+  local n=$1 json=$2 ticket source brief repo lane title
+  ticket=$(jq -r .ticket <<< "$json"); source=$(jq -r .source <<< "$json"); lane=$(jq -r .lane <<< "$json")
+  repo=$(jq -r .repo <<< "$json"); brief=$(jq -r .brief <<< "$json"); title=$(jq -r .title <<< "$json")
+  echo "ENGINE (Valentin 2026-11-07): you run in Cursor CLI on the Cursor plan as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Codex, hax or Claude only. No subagents, no helpers." \
+       "YOUR TICKET THIS RUN (set by the launcher, overrides every pick rule below): $ticket ($source; claimed for you). Work only on $ticket; do not run pr-drain-pick, ci-pick or any other picker and do not pick another ticket." \
+       "The launcher already claimed it for you with claim id \"$SHIP_CLAIM_RESUME\": never run ship-claim again with any other resume text; if a step needs a claim or resume command, use exactly \"$SHIP_CLAIM_RESUME\". A same-runner \"Stepping back\" note is not a blocker: carry on." \
+       "$(cat "$STATE/brief-extra" 2>/dev/null) If it cannot move, end with RUNNER IDLE and the reason. $brief" \
+       "TICKET: $ticket ($title). LANE: $lane. REPO: $repo."
+}
+
+case "${1:-}" in
+  check) ls "$PICK" >/dev/null && "$PICK" --check-access ;;
+  top-up)
+    exec 9>"$STATE/.keeper.lock"; flock -n 9 || exit 0
+    [ -f "$STATE/PAUSED" ] && exit 0
+    validate_targets || exit 2
+    live=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | awk '/^ht-or-runner-[0-9]+$/ {n++} END {print n+0}')
+    started=0
+    for n in $(seq $FIRST $LAST); do
+      [ "$live" -ge "$t" ] && break
+      tmux has-session -t "=ht-or-runner-$n" 2>/dev/null && continue
+      [ -f "$STATE/stop-$n" ] && continue
+      [ "$started" -ge 2 ] && break
+      if green; then start_one "$n" && { started=$((started+1)); live=$((live+1)); sleep 20; } || break
+      else log "hold: $GREEN_WHY"; break; fi
+    done
+    [ -e "$STATE/last-start" ] || touch "$STATE/last-start"
+    last=$(stat -c %Y "$STATE/last-start")
+    [ "$started" -gt 0 ] && touch "$STATE/last-start"
+    if [ "$started" -eq 0 ] && [ "$live" -ge "$t" ] && [ $(( $(date +%s) - last )) -ge 900 ] && [ "$t" -lt "$cap" ] && green; then
+      echo $((t+1)) > "$STATE/target"; touch "$STATE/last-start"; log "target raised to $((t+1)): $GREEN_WHY"
+    fi ;;
+  tick) "$SELF" top-up ;;
+  status)
+    echo "target=$(target) max=$(maxcap) engine=$(engine)"; green && echo "green: $GREEN_WHY" || echo "not green: $GREEN_WHY"
+    [ -f "$STATE/PAUSED" ] && echo "PAUSED"
+    tmux ls 2>/dev/null | grep '^ht-or-runner-' || echo "no runner sessions" ;;
+  stop-all)
+    for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep '^ht-or-runner-'); do tmux kill-session -t "$s"; echo "stopped $s"; done ;;
+  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check' ;;
+  *)
+    n=$1
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
+    [ "${2:-}" = --loop ] || { start_one "$n"; exit; }
+    rlog="$STATE/runner-$n.log"
+    runlog="$STATE/runner-$n.latest.log"
+    unset OPENCODE_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
+    export SHIP_SESSION_NAME="RUNNER $n" CEO_AGENT="RUNNER $n" SHIP_CLAIM_RESUME="tmux attach -t ht-or-runner-$n (Cursor Grok RUNNER $n)"
+    IFS=$'\t' read -r _ident _tokfile < <("$HOME/.agents/skills/ship/scripts/ship-identity")
+    [ "$_ident" = "RUNNER $n" ] && [ -s "$_tokfile" ] || { echo "identity check failed for RUNNER $n" >&2; exit 1; }
+    HT_TOKEN="$(cat "$_tokfile")"; export HT_TOKEN; unset _ident _tokfile
+    while :; do
+      if [ -f "$STATE/PAUSED" ] || [ -f "$STATE/stop-$n" ]; then sleep 300; continue; fi
+      if [ "$(engine)" != cursor ]; then
+        echo "$(date -u +%FT%TZ) gate: engine file says $(engine); only cursor is supported" >> "$rlog"; sleep 300; continue
+      fi
+      if ! pick=$("$PICK" "$n" --json 2>>"$rlog"); then
+        echo "$(date -u +%FT%TZ) pick: nothing to start" >> "$rlog"; sleep 900; continue
+      fi
+      IFS=$'\t' read -r pick_ticket pick_model pick_effort pick_source pick_repo cmodel < <(jq -r '[.ticket,.model,.effort,.source,.repo,.model] | @tsv' <<< "$pick")
+      [ -d "$pick_repo" ] || pick_repo=$HOME/projects/hypertask
+      echo "$(date -u +%FT%TZ) pick: $pick_ticket $pick_model $pick_effort ($pick_source)" >> "$rlog"
+      brief=$(run_brief "$n" "$pick")
+      echo "$(date -u +%FT%TZ) start" >> "$rlog"
+      clear; tmux clear-history -t "$TMUX_PANE"
+      : > "$runlog"
+      : > "$STATE/runner-$n.result"
+      echo "$(date -u +%FT%TZ) cursor: $pick_ticket $cmodel" >> "$rlog"
+      tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n $cmodel"
+      timeout 3h "$HOME/.local/bin/cursor-agent" -p --output-format text --model "$cmodel" -f --trust --approve-mcps --workspace "$pick_repo" "$brief" 2>&1 | tee "$runlog"
+      echo "$(date -u +%FT%TZ) end" >> "$rlog"
+      if grep -q "RUNNER IDLE" "$runlog"; then echo IDLE > "$STATE/runner-$n.result"; sleep 600; else echo DONE > "$STATE/runner-$n.result"; sleep 30; fi
+    done ;;
+esac

@@ -1,0 +1,636 @@
+#!/usr/bin/env python3
+"""One ticket picker for every runner (YPER4-1371).
+
+    fleet/pick <N> [--dry-run] [--json]    pick (and claim) one ticket for Runner N
+    fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 4060, 11514?
+
+Valentin 2026-11-07: one pool, Runner 1..N, all on Cursor CLI with Grok. This replaces ht-or-runner-pick,
+ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/). Order:
+  a. my own ticket in a building column on any board
+  b. an orphan in a building column (nobody holds it, or only a retired login)
+  c. the PR queue (pr-drain-pick rules)
+  d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
+  e. new work: board 15 (ai-feedback included), then 2060, then 4060
+  f. the rest of the CI or infra lane, same cap
+One runner holds one ticket until it is live. brain-extra-hard is skipped everywhere.
+--dry-run never claims and never writes under ~/.local/state. FLEET_PICK_VIRTUAL=<file> makes dry runs
+share virtual claims (so 20 separate dry runs give 20 different tickets); FLEET_PICK_CACHE=<file> reuses one
+board snapshot. Exit 0 with a pick, exit 1 with the reason on stderr.
+"""
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+HERE = Path(__file__).resolve().parent
+os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
+STATE = Path(os.environ.get("FLEET_PICK_STATE", HOME / ".local/state/fleet-pick"))
+RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
+SHIP_CLAIM = HOME / ".agents/skills/ship/scripts/ship-claim"
+CEO_HT = HOME / "projects/ceo/bin/ceo-ht"
+PR_CLAIMS = HOME / ".local/state/pr-drain/claims"
+FREEZE = Path(os.environ.get("SHIP_FREEZE_FILE") or RUNNER_STATE / "app-freeze")
+HYPERTASK_REPO = HOME / "projects/hypertask"
+PROJECTS = HOME / "projects"
+LANE_CAP = 4
+CLAIM_TTL = 1800
+CACHE_TTL = 120
+BLOCK_LOOKUPS = 20
+
+# board -> (new-work columns, building columns)
+BOARDS = {
+    "15": (("Bugs", "Improvements", "Features"), ("In Progress", "AI Review", "QA")),
+    "2060": (("Todo",), ("Doing", "AI Review")),
+    "4060": (("Backlog",), ("In Progress", "AI Review")),
+    "11514": (("Backlog",), ("In Progress", "AI Review")),
+}
+BOARD_ORDER = {b: i for i, b in enumerate(BOARDS)}
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "YPER4": "4060", "HYCI": "11514"}
+RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
+CI_LABELS = {"ci", "hypertask ci"}
+SKIP_ALL = {"brain-extra-hard"}
+SKIP_APP = {"design-pass", "cursor bugs 7 nov", "cursor runners 6 nov", "cursor cloud 7 nov"}
+SKIP_INFRA = {"agent feedback"}
+SKIP_SF = {"multiprompt android", "wazig", "postbox", "live chat"}
+SF_SKIP_TICKETS = {"IGSH-1816"}
+SF_LEAD = "multi bot opus lead"
+SF_REPOS = {"multiprompt": "multiprompt", "triage": "triage", "chromescribe": "chromescribe",
+            "calorie tracker mcp": "calorie-mcp-proto", "valentin yeo site": "valentinyeocom",
+            "yeo ux site": "yeoux-site", "pecunia": "pecunia", "endless testing": "endless-testing",
+            "claude cro": "claude-cro", "screencast2": "screencast2-go", "token ladder": "token-ladder",
+            "upwork auto applier": "upwork-auto-applier"}
+SF_HOLD = HOME / ".local/state/multibot/hold.txt"
+BRAINS = (("brain-hard", "grok-4.7-high", "high"), ("brain-medium", "grok-4.7-medium", "medium"),
+          ("brain-light", "composer-2.5", "medium"))
+TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|YPER4|HYCI)-([0-9]+)\b")
+RETIRED = re.compile(r"^(?:ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
+PR_REPO = "hypertask-ai/hypertask"
+
+
+def log(msg):
+    print(msg, file=sys.stderr)
+
+
+def roster_runners():
+    try:
+        return int(json.load(open(HERE / "roster.json")).get("runners", 20))
+    except (OSError, ValueError):
+        return 20
+
+
+RUNNERS = int(os.environ.get("FLEET_RUNNERS") or roster_runners())
+
+
+def ht(*args):
+    r = subprocess.run(["hypertask", "--json", *args], capture_output=True, text=True, timeout=600)
+    try:
+        return json.loads(r.stdout[r.stdout.index("{"):])
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------- snapshot
+
+def slim(t, board):
+    holders = []
+    for a in t.get("assignees") or []:
+        ag = a.get("agent") or {}
+        name = (ag.get("displayName") or a.get("displayName") or a.get("name") or "").strip().lower()
+        if name:
+            holders.append([name, bool(ag) or a.get("type") == "agent"])
+    p = t.get("priority")
+    p = p if isinstance(p, str) else (p or {}).get("Priority_Value")
+    return {"key": t["ticketNumber"], "idx": t.get("uniqueIndex"), "board": board, "section": t.get("section") or "",
+            "title": " ".join((t.get("title") or "").split()), "prio": p or "Medium",
+            "labels": sorted({(l.get("name") or "").strip().lower() for l in t.get("labels") or []}),
+            "holders": holders, "waiting": bool(t.get("waitingOnUserId") or t.get("blockerCommentId")),
+            "subs": bool(t.get("sub_tasks")), "paid": "paid" in (t.get("description") or "").lower(),
+            "created": t.get("createdAt") or "", "updated": t.get("updatedAt") or ""}
+
+
+def list_section(board, section):
+    rows, offset = [], 0
+    while True:
+        d = ht("task", "list", "--project", board, "--section", section, "--limit", "100", "--offset", str(offset))
+        if not d or not isinstance(d.get("tasks"), list):
+            raise RuntimeError(f"board {board} column {section} unreadable")
+        rows += d["tasks"]
+        offset += len(d["tasks"])
+        if len(d["tasks"]) < 100:
+            return [slim(t, board) for t in rows if TICKET.fullmatch(t.get("ticketNumber") or "")]
+
+
+def load_snapshot():
+    cache = os.environ.get("FLEET_PICK_CACHE")
+    if cache and os.path.exists(cache) and time.time() - os.path.getmtime(cache) < (3600 if os.environ.get("FLEET_PICK_VIRTUAL") else CACHE_TTL):
+        return json.load(open(cache))
+    snap = {"tickets": [], "rel": {}, "prs": None}
+    for board, (new, building) in BOARDS.items():
+        for section in new + building:
+            snap["tickets"] += list_section(board, section)
+    if cache:
+        save_cache(snap)
+    return snap
+
+
+def save_cache(snap):
+    cache = os.environ.get("FLEET_PICK_CACHE")
+    if cache:
+        tmp = f"{cache}.{os.getpid()}"
+        json.dump(snap, open(tmp, "w"))
+        os.replace(tmp, cache)
+
+
+SNAP = None
+
+
+def relations(key):
+    """(blocked_by_open: set of open tickets this one waits on, blocks_app: app tickets waiting on this one)."""
+    rel = SNAP["rel"]
+    if key not in rel:
+        d = ht("task", "relations", key)
+        waits, blocks = [], []
+        for r in (d or {}).get("relations") or []:
+            other = r.get("otherTask") or {}
+            num = other.get("ticketNumber") or ""
+            if r.get("relationType") != "BlockedBy" or other.get("status") == "Archive":
+                continue
+            # outgoing: this ticket waits on `other`; incoming: `other` waits on this ticket
+            (waits if r.get("direction") == "outgoing" else blocks).append(num)
+        rel[key] = [waits, blocks]
+        save_cache(SNAP)
+    return rel[key]
+
+
+# ---------------------------------------------------------------- helpers
+
+def rank(t):
+    return RANK.get(t["prio"], 2)
+
+
+def names(t):
+    return [h[0] for h in t["holders"]]
+
+
+def live_runner(name):
+    m = re.fullmatch(r"runner (\d+)", name)
+    return bool(m) and 1 <= int(m[1]) <= RUNNERS
+
+
+def retired(name):
+    return bool(RETIRED.match(name)) or (bool(re.fullmatch(r"runner \d+", name)) and not live_runner(name))
+
+
+def orphan(t):
+    """Nobody holds it, or only retired logins: any runner may adopt it."""
+    return all(retired(n) for n in names(t))
+
+
+def free_for(t, me):
+    return all(n == me or retired(n) for n in names(t))
+
+
+def is_ci(t):
+    return bool(set(t["labels"]) & CI_LABELS) or t["board"] == "11514"
+
+
+def lane(t):
+    if is_ci(t):
+        return "ci"
+    return {"15": "app", "2060": "sf", "4060": "infra"}[t["board"]]
+
+
+def in_lane(t):
+    return lane(t) in ("ci", "infra")
+
+
+def brain(t):
+    for label, model, effort in BRAINS:
+        if label in t["labels"]:
+            return label, model, effort
+    return "brain-medium", "grok-4.7-medium", "medium"
+
+
+def sf_repo(t):
+    for label, d in SF_REPOS.items():
+        if label in t["labels"]:
+            return str(PROJECTS / d)
+    return str(PROJECTS)
+
+
+def repo_for(t):
+    return sf_repo(t) if t["board"] == "2060" else str(HYPERTASK_REPO)
+
+
+def url(t):
+    return f"https://app.hypertask.ai/detail/project-{t['board']}/{t['idx']}"
+
+
+# ---------------------------------------------------------------- claims
+
+def claim_files():
+    out = {}
+    now = time.time()
+    try:
+        for p in STATE.joinpath("claims").iterdir():
+            if not p.name.startswith(".") and now - p.stat().st_mtime < CLAIM_TTL:
+                n, key = p.read_text().split("\t")[:2]
+                out[key] = n
+    except OSError:
+        pass
+    return out
+
+
+def virtual_claims():
+    out = {}
+    path = os.environ.get("FLEET_PICK_VIRTUAL")
+    if path and os.path.exists(path):
+        for line in open(path):
+            n, key = line.rstrip("\n").split("\t")[:2]
+            out[key] = n
+    return out
+
+
+def record_claim(n, key, dry):
+    if dry:
+        path = os.environ.get("FLEET_PICK_VIRTUAL")
+        if path:
+            with open(path, "a") as f:
+                f.write(f"{n}\t{key}\n")
+        return
+    d = STATE / "claims"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / key).write_text(f"{n}\t{key}\t{dt.datetime.now(dt.timezone.utc).isoformat()}")
+
+
+def ceo(n, *args):
+    env = dict(os.environ, CEO_AGENT=f"RUNNER {n}", SHIP_SESSION_NAME=f"RUNNER {n}")
+    r = subprocess.run([str(CEO_HT), *args], capture_output=True, text=True, env=env, timeout=300)
+    return r.returncode, r.stdout + r.stderr
+
+
+def adopt(n, t, why):
+    """Assign the ticket to Runner N and say so in the agent lane. Used where ship-claim does not apply."""
+    resume = os.environ.get("SHIP_CLAIM_RESUME", f"tmux attach -t fleet-runner-{n}")
+    rc, _ = ceo(n, "task", "assign", t["key"], "--self")
+    if rc != 0:
+        return False
+    rc, _ = ceo(n, "activity", "add", t["key"], f"Claimed. Session working it now. Claim id: [{resume}]\n{why}. Resume: {resume}")
+    return rc == 0
+
+
+def ship_claim(n, key):
+    env = dict(os.environ, SHIP_SESSION_NAME=f"RUNNER {n}")
+    r = subprocess.run([str(SHIP_CLAIM), key, env.get("SHIP_CLAIM_RESUME", "")], capture_output=True, text=True, env=env, timeout=900)
+    return r.returncode, r.stdout + r.stderr
+
+
+def held_ticket(out):
+    m = re.search(r"(?:still has open PRs|unfinished merged work):?\s*(.*)", out)
+    if not m:
+        return None
+    found = TICKET.search(m.group(1))
+    if found:
+        return found[0]
+    for pr in re.findall(r"/pull/([0-9]+)", m.group(1)):
+        r = subprocess.run(["gh", "pr", "view", pr, "-R", PR_REPO, "--json", "title", "--jq", ".title"], capture_output=True, text=True)
+        found = TICKET.search(r.stdout) if r.returncode == 0 else None
+        if found:
+            return found[0]
+    return None
+
+
+# ---------------------------------------------------------------- the pick
+
+class Pick(Exception):
+    def __init__(self, t, source):
+        self.t, self.source = t, source
+
+
+def by_key(key):
+    return next((t for t in SNAP["tickets"] if t["key"] == key), None)
+
+
+def fetch_ticket(key):
+    """A ticket the board lists in none of the pick columns (for example the ticket of a PR)."""
+    t = by_key(key)
+    if t:
+        return t
+    d = ht("task", "get", key)
+    try:
+        raw = d["tasks"][0]
+        t = slim(raw, str(raw.get("projectId") or raw.get("boardId")))  # a moved ticket answers with its new key
+    except (TypeError, KeyError, IndexError):
+        return None
+    if t["board"] not in BOARDS:
+        return None
+    SNAP["tickets"].append(t)
+    return t
+
+
+def resting(n, key):
+    """Own ticket this runner ended IDLE on less than 2 hours ago: it waits on someone else, so take other work."""
+    try:
+        if (RUNNER_STATE / f"runner-{n}.result").read_text().strip() != "IDLE":
+            return False
+        picks = [l for l in open(RUNNER_STATE / f"runner-{n}.log") if " pick: " in l]
+        stamp, rest = picks[-1].split(" pick: ", 1)
+        when = dt.datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
+        return rest.split()[0] == key and (dt.datetime.now(dt.timezone.utc) - when).total_seconds() < 7200
+    except (OSError, IndexError, ValueError):
+        return False
+
+
+def lane_count(taken):
+    """Runners that hold CI or infra work: by board assignment, plus claims the board does not show yet."""
+    held = [t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][1] and in_lane(t)]
+    runners = {n for t in held for n in names(t) if live_runner(n)}
+    shown = {t["key"] for t in held if any(live_runner(n) for n in names(t))}
+    return len(runners) + len({k for k in taken if k not in shown and by_key(k) and in_lane(by_key(k))})
+
+
+def sf_eligible(t):
+    labels = set(t["labels"])
+    if labels & (SKIP_SF | CI_LABELS | SKIP_ALL) or t["subs"] or t["waiting"] or t["paid"] or t["key"] in SF_SKIP_TICKETS:
+        return False
+    if SF_LEAD in names(t):
+        return False
+    if "multiprompt" in labels and t["prio"] == "Urgent":
+        return False
+    try:
+        hold = {l.split()[0] for l in open(SF_HOLD) if l.strip() and not l.startswith("#")}
+    except OSError:
+        hold = set()
+    return t["key"] not in hold
+
+
+def eligible_new(t):
+    """May a runner start this ticket from its new-work column? Rules of the five old pickers."""
+    labels = set(t["labels"])
+    if labels & SKIP_ALL or t["waiting"] or not t["section"] in BOARDS[t["board"]][0]:
+        return False
+    if t["board"] == "2060":
+        return sf_eligible(t)
+    if t["board"] == "15" and not is_ci(t):
+        return not labels & SKIP_APP and not any(h[1] for h in t["holders"])
+    if t["board"] == "4060":
+        return not labels & SKIP_INFRA
+    return True
+
+
+def orphan_ok(t):
+    if t["board"] == "2060":
+        return sf_eligible(t)
+    return is_ci(t) or t["board"] != "15" or not set(t["labels"]) & SKIP_APP
+
+
+def blocked(t):
+    open_now = {x["key"] for x in SNAP["tickets"]}
+    return any(w in open_now for w in relations(t["key"])[0])
+
+
+def blocks_app(t):
+    return any(PREFIX_BOARD.get(k.split("-")[0]) in ("15", "2060") for k in relations(t["key"])[1])
+
+
+def try_claim(n, t, source, dry):
+    """Claim t for Runner N. Returns True when it is ours, raises Pick for an own ticket found by a refusal."""
+    if dry:
+        record_claim(n, t["key"], True)
+        return True
+    if t["board"] == "2060" or source == "orphan":
+        ok = adopt(n, t, "Adopted from a runner that no longer works it; staying on it until it is live" if source == "orphan" else "Picked by fleet/pick")
+        if ok and t["board"] == "2060" and t["section"] == "Todo":
+            ceo(n, "task", "move", t["key"], "--section", "Doing")
+        if ok:
+            record_claim(n, t["key"], False)
+        return ok
+    rc, out = ship_claim(n, t["key"])
+    if rc == 0:
+        record_claim(n, t["key"], False)
+        return True
+    if rc == 4:
+        own = held_ticket(out)
+        if own and fetch_ticket(own):
+            raise Pick(fetch_ticket(own), "own")
+        log(f"hold {t['key']}: {out.strip().splitlines()[-1] if out.strip() else 'no reason'}")
+    return False
+
+
+def pr_candidates(n, taken):
+    """pr-drain-pick rules: draft PRs and red PRs idle for 6 hours, unowned or with a stale claim."""
+    if SNAP["prs"] is None:
+        tok = subprocess.run(["gh-app-token"], capture_output=True, text=True).stdout.strip()
+        if not tok:
+            raise RuntimeError("empty GitHub App token")
+        r = subprocess.run(["gh", "pr", "list", "--repo", PR_REPO, "--base", "production", "--state", "open", "--limit", "1000",
+                            "--json", "number,title,isDraft,headRefName,updatedAt,statusCheckRollup"],
+                           capture_output=True, text=True, env=dict(os.environ, GH_TOKEN=tok), timeout=300)
+        prs = json.loads(r.stdout)
+        if not isinstance(prs, list) or len(prs) >= 1000:
+            raise RuntimeError("incomplete PR list")
+        SNAP["prs"] = [{"number": p["number"], "title": p["title"], "draft": p["isDraft"], "branch": p["headRefName"],
+                        "updated": p["updatedAt"],
+                        "red": any(c.get("conclusion") in ("FAILURE", "TIMED_OUT") or c.get("state") in ("FAILURE", "ERROR")
+                                   for c in p.get("statusCheckRollup") or [])} for p in prs]
+        save_cache(SNAP)
+    now = dt.datetime.now(dt.timezone.utc)
+    frozen = FREEZE.exists()
+    out = []
+    for p in SNAP["prs"]:
+        idle = now - dt.datetime.fromisoformat(p["updated"].replace("Z", "+00:00"))
+        if frozen:
+            if "HYCI-" not in p["title"] or idle < dt.timedelta(minutes=30):
+                continue
+            key = (0, p["updated"], p["number"])
+        elif p["draft"]:
+            key = (1 if p["branch"].startswith("dependabot/") else 0, p["updated"], p["number"])
+        elif p["red"] and idle > dt.timedelta(hours=6):
+            key = (2, p["updated"], p["number"])
+        else:
+            continue
+        if idle < dt.timedelta(hours=2) and not frozen:
+            continue
+        m = TICKET.search(p["title"])
+        if not m:
+            continue
+        owner = PR_CLAIMS / str(p["number"]) / "owner"
+        try:
+            who, at = owner.read_text().split("\t")
+            if who != f"RUNNER {n}" and now - dt.datetime.fromisoformat(at) < dt.timedelta(hours=3):
+                continue
+        except (OSError, ValueError):
+            pass
+        out.append((key, p, m[0]))
+    return [(p, k) for _, p, k in sorted(out, key=lambda x: x[0])]
+
+
+def choose(n, dry):
+    me = f"runner {n}"
+    taken = {**claim_files(), **virtual_claims()}
+    others = {k for k, who in taken.items() if who != str(n)}
+    mine_claim = [k for k, who in taken.items() if who == str(n)]
+    building = [t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][1]]
+
+    # a. own ticket
+    for t in sorted((t for t in building if me in names(t) and t["section"] != "QA" and not set(t["labels"]) & SKIP_ALL),
+                    key=lambda t: (BOARD_ORDER[t["board"]], rank(t))):
+        if not resting(n, t["key"]) and t["key"] not in others:
+            return t, "own"
+    qa_mine = [t for t in building if me in names(t) and t["section"] == "QA"]
+    if qa_mine:
+        theirs = sorted((t for t in building if t["section"] == "QA" and t["key"] not in others and not set(t["labels"]) & SKIP_ALL
+                         and any(live_runner(h) and h != me for h in names(t)) and "design-pass" not in t["labels"]),
+                        key=lambda t: t["key"])
+        if theirs:
+            return theirs[n % len(theirs)], "cross-qa"
+    full = lambda: lane_count(others) >= LANE_CAP
+    frozen = FREEZE.exists()
+
+    # b. orphans
+    for t in sorted((t for t in building if orphan(t) and t["key"] not in others and not t["waiting"]
+                     and not set(t["labels"]) & (SKIP_ALL | {"design-pass"}) and orphan_ok(t)),
+                    key=lambda t: (rank(t), t["updated"])):
+        if (in_lane(t) and full()) or (frozen and not in_lane(t)):
+            continue
+        if try_claim(n, t, "orphan", dry):
+            return t, "orphan"
+
+    # c. PR queue
+    for p, key in pr_candidates(n, others):
+        t = fetch_ticket(key)
+        if (not t or t["key"] in others or set(t["labels"]) & (SKIP_ALL | {"design-pass"})
+                or any(live_runner(h) and h != me for h in names(t))):
+            continue
+        if (in_lane(t) and full()) or (frozen and not in_lane(t)):
+            continue
+        if try_claim(n, t, "pr", dry):
+            return t, "pr"
+
+    # d, e, f. new work
+    new = [t for t in SNAP["tickets"] if t["key"] not in others and t["key"] not in mine_claim and eligible_new(t)
+           and free_for(t, me)]
+    new.sort(key=lambda t: (rank(t), t["created"]))
+    lane_new = [t for t in new if in_lane(t)]
+    app_new = [t for t in new if not in_lane(t)]
+    tries = 0
+
+    def attempt(cands):
+        nonlocal tries
+        for t in cands:
+            if tries >= 8:
+                return None
+            if t["board"] in ("4060", "11514") or is_ci(t):
+                if blocked(t):
+                    continue
+            tries += 1
+            if try_claim(n, t, "board", dry):
+                return t
+        return None
+
+    if not full():
+        # one relations read per ticket is slow, so only the top BLOCK_LOOKUPS non-Urgent tickets are checked
+        pref = [t for t in lane_new if t["prio"] == "Urgent"]
+        pref += [t for t in [x for x in lane_new if x["prio"] != "Urgent"][:BLOCK_LOOKUPS] if blocks_app(t)]
+        t = attempt(sorted(pref, key=lambda t: (t["prio"] != "Urgent", rank(t), t["created"])))
+        if t:
+            return t, "ci-lane"
+    if not frozen:
+        t = attempt(sorted(app_new, key=lambda t: (BOARD_ORDER[t["board"]], rank(t), t["created"])))
+        if t:
+            return t, "board"
+    if not full():
+        t = attempt(lane_new)
+        if t:
+            return t, "ci-lane"
+    raise SystemExit("none: no free ticket the pool may take" + (" (app freeze: CI and infra only)" if frozen else ""))
+
+
+def render(n, t, source):
+    label, model, effort = brain(t)
+    ln = lane(t)
+    brief_file = HERE / "briefs" / {"app": "app.txt", "ci": "ci.txt", "infra": "infra.txt", "sf": "sf.txt"}[ln]
+    brief = brief_file.read_text().replace("$n", str(n))
+    return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
+            "title": t["title"], "url": url(t), "repo": repo_for(t), "brief_file": str(brief_file), "brief": brief,
+            "brain": label, "model": model, "effort": effort, "labels": t["labels"]}
+
+
+def main():
+    global SNAP
+    args = [a for a in sys.argv[1:]]
+    if "--check-access" in args:
+        return check_access()
+    dry = "--dry-run" in args
+    pos = [a for a in args if not a.startswith("--")]
+    if len(pos) != 1 or not pos[0].isdigit() or not 1 <= int(pos[0]) <= max(RUNNERS, 1):
+        sys.exit(f"usage: fleet/pick <1..{RUNNERS}> [--dry-run] [--json] | --check-access")
+    n = int(pos[0])
+    lock = None
+    if not dry:
+        STATE.mkdir(parents=True, exist_ok=True)
+        lock = open(STATE / ".lock", "a")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        SNAP = load_snapshot()
+        try:
+            t, source = choose(n, dry)
+        except Pick as p:
+            t, source = p.t, p.source
+        if dry and source in ("own", "cross-qa"):
+            record_claim(n, t["key"], True)
+        pick = render(n, t, source)
+    except (RuntimeError, OSError, ValueError) as e:
+        sys.exit(f"fleet/pick: board or claims unreadable ({type(e).__name__}: {e}); do not pick new work")
+    if "--json" in args:
+        print(json.dumps(pick))
+    else:
+        print("\t".join([pick["ticket"], pick["model"], pick["effort"], f"{pick['source']}{' (dry run)' if dry else ''}",
+                         pick["lane"], pick["repo"]]))
+
+
+# ---------------------------------------------------------------- access check
+
+def check_access():
+    """Read only: does Runner 1..N have a login file, and sit on each board? Prints no secrets."""
+    cred = HOME / ".config/hypertask-agents/credentials/sessions"
+    members = {}
+    for b in BOARDS:
+        d = ht("project", "members", "--project", b)
+        members[b] = {(m.get("displayName") or "").lower() for m in (d or {}).get("members") or []} if d else None
+    ids = {}
+    d = ht("agents", "list", "--query", "Runner", "--limit", "200")
+    for a in (d or {}).get("agents") or []:
+        if re.fullmatch(r"Runner \d+", a.get("display_name") or ""):
+            ids[a["display_name"].lower()] = a["id"]
+    print("runner\tlogin\ttoken\t" + "\t".join(BOARDS) + "\tmissing")
+    missing_any = []
+    for n in range(1, RUNNERS + 1):
+        name = f"runner {n}"
+        token = (cred / f"runner-{n}-agent-token").is_file()
+        row = ["yes" if name in ids else "NO", "yes" if token else "NO"]
+        miss = []
+        for b in BOARDS:
+            ok = None if members[b] is None else name in members[b]
+            row.append("?" if ok is None else "yes" if ok else "NO")
+            if ok is False:
+                miss.append(b)
+        print(f"Runner {n}\t" + "\t".join(row) + "\t" + ",".join(miss))
+        missing_any += [(n, b) for b in miss]
+    if missing_any:
+        print("\nAdd a missing member (board owner or Valentin's login), per board:")
+        print("  hypertask project invite <board-id> --user <agent-uuid>")
+        print("or with the management key:")
+        print("  hypertask agents update --id <agent-uuid> --add-project <board-id>")
+        for n, b in missing_any:
+            print(f"  Runner {n} board {b}: hypertask project invite {b} --user {ids.get(f'runner {n}', '<no login found>')}")
+
+
+if __name__ == "__main__":
+    main()
