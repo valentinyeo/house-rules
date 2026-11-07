@@ -79,7 +79,10 @@ def blockers(key):
 
 
 def note(key, text):
-    vcc("activity", "add", key, text, check=False)
+    """The agent-lane note that says why the ticket left In Progress. `activity add` takes no --json."""
+    r = subprocess.run(["vcc", "activity", "add", key, text], capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        print(f"WARNING {key}: agent-lane note not written: {(r.stderr or r.stdout).strip()[-200:]}", file=sys.stderr)
 
 
 def release(key, t):
