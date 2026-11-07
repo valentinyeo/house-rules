@@ -1,0 +1,5 @@
+[Unit]
+Description=House rule: no CI on this VPS (switch off GitHub runners)
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/house-rules/bin/no-vps-ci

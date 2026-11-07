@@ -1,0 +1,7 @@
+[Unit]
+Description=Every 5 min: no CI on this VPS
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
