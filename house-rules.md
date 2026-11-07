@@ -87,7 +87,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - One platform per ticket and per image. Desktop and Android get separate tickets and keyframes. Never one combined screen. (2026-10-31, why: "its android or desktop not both")
 - One Figma file for our apps. One page per ticket, named "<ID> <short what>". Newest worked page on top. (2026-10-29, why: "one big file with loads of pages")
 - Show design work as a screencast2.com image link in chat. Make it with `sc2-upload <png>`. It embeds; no Figma load. (2026-10-29, why: "i can see them right away in the chat")
-- yeoux.net report pages show data, KPIs and bars only, no explanations. Labels 1 to 4 words, no prose. No words in chips or boxes. Method goes in one closed Data block. Enforcer: poteto-2-advisor `bin/page-words`, run by each page generator before publish; it refuses bordered tags. (2026-11-07, why: "i want data/kpis and charts/bars not explanations"; "don't put words in chips")
+- yeoux.net report pages show data, KPIs and bars only, no explanations. Labels 1 to 4 words, no prose. No words in chips or boxes. Method goes in one closed Data block. Read the dataviz skill before building. Big-number KPI tiles on top, then bars. Pace is a signed number. Enforcer: poteto-2-advisor `bin/page-words`, run by each page generator before publish; it refuses bordered tags. (2026-11-07, why: "i want data/kpis and charts/bars not explanations"; "don't put words in chips"; "why do we have no kpi blocks on top")
 
 ## Talking to Valentin
 - No status messages, Telegram, briefings or digests to Valentin. Only new releases reaching his desktop matter. (2026-10-25, why: he never asked for them)
