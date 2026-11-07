@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Fleet snapshot: every runner, whether it runs, and the tickets it holds. Read only.
+
+Run right before a fleet switch. Saves JSON to ~/.local/state/fleet-switch/snapshot-<UTC>.json.
+Reads boards through the `hypertask` CLI and tmux; never writes to a board.
+Usage: fleet/snapshot [--boards 15,2060,4060,11514]
+"live" means its tmux session or state row exists, as board-health counts it. It does not prove an agent runs in it.
+"""
+import argparse
+import json
+import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "skills/hypertask-triage/scripts"))
+import scopes  # noqa: E402
+
+SHIPPED = re.compile(r"^(done|flag:|no flag)", re.I)
+
+
+def ht(*args):
+    r = subprocess.run(["hypertask", "--json", *args], capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def open_tickets(board):
+    tickets, offset = [], 0
+    while True:
+        page = ht("task", "list", "--project", str(board), "--status", "Normal",
+                  "--limit", "100", "--offset", str(offset)).get("tasks", [])
+        tickets += page
+        if len(page) < 100:
+            return [t for t in tickets if not SHIPPED.match(t.get("section") or "")]
+        offset += 100
+
+
+BUILDING = re.compile(r"^(in progress|doing|ai review|qa)$", re.I)
+
+
+def prs(t):
+    """PR links. The list call leaves them out, so tickets being built get one full read."""
+    rows = t.get("pullRequests")
+    if rows is None and BUILDING.match(t.get("section") or ""):
+        rows = ((ht("task", "get", t["ticketNumber"]).get("tasks") or [{}])[0]).get("pullRequests")
+    return [p.get("url") or p.get("htmlUrl") or p.get("prUrl") or "" for p in rows or []]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--boards", default="15,2060,4060,11514")
+    boards = [int(b) for b in ap.parse_args().boards.split(",")]
+    live_sessions = scopes.sessions()
+    patterns, live, always = [], set(), set()
+    for k in scopes.SCOPES:
+        if scopes.SCOPES[k]["board"] in boards:
+            p, l, a = scopes.workers(scopes.get(k), live_sessions)
+            patterns, live, always = patterns + p, live | l, always | a
+    with ThreadPoolExecutor(4) as ex:
+        tickets = [t for ts in ex.map(open_tickets, boards) for t in ts]
+    held = {}
+    with ThreadPoolExecutor(4) as ex:
+        links = list(ex.map(prs, tickets))
+    for t, links_t in zip(tickets, links):
+        for a in t.get("assignees") or []:
+            name = (a.get("agent") or {}).get("displayName")
+            if name and scopes.is_worker(name, patterns):
+                held.setdefault(name, []).append({
+                    "ticket": t.get("ticketNumber"), "board": t.get("projectId"),
+                    "column": t.get("section"), "prs": links_t, "title": (t.get("title") or "")[:70]})
+    known = {n.lower() for n in held}
+    names = sorted(set(held) | {n.title() for n in live if n not in known}, key=str.lower)
+    rows = [{"worker": n, "live": n.lower() in live or n.lower() in always, "tickets": held.get(n, [])}
+            for n in names]
+    at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out = Path.home() / ".local/state/fleet-switch" / f"snapshot-{at}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"at": at, "boards": boards, "workers": rows}, indent=1))
+    for r in rows:
+        ts = "; ".join(f"{x['ticket']} [{x['column']}] {' '.join(x['prs']) or 'no PR'}" for x in r["tickets"]) or "-"
+        print(f"{r['worker']:<28} {'live' if r['live'] else 'DOWN'}  {ts}")
+    held_n = sum(len(r["tickets"]) for r in rows)
+    print(f"SNAPSHOT {len(rows)} workers, {sum(r['live'] for r in rows)} live, {held_n} tickets held. Saved {out}")
+
+
+if __name__ == "__main__":
+    main()
