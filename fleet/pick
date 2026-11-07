@@ -611,7 +611,7 @@ def try_claim(n, t, source, dry):
         mine = fetch_ticket(own) if own else None
         if mine and own not in SKIP[0] and not held_back(mine, own=True):
             raise Pick(mine, "own")
-        if mine and "unfinished merged work" in out and parkable(mine):  # an open-PR hold is not cleared by parking
+        if mine and parkable(mine):  # parking clears both holds: ship-claim lets a parked ticket's open PR go too
             raise Pick(mine, "park")
         if mine:
             log(f"hold {t['key']}: unfinished {own} rests or waits (IDLE and unchanged, or BlockedBy open); its park job already ran "
