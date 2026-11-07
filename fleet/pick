@@ -13,6 +13,8 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
   e. new work: board 15 (ai-feedback included), then 2060, then 4060
   f. the rest of the CI or infra lane, same cap
 One runner holds one ticket until it is live. brain-extra-hard is skipped everywhere.
+A ticket a runner ended IDLE on rests for 2 hours (runner-N.idle): no branch picks it again for that runner.
+ship-claim runs with SHIP_CLAIM_PICKED=1: this picker already ordered infra against app work, so its infra-first hold is skipped.
 --dry-run never claims and never writes under ~/.local/state. FLEET_PICK_VIRTUAL=<file> makes dry runs
 share virtual claims (so 20 separate dry runs give 20 different tickets); FLEET_PICK_CACHE=<file> reuses one
 board snapshot. Exit 0 with a pick, exit 1 with the reason on stderr.
@@ -286,7 +288,7 @@ def adopt(n, t, why):
 
 
 def ship_claim(n, key):
-    env = dict(os.environ, SHIP_SESSION_NAME=f"RUNNER {n}")
+    env = dict(os.environ, SHIP_SESSION_NAME=f"RUNNER {n}", SHIP_CLAIM_PICKED="1")
     r = subprocess.run([str(SHIP_CLAIM), key, env.get("SHIP_CLAIM_RESUME", "")], capture_output=True, text=True, env=env, timeout=900)
     return r.returncode, r.stdout + r.stderr
 
@@ -334,17 +336,50 @@ def fetch_ticket(key):
     return t
 
 
-def resting(n, key):
-    """Own ticket this runner ended IDLE on less than 2 hours ago: it waits on someone else, so take other work."""
+def last_run(n):
+    """(ticket, end time, result) of the run this runner finished last, from its launcher log and result file."""
+    key = end = None
     try:
-        if (RUNNER_STATE / f"runner-{n}.result").read_text().strip() != "IDLE":
-            return False
-        picks = [l for l in open(RUNNER_STATE / f"runner-{n}.log") if " pick: " in l]
-        stamp, rest = picks[-1].split(" pick: ", 1)
-        when = dt.datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
-        return rest.split()[0] == key and (dt.datetime.now(dt.timezone.utc) - when).total_seconds() < 7200
-    except (OSError, IndexError, ValueError):
-        return False
+        for line in open(RUNNER_STATE / f"runner-{n}.log"):
+            stamp, sep, rest = line.partition(" pick: ")
+            found = TICKET.match(rest) if sep else None
+            if found:
+                key, end = found[0], stamp.strip()
+            elif key and line.rstrip().endswith(" end"):
+                end = line.split()[0]
+        result = (RUNNER_STATE / f"runner-{n}.result").read_text().strip()
+    except OSError:
+        return None
+    return (key, end, result) if key else None
+
+
+def resting(n, dry):
+    """Tickets this runner ended IDLE on less than 2 hours ago: they wait on someone else, so take other work.
+    IDLE ends are kept in runner-N.idle, so later runs and 'nothing to start' lines do not make it forget."""
+    path = RUNNER_STATE / f"runner-{n}.idle"
+    seen = {}
+    try:
+        for line in open(path):
+            stamp, key = line.split()
+            seen[key] = max(seen.get(key, ""), stamp)
+    except (OSError, ValueError):
+        pass
+    last = last_run(n)
+    if last and last[2] == "IDLE" and last[1] and seen.get(last[0]) != last[1]:
+        seen[last[0]] = last[1]
+        if not dry:
+            with open(path, "a") as f:
+                f.write(f"{last[1]} {last[0]}\n")
+    now = dt.datetime.now(dt.timezone.utc)
+    rest = set()
+    for key, stamp in seen.items():
+        try:
+            when = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if (now - when).total_seconds() < 7200:
+            rest.add(key)
+    return rest
 
 
 def lane_count(taken):
@@ -476,16 +511,17 @@ def choose(n, dry):
     taken = {**claim_files(), **virtual_claims()}
     others = {k for k, who in taken.items() if who != str(n)}
     mine_claim = [k for k, who in taken.items() if who == str(n)]
+    skip = others | resting(n, dry)
     building = [t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][1]]
 
     # a. own ticket
     for t in sorted((t for t in building if me in names(t) and t["section"] != "QA" and not set(t["labels"]) & SKIP_ALL),
                     key=lambda t: (BOARD_ORDER[t["board"]], rank(t))):
-        if not resting(n, t["key"]) and t["key"] not in others:
+        if t["key"] not in skip:
             return t, "own"
     qa_mine = [t for t in building if me in names(t) and t["section"] == "QA"]
     if qa_mine:
-        theirs = sorted((t for t in building if t["section"] == "QA" and t["key"] not in others and not set(t["labels"]) & SKIP_ALL
+        theirs = sorted((t for t in building if t["section"] == "QA" and t["key"] not in skip and not set(t["labels"]) & SKIP_ALL
                          and any(live_runner(h) and h != me for h in names(t)) and "design-pass" not in t["labels"]),
                         key=lambda t: t["key"])
         if theirs:
@@ -494,7 +530,7 @@ def choose(n, dry):
     frozen = FREEZE.exists()
 
     # b. orphans
-    for t in sorted((t for t in building if orphan(t) and t["key"] not in others and not t["waiting"]
+    for t in sorted((t for t in building if orphan(t) and t["key"] not in skip and not t["waiting"]
                      and not set(t["labels"]) & (SKIP_ALL | {"design-pass"}) and orphan_ok(t)),
                     key=lambda t: (rank(t), t["updated"])):
         if (in_lane(t) and full()) or (frozen and not in_lane(t)):
@@ -505,7 +541,7 @@ def choose(n, dry):
     # c. PR queue
     for p, key in pr_candidates(n, others):
         t = fetch_ticket(key)
-        if (not t or t["key"] in others or set(t["labels"]) & (SKIP_ALL | {"design-pass"})
+        if (not t or t["key"] in skip or set(t["labels"]) & (SKIP_ALL | {"design-pass"})
                 or any(live_runner(h) and h != me for h in names(t))):
             continue
         if (in_lane(t) and full()) or (frozen and not in_lane(t)):
@@ -514,7 +550,7 @@ def choose(n, dry):
             return t, "pr"
 
     # d, e, f. new work
-    new = [t for t in SNAP["tickets"] if t["key"] not in others and t["key"] not in mine_claim and eligible_new(t)
+    new = [t for t in SNAP["tickets"] if t["key"] not in skip and t["key"] not in mine_claim and eligible_new(t)
            and free_for(t, me)]
     new.sort(key=lambda t: (rank(t), t["created"]))
     lane_new = [t for t in new if in_lane(t)]
