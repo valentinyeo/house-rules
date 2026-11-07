@@ -14,7 +14,14 @@ exceed workers; QA has its own cap. --fix runs the safe fixes first.
 Valentin, 2026-11-06: "the outcome of the skill is to force the chief of
 staff to fix all of this, and make sure that the system is running smoothly".
 
-usage: board-health [--board 15] [--fix] [--apply] [--alarm-board 4060] [--self-test]
+Free the queue (YPER4-1371): a runner holds one ticket until it is live. --fix
+unassigns every worker from the tickets it holds in a column nobody builds in
+(Bugs, Features, Improvements, Backlog, Todo, UX needed, Later (parked) and the
+like) and notes each one in the agent lane. Agent Blocked and Valentin Review
+holds stay: those wait on something else. --plan prints every fix and writes
+nothing. --only queue limits --plan or --fix to this one.
+
+usage: board-health [--board 15] [--plan] [--fix [--only queue]] [--apply] [--alarm-board 4060] [--self-test]
 Exit 0 GREEN, 1 RED.
 """
 import argparse
@@ -309,10 +316,29 @@ def self_test():
     assert plan["C"][0][0][-1] == "brain-medium" and "app feedback reporter" in plan["C"][1]
     assert "A" not in plan and plan["B"][0] == [["vcc", "task", "unassign", "B", "--agent", "Runner 1"]], "kept the wrong ticket"
     assert "HTPR-6" not in {n for n, _, _ in plan_fixes(4060, None, st)}, "merged moves to QA only on board 15"
+    pats = [scopes._pattern(p) for p in ("Runner {n}", "HT Design Builder")]
+    tk = lambda num, sec, *names: {"ticketNumber": num, "section": sec, "title": "t",
+                                   "assignees": [{"agent": {"displayName": n}} for n in names]}
+    held = queue_rows([tk("A", "Bugs", "Runner 1"), tk("B", "In Progress", "Runner 1"), tk("C", "Later (parked)", "Runner 2"),
+                       tk("D", "Agent Blocked (Infra)", "Runner 2"), tk("E", "Valentin Review", "Runner 3"),
+                       tk("F", "QA", "Runner 3"), tk("G", "Doing", "Runner 4"), tk("H", "AI Review", "Runner 4"),
+                       tk("I", "Flag: Everyone", "Runner 5"), tk("J", "Backlog", "HT Product Lead"), tk("K", "Todo"),
+                       tk("L", "UX needed", "Runner 6", "HT Design Builder", "HT Product Lead"), tk("M", None, "Runner 7")], pats)
+    assert [(r["ticket"], r["worker"]) for r in held] == [("A", "Runner 1"), ("C", "Runner 2"), ("L", "Runner 6"),
+                                                          ("L", "HT Design Builder")], held
+    qp = plan_queue_fixes(held)
+    assert qp[0] == ("A", [["vcc", "task", "unassign", "A", "--agent", "Runner 1"]],
+                     "board-health fix: Unassigned from Runner 1: runners hold one ticket until live. YPER4-1371."), qp[0]
+    assert len(qp) == 4 and plan_queue_fixes([]) == [], qp
+    assert [c for c, n in queue_counts(held)] == ["HT Design Builder", "Runner 1", "Runner 2", "Runner 6"]
     print("SELF_TEST_OK")
 
 
 FIX_BOARDS = {15, 4060}
+QUEUE_FIX_BOARDS = FIX_BOARDS | {2060, 11514}
+KEEP_COLUMNS = re.compile(r"^(in progress|doing|ai review|qa|agent blocked.*|valentin review)$", re.I)
+SHIPPED = re.compile(r"^(done|flag:|no flag)", re.I)
+QUEUE_NOTE = "Unassigned from {who}: runners hold one ticket until live. YPER4-1371."
 HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}, 4060: {"other": 10414}}
 NOTE = "board-health fix:"
 
@@ -358,10 +384,62 @@ def plan_fixes(board, flow, status):
     return plan
 
 
+def queue_rows(tickets, patterns):
+    """One row per worker holding an open ticket in a column nobody builds in. Pure.
+    Building columns, Agent Blocked and Valentin Review stay; shipped columns and people stay."""
+    rows = []
+    for t in tickets:
+        col = t.get("section") or ""
+        if not col or KEEP_COLUMNS.match(col) or SHIPPED.match(col):
+            continue
+        for a in t.get("assignees") or []:
+            who = (a.get("agent") or {}).get("displayName")
+            if who and scopes.is_worker(who, patterns):
+                rows.append({"ticket": t["ticketNumber"], "worker": who, "column": col, "title": (t.get("title") or "")[:70]})
+    return rows
+
+
+def queue_holds(board):
+    """Read only: the queue rows for one whole board. A runner holds one ticket until live on any board, so
+    workers come from every scope on the four fleet boards, as fleet/snapshot counts them (app runners
+    hold Backlog tickets on board 4060)."""
+    live = scopes.sessions()
+    patterns = [p for b in sorted(QUEUE_FIX_BOARDS) for k in scopes.for_board(b) for p in scopes.workers(scopes.get(k), live)[0]]
+    tickets, offset = [], 0
+    while True:
+        page = json.loads(run_text(["hypertask", "--json", "task", "list", "--project", str(board), "--status", "Normal",
+                                    "--limit", "100", "--offset", str(offset)]) or "{}").get("tasks", [])
+        tickets += page
+        if len(page) < 100:
+            return queue_rows(tickets, patterns)
+        offset += 100
+
+
+def plan_queue_fixes(rows):
+    """One unassign and one agent-lane note per held ticket and worker. Pure."""
+    return [(r["ticket"], [["vcc", "task", "unassign", r["ticket"], "--agent", r["worker"]]],
+             f"{NOTE} {QUEUE_NOTE.format(who=r['worker'])}") for r in rows]
+
+
+def queue_counts(rows):
+    return sorted(Counter(r["worker"] for r in rows).items(), key=lambda x: x[0].lower())
+
+
+def show_plan(board, plan, rows):
+    print(f"PLAN board {board}: {len(plan)} fixes, writes nothing")
+    if rows:
+        print(f"QUEUE-HOLDS board {board}: {len(rows)} tickets held in queue columns by {len(queue_counts(rows))} workers")
+        print("  " + "\n  ".join(f"{w}: {n}" for w, n in queue_counts(rows)))
+        cols = Counter(r["column"] for r in rows)
+        print("  columns: " + ", ".join(f"{c} {n}" for c, n in cols.most_common()))
+    for ticket, cmds, note in plan:
+        print(f"WOULD {ticket} [{' && '.join(' '.join(c) for c in cmds) or 'note only'}] {note[len(NOTE) + 1:][:100]}")
+
+
 def apply_fixes(plan):
     done = failed = skipped = 0
     for ticket, cmds, note in plan:
-        log = json.loads(run_text(["hypertask", "--json", "task", "agent-log", ticket]) or "{}").get("activities") or []
+        log = [] if cmds else json.loads(run_text(["hypertask", "--json", "task", "agent-log", ticket]) or "{}").get("activities") or []
         if not cmds and any(note[:60] in (a.get("text") or "") for a in log[:20]):
             skipped += 1
             continue
@@ -383,6 +461,8 @@ def main():
     p.add_argument("--fix", action="store_true", help="run the safe fixes, then score again")
     p.add_argument("--scope", help="a key in scopes.json: a board view one lead owns, e.g. 2060/postbox")
     p.add_argument("--alarm-board", type=int, help="default: the scope's alarm board")
+    p.add_argument("--plan", action="store_true", help="print every safe fix and write nothing")
+    p.add_argument("--only", choices=["queue"], help="with --plan or --fix: run just the free-the-queue fix")
     p.add_argument("--self-test", action="store_true")
     a = p.parse_args()
     if a.self_test:
@@ -390,13 +470,21 @@ def main():
     sc = scopes.get(a.scope or a.board)
     a.board, view, name = sc["board"], bool(sc.get("view")), sc["key"]
     alarm_board = a.alarm_board or sc["alarm_board"]
-    if a.fix:
-        if a.board not in FIX_BOARDS or view:
+    if a.plan or a.fix:
+        if a.board not in QUEUE_FIX_BOARDS or view:
             print(f"FIX not available on {name}: the shared login cannot write there. The lead fixes by hand.")
         else:
-            flow = run_json([str(HERE / "flow-check"), "--scope", name])
-            status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)])
-            apply_fixes(plan_fixes(a.board, flow, status))
+            plan, rows = [], queue_holds(a.board)
+            if a.board in FIX_BOARDS and a.only != "queue":
+                flow = run_json([str(HERE / "flow-check"), "--scope", name])
+                status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)])
+                plan = plan_fixes(a.board, flow, status)
+            plan += plan_queue_fixes(rows)
+            if a.fix and not a.plan:
+                apply_fixes(plan)
+            else:
+                show_plan(a.board, plan, rows)
+                return 0
     whole = not view
     with ThreadPoolExecutor(6) as ex:
         status = ex.submit(run_json, [str(HERE / "wrong-status"), "--board", str(a.board)]) if whole else None
@@ -405,6 +493,7 @@ def main():
         chatter = ex.submit(run_json, [str(HERE / "ticket-check"), "--board", str(a.board)]) if whole else None
         identities = ex.submit(run_json, [str(HERE / "agent-identities")]) if a.board == 15 else None
         prq = ex.submit(run_json, [str(HERE / "pr-queue"), "--scope", name])
+        held = ex.submit(queue_holds, a.board) if whole and a.board in QUEUE_FIX_BOARDS else None
     status = status and status.result()
     if flow.result() is None and a.board in FLOW_BOARDS:
         print(f"BOARD-HEALTH {name}: UNKNOWN, flow-check failed")
@@ -420,10 +509,10 @@ def main():
     red_for, last, before, at = track(name.replace("/", "-"), measured, numbers, now)
     lines, head, escalate = scorecard(name, measured, red_for, last, sc["lead"])
     print("\n".join(lines))
-    if not a.fix and whole and a.board in FIX_BOARDS:
-        fixable = plan_fixes(a.board, f, status)
+    if not a.fix and whole and a.board in QUEUE_FIX_BOARDS:
+        fixable = (plan_fixes(a.board, f, status) if a.board in FIX_BOARDS else []) + plan_queue_fixes(held.result())
         if fixable:
-            print(f"FIXABLE {len(fixable)} safe fixes waiting: rerun with --fix")
+            print(f"FIXABLE {len(fixable)} safe fixes waiting: rerun with --plan to read them, --fix to run them")
     print(headline(numbers, before, at))
     print(head)
     if escalate and a.apply:
