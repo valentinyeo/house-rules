@@ -66,6 +66,11 @@ BOARDS = {
         "waits": {"AI Review": 6},
         "blocked_cap": 5,
     },
+    8783: {
+        "in_progress": "Doing",
+        "waits": {},
+        "blocked_cap": 5,
+    },
 }
 ACTIVE_HOURS = 3
 BRAINS = {"brain-light", "brain-medium", "brain-hard", "brain-extra-hard"}

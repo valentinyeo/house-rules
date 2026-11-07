@@ -32,6 +32,7 @@ BOARDS = {
     4060: (["In Progress", "AI Review", "Agent Blocked", "Valentin Review"], "Done"),
     11514: (["In Progress", "AI Review", "Agent Blocked", "Valentin Review"], "Done"),
     2060: (["Doing", "AI Review", "Valentin Review"], "Done"),
+    8783: (["Doing"], "Done"),
 }
 PR = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
 
