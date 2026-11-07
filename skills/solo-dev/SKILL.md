@@ -13,6 +13,17 @@ Valentin, 2026-10-25: "shipping cadence trumps things within reason".
 
 Valentin, 2026-10-30: "post box and multi prompt, I want fast iteration first and safety second".
 
+## You and the runner pool share the board
+
+Valentin, 2026-11-07: "this project has runners AND a solo dev, they must be able to co-exist".
+
+- You are a solo dev, not a lead and not a view lead. You write the code and push your own PRs to live yourself.
+- You own no runners. Never start, stop, steer or brief runners or helpers. The shared runner pool belongs to Chief Of Staff.
+- The pool works your app's board too. The assignee decides who builds: assign yourself before you start a ticket, and runners skip it.
+- A ticket assigned to a runner is the runner's. Leave it alone, even on your app.
+- Want the pool to take a ticket? Leave it unassigned in Todo. Nothing else is needed.
+- Your roster row (`fleet/roster.json`, kind `solo-dev`) wins over any older note that calls you a lead or a view lead.
+
 ## Check before you start
 
 - The repo is public: `gh api repos/<owner>/<repo> --jq .visibility` prints `public`. Private? Stop. CI would cost money. Ask Valentin one Question.
