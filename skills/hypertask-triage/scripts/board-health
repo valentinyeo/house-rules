@@ -330,6 +330,18 @@ def self_test():
                      "board-health fix: Unassigned from Runner 1: runners hold one ticket until live. YPER4-1371."), qp[0]
     assert len(qp) == 3 and plan_queue_fixes([]) == [], qp
     assert [c for c, n in queue_counts(held)] == ["Runner 1", "Runner 2", "Runner 6"]
+    task = {"assignees": [{"agent": {"id": "u-1", "displayName": "Runner 1"}}, {"agent": {"id": "u-2", "displayName": "Runner 2"}}]}
+    un = ["vcc", "task", "unassign", "A", "--agent", "Runner 2"]
+    assert uuid_retry(un, task) == ["vcc", "task", "unassign", "A", "--agent", "u-2"], "uuid fallback"
+    assert uuid_retry(un, {"assignees": []}) is None and uuid_retry(["vcc", "task", "move", "A", "QA"], task) is None
+    calls, real_run, real_text = [], subprocess.run, globals()["run_text"]
+    fake = lambda c, **k: (calls.append(c), subprocess.CompletedProcess(
+        c, 1 if "Runner 2" in c else 0, "", "no agent named Runner 2 on this board"))[1]
+    subprocess.run, globals()["run_text"] = fake, lambda c: json.dumps({"tasks": [task]})
+    try:
+        assert run_fix(un).returncode == 0 and calls[-1][-1] == "u-2", calls
+    finally:
+        subprocess.run, globals()["run_text"] = real_run, real_text
     print("SELF_TEST_OK")
 
 
@@ -437,6 +449,28 @@ def show_plan(board, plan, rows):
         print(f"WOULD {ticket} [{' && '.join(' '.join(c) for c in cmds) or 'note only'}] {note[len(NOTE) + 1:][:100]}")
 
 
+def uuid_retry(cmd, task):
+    """The same unassign by the agent's UUID from the ticket's own assignees, for a worker that is not a member of the board. Pure."""
+    if cmd[:3] != ["vcc", "task", "unassign"] or "--agent" not in cmd:
+        return None
+    who = cmd[cmd.index("--agent") + 1]
+    for a in (task or {}).get("assignees") or []:
+        ag = a.get("agent") or {}
+        if ag.get("displayName") == who and ag.get("id"):
+            return cmd[:cmd.index("--agent") + 1] + [ag["id"]]
+    return None
+
+
+def run_fix(cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode and "no agent named" in (r.stderr + r.stdout):
+        task = (json.loads(run_text(["hypertask", "--json", "task", "get", cmd[3]]) or "{}").get("tasks") or [None])[0]
+        retry = uuid_retry(cmd, task)
+        if retry:
+            return subprocess.run(retry, capture_output=True, text=True)
+    return r
+
+
 def apply_fixes(plan):
     done = failed = skipped = 0
     for ticket, cmds, note in plan:
@@ -444,7 +478,7 @@ def apply_fixes(plan):
         if not cmds and any(note[:60] in (a.get("text") or "") for a in log[:20]):
             skipped += 1
             continue
-        errs = [r for r in (subprocess.run(c, capture_output=True, text=True) for c in cmds) if r.returncode]
+        errs = [r for r in (run_fix(c) for c in cmds) if r.returncode]
         if errs:
             failed += 1
             print(f"FIX FAILED {ticket}: {(errs[0].stderr or errs[0].stdout).strip()[:160]}")
