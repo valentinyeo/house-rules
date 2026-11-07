@@ -4,6 +4,8 @@
     fleet/park <TICKET> --waits-on <T1[,T2..]>   waits on other tickets: home column, BlockedBy link per blocker, unassigned
     fleet/park <TICKET> --valentin [--comment ID] waits on Valentin: Valentin Review, his name and the red border on ONE marked Question
     fleet/park <TICKET> --unstarted              nothing built, no PR: home column, unassigned
+    fleet/park <TICKET> --hand-back "<left to do>"  unfinished, nothing waits on anyone (e.g. its PR fails to build): unassigns
+                                                 you, column and PR stay, the orphan lane hands it to a fresh runner
     fleet/park <TICKET> --release                another runner owns the work (you were co-assigned, e.g. a cross-check): unassigns only you,
                                                  the ticket and its column stay as they are
     fleet/park --sweep [--apply] [--waits-on KEY=T1,T2 ...] [--valentin KEY[=COMMENT] ...]
@@ -125,6 +127,25 @@ def park_unstarted(key, t=None):
     note(key, f"Parked by fleet/park: nothing was built and no PR exists. Back in {home}, unassigned. Another run starts it fresh; "
               "fleet/pick rests it until the ticket changes.")
     return f"{key} -> {home}, unassigned"
+
+
+def park_hand_back(key, why, t=None):
+    """Unfinished work nobody waits on (a PR that fails to build, a fix the run could not finish): the caller leaves, the ticket
+    keeps its column and PR. The unassign and the note change the ticket, so its IDLE rest ends and the orphan lane hands it to
+    a fresh runner. Without this the caller holds it and gets no new work for three days."""
+    t = t or get(key)
+    who = os.environ["SHIP_SESSION_NAME"]
+    mine, others = co_holders(t, who)
+    if not mine:
+        raise RuntimeError(f"{key}: {who} is not assigned to it, nothing to hand back")
+    if blockers(key):
+        raise RuntimeError(f"{key} has an open BlockedBy link; use --waits-on")
+    if not why.strip():
+        raise RuntimeError("--hand-back needs a reason: what is left to do")
+    vcc("task", "unassign", key, "--agent", mine[0])
+    note(key, f"Handed back by fleet/park: {mine[0]} could not finish it and nothing waits on anyone. Left to do: {why.strip()} "
+              f"Column {t.get('section')} and the PR stay. The next free runner takes it as an orphan.")
+    return f"{key} stays in {t.get('section')}, {mine[0]} unassigned, handed to the orphan lane"
 
 
 def co_holders(t, me):
@@ -345,7 +366,7 @@ def main():
         return sweep(apply, forced)
     key = a[0]
     if not TICKET.match(key) or len(a) < 2:
-        sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release")
+        sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\"")
     try:
         if a[1] == "--waits-on" and len(a) > 2:
             print(park_waits(key, [x for x in a[2].split(",") if x]))
@@ -356,8 +377,10 @@ def main():
             print(park_unstarted(key))
         elif a[1] == "--release":
             print(park_release(key))
+        elif a[1] == "--hand-back" and len(a) > 2:
+            print(park_hand_back(key, " ".join(a[2:])))
         else:
-            sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release")
+            sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\"")
     except RuntimeError as e:
         sys.exit(f"fleet/park: {e}")
 
