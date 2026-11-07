@@ -1,79 +1,447 @@
 {
-  "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name and loads role_skill. No row: it reports 'not in roster' to Chief Of Staff and takes no work. kind: chief, lead, view-lead, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371.",
-  "_updated": "2026-11-07",
-  "rows": [
-    {"name": "poteto-2-advisor", "multibot": "Poteto 2 LC", "kind": "chief", "role_skill": "/hypertask-triage", "login": "Chief Of Staff", "board": "15,2060,4060,11514", "status": "live",
-     "notes": "Poteto takes Chief Of Staff at the switch. Runs the factory only; no app contact. Owns board-health on every board. Reuses the Chief Of Staff login."},
-
-    {"name": "HT Product Lead", "multibot": "HT Product Lead", "kind": "lead", "role_skill": "/lead", "login": "HT Product Lead", "board": "15", "status": "unknown",
-     "notes": "Product decisions for board 15. Owns no runners after the switch."},
-    {"name": "Infra Lead", "multibot": "Infra Lead", "kind": "lead", "role_skill": "/lead", "login": "Infra Lead", "board": "4060", "status": "unknown"},
-    {"name": "CI Boss", "multibot": null, "kind": "lead", "role_skill": "/lead", "login": "CI Boss", "board": "11514", "status": "unknown",
-     "notes": "No board note for 22h on blocking CI tickets (Big Boss Man, 2026-11-07). Check it is running."},
-    {"name": "projects", "multibot": "Mini Boss", "kind": "lead", "role_skill": "/lead", "login": "Mini Boss CEO", "board": "2060", "status": "live",
-     "notes": "Contact for smaller Software Factory apps. Owns no runners and no board health. One notes file per app; reads only the one it needs. Session name inferred from cwd ~/projects/software-factory."},
-    {"name": "ht-support-lead", "kind": "lead", "role_skill": "support-manager", "login": "HT Support Lead", "board": "10450", "status": "live"},
-    {"name": "ht-marketing", "kind": "lead", "role_skill": "marketing-lead", "login": "HT Growth Lead", "board": "2108,2128", "status": "live"},
-    {"name": "HT Design Lead", "kind": "lead", "role_skill": "design-lead", "login": "HT Design Lead", "board": "15", "status": "unknown"},
-    {"name": "SF Design Lead", "multibot": "SF Design Lead", "kind": "lead", "role_skill": "design-lead", "login": "SF Design Lead", "board": "2060", "status": "unknown"},
-    {"name": "HT Finance Lead", "kind": "lead", "role_skill": "finance-lead", "login": "HT Finance Lead", "board": null, "status": "unknown"},
-
-    {"name": "Multi Bot desktop lead", "multibot": "Multi Bot Opus Runner", "kind": "view-lead", "role_skill": "/view-lead", "login": "Multi Bot Opus Lead", "board": "2060", "view": "2060/multi-bot", "app": "multiprompt", "fallback": "Mini Boss CEO", "status": "unknown",
-     "notes": "Multibot label from the sidebar; confirm with mp-layout."},
-    {"name": "multiprompt-android", "multibot": "Multi Bot Android", "kind": "view-lead", "role_skill": "/view-lead", "login": "Multiprompt Android Dev", "board": "2060", "view": "2060/multi-bot-android", "app": "multiprompt-android", "fallback": "Mini Boss CEO", "status": "live"},
-    {"name": "postbox", "multibot": "Postbox", "kind": "view-lead", "role_skill": "/view-lead", "login": "Postbox Dev", "board": "2060", "view": "2060/postbox", "app": "postbox", "fallback": "Mini Boss CEO", "status": "stale",
-     "notes": "tmux Claude idle 37h; the Multibot chat may be the live one."},
-    {"name": "Pecunia", "kind": "view-lead", "role_skill": "/view-lead", "login": null, "board": "2060", "view": null, "app": "pecunia", "fallback": "Mini Boss CEO", "status": "unknown",
-     "notes": "Has its own session (Valentin, 2026-11-07). No board view and no login found yet; create the view at the switch, reuse its login if one exists."},
-    {"name": "chromescribe", "kind": "view-lead", "role_skill": "/view-lead", "login": null, "board": "2060", "view": null, "app": "chromescribe", "fallback": "Mini Boss CEO", "status": "dead",
-     "notes": "Empty shell, no agent. Mini Boss covers it."},
-    {"name": "screencast2-go", "kind": "view-lead", "role_skill": "/view-lead", "login": null, "board": "2060", "view": null, "app": "screencast2", "fallback": "Mini Boss CEO", "status": "dead",
-     "notes": "Empty shell, no agent. Mini Boss covers it."},
-    {"name": "token-ladder", "kind": "view-lead", "role_skill": "/view-lead", "login": null, "board": "2060", "view": null, "app": "token-ladder", "fallback": "Mini Boss CEO", "status": "dead",
-     "notes": "No session. Mini Boss covers it."},
-    {"name": "upwork-auto-applier", "multibot": "UPWORK", "kind": "view-lead", "role_skill": "solo-dev", "login": "Upwork Auto Applier Dev", "board": "8783", "app": "upwork-auto-applier", "fallback": "Mini Boss CEO", "status": "live",
-     "notes": "Own board 8783, not a 2060 view."},
-
-    {"name": "ht-or-runner-{n}", "kind": "runner-pool", "role_skill": "/setup-runner", "login": "Runner {n}", "board": "15", "status": "stale",
-     "members": {"1": "dead", "2": "stale", "3": "stale", "4": "dead", "5": "dead", "6": "dead", "7": "stale", "8": "stale", "9": "dead", "10": "stale"},
-     "notes": "dead = empty shell; stale = Claude open, idle about 40h. Joins the shared pool."},
-    {"name": "poteto-cursor-{n}", "kind": "runner-pool", "role_skill": "/setup-runner", "login": "Runner 1{n}", "board": "15", "status": "live",
-     "notes": "Runners 11-15 on Cursor (Grok). Leave alone until the Grok burn ends."},
-    {"name": "ht-ci-runner-{n}", "kind": "runner-pool", "role_skill": "/setup-runner", "login": "CI Runner {n}", "board": "11514", "status": "dead",
-     "notes": "All 5 empty shells, idle 36h. CI/Infra lane capped at 4 in the shared pool."},
-    {"name": "infra-runner-{n}", "kind": "runner-pool", "role_skill": "/setup-runner", "login": "Infra Runner {n}", "board": "4060", "status": "live"},
-    {"name": "mp-runner-{n}", "kind": "runner-pool", "role_skill": "/setup-runner", "login": "MP Runner {n}", "board": "2060", "status": "live",
-     "notes": "Was Mini Boss's; joins the shared pool."},
-    {"name": "multibot-runner-{x}", "kind": "runner-pool", "role_skill": "/setup-runner", "login": "Multi Bot Runner {x}", "board": "2060", "status": "stale",
-     "members": {"a": "stale", "b": "dead", "c": "dead"},
-     "notes": "Was Mini Boss's; joins the shared pool. Multi Bot Runner H holds 15 tickets with no session."},
-
-    {"name": "HT Design Builder", "kind": "specialist", "role_skill": "design-lead", "login": "HT Design Builder", "board": "15", "status": "unknown"},
-    {"name": "Speed Runner", "kind": "specialist", "role_skill": "/setup-runner", "login": "Speed Runner", "board": "15", "status": "unknown"},
-
-    {"name": "term-1d219f1f", "multibot": "Triage", "kind": "outside", "role_skill": null, "login": null, "board": null, "status": "live", "notes": "Triage briefs, cwd ~/projects/triage. Outside the factory. Old tmux session triage is stale."},
-    {"name": "shell-projects-mux0iinm", "multibot": "Faceless Channels", "kind": "outside", "role_skill": null, "login": "Faceless Manager", "board": "8525", "status": "live"},
-    {"name": "valentinyeocom", "kind": "outside", "role_skill": null, "login": null, "board": null, "status": "live"},
-    {"name": "term-37c2ecd", "kind": "outside", "role_skill": null, "login": "CRO consulting", "board": null, "status": "live", "notes": "cwd ~/projects/claude-cro."},
-    {"name": "inne", "multibot": "inne Poteto", "kind": "outside", "role_skill": null, "login": null, "board": null, "status": "unknown", "notes": "Runs on the inne server. inne rules win."},
-    {"name": "Funeralprints", "multibot": "Funeralprints", "kind": "outside", "role_skill": null, "login": null, "board": null, "status": "unknown"},
-    {"name": "AB Test Manager", "multibot": "AB Test Manager", "kind": "outside", "role_skill": null, "login": null, "board": null, "status": "unknown"},
-    {"name": "Deep Work Advisor", "multibot": "Deep Work Advisor Cal N...", "kind": "outside", "role_skill": null, "login": null, "board": null, "status": "unknown"},
-    {"name": "Matt Live Stream", "multibot": "Matt Live Stream", "kind": "outside", "role_skill": null, "login": null, "board": null, "status": "unknown"},
-
-    {"name": "Big Boss Man", "kind": "closed", "role_skill": null, "login": "Chief Of Staff", "status": "closed", "notes": "Old Chief Of Staff chat, closed 2026-11-07. Its picker fix lives in ~/.local/bin/ht-or-runner-pick, not in git."},
-    {"name": "Board Police", "kind": "closed", "role_skill": null, "login": null, "status": "closed", "notes": "Closed 2026-11-07. Open work: house-rules PR 208."},
-    {"name": "Multi Bot Shell Officer", "kind": "closed", "role_skill": null, "login": null, "status": "closed"}
-  ],
-  "cleanup": {
-    "_doc": "Measured 2026-11-07. Empty shells with no agent; close through the Keeper at the switch.",
-    "dead_tmux": ["chromescribe", "claude-ht-marketing-muwqo4lp", "claude-hypertask-muprnpb8", "claude-hypertask-mur4ditg", "claude-zigshell-muvqz300",
-                  "ht-ci-runner-1", "ht-ci-runner-2", "ht-ci-runner-3", "ht-ci-runner-4", "ht-ci-runner-5",
-                  "ht-marketing-2", "ht-or-runner-1", "ht-or-runner-4", "ht-or-runner-5", "ht-or-runner-6", "ht-or-runner-9",
-                  "hypertask-2", "hypertask-4", "hypertask-5", "hypertask-8", "hypertask-9", "last30days",
-                  "multibot-runner-b", "multibot-runner-c", "poteto-reports", "projects-2", "projects-3", "projects-4",
-                  "screencast2-go", "term-13dcf6f", "term-5c44134"],
-    "stale_agents": ["ht-or-runner-2", "ht-or-runner-3", "ht-or-runner-7", "ht-or-runner-8", "ht-or-runner-10", "multibot-runner-a", "postbox", "triage"],
-    "junk_processes": "25 hax fixture.py processes under /tmp/runner17-817-mail-* (5 test runs x 5)."
+ "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name and loads role_skill. No row: it reports 'not in roster' to Chief Of Staff and takes no work. kind: chief, lead, view-lead, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371.",
+ "_updated": "2026-11-07 switch",
+ "rows": [
+  {
+   "name": "poteto-2-advisor",
+   "multibot": "Poteto 2 LC",
+   "kind": "chief",
+   "role_skill": "/hypertask-triage",
+   "login": "Chief Of Staff",
+   "board": "15,2060,4060,11514",
+   "status": "live",
+   "notes": "Poteto takes Chief Of Staff at the switch. Runs the factory only; no app contact. Owns board-health on every board. Reuses the Chief Of Staff login."
+  },
+  {
+   "name": "HT Product Lead",
+   "multibot": "HT Product Lead",
+   "kind": "lead",
+   "role_skill": "/lead",
+   "login": "HT Product Lead",
+   "board": "15",
+   "status": "unknown",
+   "notes": "Product decisions for board 15. Owns no runners after the switch."
+  },
+  {
+   "name": "Infra Lead",
+   "multibot": "Infra Lead",
+   "kind": "lead",
+   "role_skill": "/lead",
+   "login": "Infra Lead",
+   "board": "4060",
+   "status": "unknown"
+  },
+  {
+   "name": "CI Boss",
+   "multibot": null,
+   "kind": "lead",
+   "role_skill": "/lead",
+   "login": "CI Boss",
+   "board": "11514",
+   "status": "unknown",
+   "notes": "No board note for 22h on blocking CI tickets (Big Boss Man, 2026-11-07). Check it is running."
+  },
+  {
+   "name": "projects",
+   "multibot": "Mini Boss",
+   "kind": "lead",
+   "role_skill": "/lead",
+   "login": "Mini Boss CEO",
+   "board": "2060",
+   "status": "live",
+   "notes": "Contact for smaller Software Factory apps. Owns no runners and no board health. One notes file per app; reads only the one it needs. Session name inferred from cwd ~/projects/software-factory. Confirmed by claude agents: Mini Boss CEO in tmux projects."
+  },
+  {
+   "name": "ht-support-lead",
+   "kind": "lead",
+   "role_skill": "support-manager",
+   "login": "HT Support Lead",
+   "board": "10450",
+   "status": "live"
+  },
+  {
+   "name": "ht-marketing",
+   "kind": "lead",
+   "role_skill": "marketing-lead",
+   "login": "HT Growth Lead",
+   "board": "2108,2128",
+   "status": "live"
+  },
+  {
+   "name": "HT Design Lead",
+   "kind": "lead",
+   "role_skill": "design-lead",
+   "login": "HT Design Lead",
+   "board": "15",
+   "status": "unknown"
+  },
+  {
+   "name": "SF Design Lead",
+   "multibot": "SF Design Lead",
+   "kind": "lead",
+   "role_skill": "design-lead",
+   "login": "SF Design Lead",
+   "board": "2060",
+   "status": "live",
+   "tmux": "term-18e5fecc"
+  },
+  {
+   "name": "HT Finance Lead",
+   "kind": "lead",
+   "role_skill": "finance-lead",
+   "login": "HT Finance Lead",
+   "board": null,
+   "status": "unknown"
+  },
+  {
+   "name": "Multi Bot desktop lead",
+   "multibot": "Multi Bot Opus Runner",
+   "kind": "view-lead",
+   "role_skill": "/view-lead",
+   "login": "Multi Bot Opus Lead",
+   "board": "2060",
+   "view": "2060/multi-bot",
+   "app": "multiprompt",
+   "fallback": "Mini Boss CEO",
+   "status": "unknown",
+   "notes": "Multibot label from the sidebar; confirm with mp-layout."
+  },
+  {
+   "name": "multiprompt-android",
+   "multibot": "Multi Bot Android",
+   "kind": "view-lead",
+   "role_skill": "/view-lead",
+   "login": "Multiprompt Android Dev",
+   "board": "2060",
+   "view": "2060/multi-bot-android",
+   "app": "multiprompt-android",
+   "fallback": "Mini Boss CEO",
+   "status": "live"
+  },
+  {
+   "name": "postbox",
+   "multibot": "Postbox",
+   "kind": "view-lead",
+   "role_skill": "/view-lead",
+   "login": "Postbox Dev",
+   "board": "2060",
+   "view": "2060/postbox",
+   "app": "postbox",
+   "fallback": "Mini Boss CEO",
+   "status": "live",
+   "notes": "tmux Claude idle 37h; the Multibot chat may be the live one. Live Claude session wazig-20 in tmux postbox."
+  },
+  {
+   "name": "Pecunia",
+   "kind": "view-lead",
+   "role_skill": "/view-lead",
+   "login": null,
+   "board": "2060",
+   "view": null,
+   "app": "pecunia",
+   "fallback": "Mini Boss CEO",
+   "status": "unknown",
+   "notes": "Has its own session (Valentin, 2026-11-07). No board view and no login found yet; create the view at the switch, reuse its login if one exists."
+  },
+  {
+   "name": "chromescribe",
+   "kind": "view-lead",
+   "role_skill": "/view-lead",
+   "login": null,
+   "board": "2060",
+   "view": null,
+   "app": "chromescribe",
+   "fallback": "Mini Boss CEO",
+   "status": "dead",
+   "notes": "Empty shell, no agent. Mini Boss covers it."
+  },
+  {
+   "name": "screencast2-go",
+   "kind": "view-lead",
+   "role_skill": "/view-lead",
+   "login": null,
+   "board": "2060",
+   "view": null,
+   "app": "screencast2",
+   "fallback": "Mini Boss CEO",
+   "status": "dead",
+   "notes": "Empty shell, no agent. Mini Boss covers it."
+  },
+  {
+   "name": "token-ladder",
+   "kind": "view-lead",
+   "role_skill": "/view-lead",
+   "login": null,
+   "board": "2060",
+   "view": null,
+   "app": "token-ladder",
+   "fallback": "Mini Boss CEO",
+   "status": "dead",
+   "notes": "No session. Mini Boss covers it."
+  },
+  {
+   "name": "upwork-auto-applier",
+   "multibot": "UPWORK",
+   "kind": "view-lead",
+   "role_skill": "solo-dev",
+   "login": "Upwork Auto Applier Dev",
+   "board": "8783",
+   "app": "upwork-auto-applier",
+   "fallback": "Mini Boss CEO",
+   "status": "live",
+   "notes": "Own board 8783, not a 2060 view."
+  },
+  {
+   "name": "ht-or-runner-{n}",
+   "kind": "runner-pool",
+   "role_skill": "/setup-runner",
+   "login": "Runner {n}",
+   "board": "15",
+   "status": "stale",
+   "members": {
+    "1": "dead",
+    "2": "stale",
+    "3": "stale",
+    "4": "dead",
+    "5": "dead",
+    "6": "dead",
+    "7": "stale",
+    "8": "stale",
+    "9": "dead",
+    "10": "stale"
+   },
+   "notes": "dead = empty shell; stale = Claude open, idle about 40h. Joins the shared pool."
+  },
+  {
+   "name": "poteto-cursor-{n}",
+   "kind": "runner-pool",
+   "role_skill": "/setup-runner",
+   "login": "Runner 1{n}",
+   "board": "15",
+   "status": "live",
+   "notes": "Runners 11-15 on Cursor (Grok). Leave alone until the Grok burn ends."
+  },
+  {
+   "name": "ht-ci-runner-{n}",
+   "kind": "runner-pool",
+   "role_skill": "/setup-runner",
+   "login": "CI Runner {n}",
+   "board": "11514",
+   "status": "dead",
+   "notes": "All 5 empty shells, idle 36h. CI/Infra lane capped at 4 in the shared pool."
+  },
+  {
+   "name": "infra-runner-{n}",
+   "kind": "runner-pool",
+   "role_skill": "/setup-runner",
+   "login": "Infra Runner {n}",
+   "board": "4060",
+   "status": "live"
+  },
+  {
+   "name": "mp-runner-{n}",
+   "kind": "runner-pool",
+   "role_skill": "/setup-runner",
+   "login": "MP Runner {n}",
+   "board": "2060",
+   "status": "live",
+   "notes": "Was Mini Boss's; joins the shared pool."
+  },
+  {
+   "name": "multibot-runner-{x}",
+   "kind": "runner-pool",
+   "role_skill": "/setup-runner",
+   "login": "Multi Bot Runner {x}",
+   "board": "2060",
+   "status": "stale",
+   "members": {
+    "a": "stale",
+    "b": "dead",
+    "c": "dead"
+   },
+   "notes": "Was Mini Boss's; joins the shared pool. Multi Bot Runner H holds 15 tickets with no session."
+  },
+  {
+   "name": "HT Design Builder",
+   "kind": "specialist",
+   "role_skill": "design-lead",
+   "login": "HT Design Builder",
+   "board": "15",
+   "status": "unknown"
+  },
+  {
+   "name": "Speed Runner",
+   "kind": "specialist",
+   "role_skill": "/setup-runner",
+   "login": "Speed Runner",
+   "board": "15",
+   "status": "unknown"
+  },
+  {
+   "name": "term-1d219f1f",
+   "multibot": "Triage",
+   "kind": "outside",
+   "role_skill": null,
+   "login": null,
+   "board": null,
+   "status": "live",
+   "notes": "Triage briefs, cwd ~/projects/triage. Outside the factory. Old tmux session triage is stale."
+  },
+  {
+   "name": "shell-projects-mux0iinm",
+   "multibot": "Faceless Channels",
+   "kind": "outside",
+   "role_skill": null,
+   "login": "Faceless Manager",
+   "board": "8525",
+   "status": "live"
+  },
+  {
+   "name": "valentinyeocom",
+   "kind": "outside",
+   "role_skill": null,
+   "login": null,
+   "board": null,
+   "status": "live"
+  },
+  {
+   "name": "term-37c2ecd",
+   "kind": "outside",
+   "role_skill": null,
+   "login": "CRO consulting",
+   "board": null,
+   "status": "live",
+   "notes": "cwd ~/projects/claude-cro."
+  },
+  {
+   "name": "inne",
+   "multibot": "inne Poteto",
+   "kind": "outside",
+   "role_skill": null,
+   "login": null,
+   "board": null,
+   "status": "unknown",
+   "notes": "Runs on the inne server. inne rules win."
+  },
+  {
+   "name": "Funeralprints",
+   "multibot": "Funeralprints",
+   "kind": "outside",
+   "role_skill": null,
+   "login": null,
+   "board": null,
+   "status": "unknown"
+  },
+  {
+   "name": "AB Test Manager",
+   "multibot": "AB Test Manager",
+   "kind": "outside",
+   "role_skill": null,
+   "login": null,
+   "board": null,
+   "status": "unknown"
+  },
+  {
+   "name": "Deep Work Advisor",
+   "multibot": "Deep Work Advisor Cal N...",
+   "kind": "outside",
+   "role_skill": null,
+   "login": null,
+   "board": null,
+   "status": "unknown"
+  },
+  {
+   "name": "Matt Live Stream",
+   "multibot": "Matt Live Stream",
+   "kind": "outside",
+   "role_skill": null,
+   "login": null,
+   "board": null,
+   "status": "unknown"
+  },
+  {
+   "name": "Big Boss Man",
+   "kind": "closed",
+   "role_skill": null,
+   "login": "Chief Of Staff",
+   "status": "closed",
+   "notes": "Old Chief Of Staff chat, closed 2026-11-07. Its picker fix lives in ~/.local/bin/ht-or-runner-pick, not in git."
+  },
+  {
+   "name": "Board Police",
+   "kind": "closed",
+   "role_skill": null,
+   "login": null,
+   "status": "closed",
+   "notes": "Closed 2026-11-07. Open work: house-rules PR 208."
+  },
+  {
+   "name": "Multi Bot Shell Officer",
+   "kind": "closed",
+   "role_skill": null,
+   "login": null,
+   "status": "closed"
+  },
+  {
+   "name": "projects-41",
+   "kind": "outside",
+   "role_skill": null,
+   "status": "live",
+   "notes": "Claude session projects-a6 in ~/projects; purpose unknown. Not in factory until identified."
+  },
+  {
+   "name": "HT AGENT MANAGER",
+   "kind": "outside",
+   "role_skill": null,
+   "status": "live",
+   "notes": "Two background Claude sessions in ~/projects/hypertasks, plus 'Drain ready for dev column with cloud code'. No pane; not reachable by session-say. Review after switch."
   }
+ ],
+ "cleanup": {
+  "_doc": "Measured 2026-11-07. Empty shells with no agent; close through the Keeper at the switch.",
+  "dead_tmux": [
+   "chromescribe",
+   "claude-ht-marketing-muwqo4lp",
+   "claude-hypertask-muprnpb8",
+   "claude-hypertask-mur4ditg",
+   "claude-zigshell-muvqz300",
+   "ht-ci-runner-1",
+   "ht-ci-runner-2",
+   "ht-ci-runner-3",
+   "ht-ci-runner-4",
+   "ht-ci-runner-5",
+   "ht-marketing-2",
+   "ht-or-runner-1",
+   "ht-or-runner-4",
+   "ht-or-runner-5",
+   "ht-or-runner-6",
+   "ht-or-runner-9",
+   "hypertask-2",
+   "hypertask-4",
+   "hypertask-5",
+   "hypertask-8",
+   "hypertask-9",
+   "last30days",
+   "multibot-runner-b",
+   "multibot-runner-c",
+   "poteto-reports",
+   "projects-2",
+   "projects-3",
+   "projects-4",
+   "screencast2-go",
+   "term-13dcf6f",
+   "term-5c44134"
+  ],
+  "stale_agents": [
+   "ht-or-runner-2",
+   "ht-or-runner-3",
+   "ht-or-runner-7",
+   "ht-or-runner-8",
+   "ht-or-runner-10",
+   "multibot-runner-a",
+   "postbox",
+   "triage"
+  ],
+  "junk_processes": "25 hax fixture.py processes under /tmp/runner17-817-mail-* (5 test runs x 5)."
+ }
 }
