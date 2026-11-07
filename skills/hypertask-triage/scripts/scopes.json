@@ -33,7 +33,7 @@
       {"tmux_prefix": "multibot-runner-", "agent": "Multi Bot Runner {x}"},
       {"tmux_prefix": "ceo-runner-", "agent": "CEO Runner {n}"},
       {"tmux_prefix": "hax-runner-", "agent": "Hax Runner {n}"},
-      {"state": "~/.local/state/mp-runners/runners.json"},
+      {"state": "~/.local/state/mp-runners/runners.json", "agent": "MP Runner {n}"},
       {"tmux": "postbox", "agent": "Postbox Dev"},
       {"tmux": "multiprompt-android", "agent": "Multiprompt Android Dev"}
     ]
@@ -66,7 +66,7 @@
   "2060/multi-bot": {
     "board": 2060, "view": "6334f64c-8a04-449d-a7ad-7fcb5be23b4a", "lead": "Multi Bot Opus Lead", "alarm_board": 2060,
     "repos": ["valentinyeo/multiprompt"],
-    "workers": [{"state": "~/.local/state/mp-runners/runners.json"}]
+    "workers": [{"state": "~/.local/state/mp-runners/runners.json", "agent": "MP Runner {n}"}]
   },
   "2060/postbox": {
     "board": 2060, "view": "2c143454-003b-4384-b261-c755f43a2d90", "lead": "Postbox Dev", "alarm_board": 2060,
