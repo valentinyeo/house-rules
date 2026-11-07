@@ -53,7 +53,7 @@ sys.path.insert(0, str(HERE))
 import scopes  # noqa: E402
 STATE = Path.home() / ".local/state/board-health"
 ESCALATE_HOURS = 24
-LEADS = {15: "HT Product Lead", 4060: "Infra Lead", 11514: "CI Boss", 2060: "Mini Boss CEO"}
+LEADS = {15: "HT Product Lead", 4060: "Chief Of Staff", 11514: "Chief Of Staff", 2060: "Mini Boss CEO"}
 CHATTER_LINE = 10
 FLOW_BOARDS = {15, 4060, 11514, 2060}
 
@@ -77,10 +77,8 @@ INVARIANTS = {
     "blocked_cap": ("Agent Blocked at or under its cap", "lead", "clear the column today; only broken tools stay"),
     "brain": ("every open ticket has one brain tag", "lead",
               "the brain tagger (poteto-2-advisor bin/brain-tagger, every 30 min) tags it; make the writer named here set it"),
-    "ci": ("no ticket waits on a slow, closed or missing CI ticket", "CI Boss",
-           "CI Boss works its Urgent CI tickets; triage files the missing ones"),
-    "ci_boss": ("CI Boss wrote on the blocking CI tickets in the last 6 hours", "Chief Of Staff",
-                "restart CI Boss"),
+    "ci": ("no ticket waits on a slow, closed or missing CI ticket", "Chief Of Staff",
+           "the shared pool's CI lane (fleet/pick) takes Urgent and app-blocking CI tickets first; triage files the missing ones"),
     "pristine": ("every ticket on Valentin breaks no ticket rule", "lead",
                  "rewrite per skills/tickets, then fix what wrote it"),
     "parked_clean": ("every Agent Blocked ticket breaks no ticket rule", "lead",
@@ -155,9 +153,6 @@ def measure_flow(flow):
                   + ": " + " ".join(t["ticket"] for t in s["no_brain"]) if s["no_brain"] else "")
     ci_bad = [r for r in s.get("ci_blocked", []) if r["verdict"] != "CI-WAIT"]
     m["ci"] = (len(ci_bad), " ".join(f"{r['ticket']}>{r['ci_ticket'] or 'none'}" for r in ci_bad))
-    if any(r["ci_ticket"] for r in s.get("ci_blocked", [])):
-        h = s.get("ci_boss_h")
-        m["ci_boss"] = (int(h is None or h > 6), "never" if h is None else f"last note {h:.0f}h ago")
     return m
 
 
@@ -288,7 +283,7 @@ def self_test():
                "PARKED SUMMARY 12 parked over 1d, 6 belong in another column, 12 break no ticket rule\n"
     m = measure(flow, blockers, [{"ticket": "A", "item": "ticket", "origin": "agent"}])
     assert m["wip"][0] == 2 and m["orphans"][0] == 1 and m["stale"][0] == 1 and m["pristine"][0] == 22, m
-    assert m["parked_clean"][0] == 0 and m["chatter"][0] == 0 and m["doubles"][0] == 0 and "ci_boss" not in m, m
+    assert m["parked_clean"][0] == 0 and m["chatter"][0] == 0 and m["doubles"][0] == 0, m
     lines, head, esc = scorecard(15, m, {"wip": 30})
     assert head == "BOARD-HEALTH board 15: RED 4 of 13" and esc == ["wip"], (head, esc)
     assert any(l.startswith("ESCALATE  wip") and "HT Product Lead" in l for l in lines), lines
@@ -327,6 +322,12 @@ def self_test():
     assert "C" not in plan, "board-health must not default-tag: the brain tagger owns untagged tickets"
     assert "A" not in plan and plan["B"][0] == [["vcc", "task", "unassign", "B", "--agent", "Runner 1"]], "kept the wrong ticket"
     assert "HTPR-6" not in {n for n, _, _ in plan_fixes(4060, None, st)}, "merged moves to QA only on board 15"
+    live_st = {"rows": [{"ticket": "YPER4-6", "verdict": "MERGED-NOT-MOVED", "pr": "a#2", "column": "AI Review", "live": True},
+                        {"ticket": "HYCI-7", "verdict": "NO-PR", "pr": None, "column": "AI Review", "title": "x", "labels": []}]}
+    assert plan_fixes(4060, None, live_st)[0][1] == [["vcc", "task", "move", "YPER4-6", "Done"]], "merged and live: Done"
+    assert plan_fixes(11514, None, live_st) == [("YPER4-6", [["vcc", "task", "move", "YPER4-6", "Done"]],
+                                                 f"{NOTE} moved to Done. Its PR a#2 is merged and live.")], \
+        "no HOME map on 11514: sendback moves PR-less tickets there"
     pats = [scopes._pattern(p) for p in ("Runner {n}", "HT Design Builder")]
     tk = lambda num, sec, *names: {"ticketNumber": num, "section": sec, "title": "t",
                                    "assignees": [{"agent": {"displayName": n}} for n in names]}
@@ -385,8 +386,7 @@ def self_test():
     print("SELF_TEST_OK")
 
 
-FIX_BOARDS = {15, 4060}
-QUEUE_FIX_BOARDS = FIX_BOARDS | {2060, 11514}
+QUEUE_FIX_BOARDS = {15, 4060, 2060, 11514}
 KEEP_COLUMNS = re.compile(r"^(in progress|doing|ai review|qa|agent blocked.*|valentin review)$", re.I)
 SHIPPED = re.compile(r"^(done|flag:|no flag)", re.I)
 # View leads and specialists keep their holds: they are not runners (Chief Of Staff, 2026-11-07).
@@ -414,7 +414,10 @@ def plan_fixes(board, flow, status):
         if r["verdict"] == "MERGED-NOT-MOVED" and board == 15:
             plan.append((n, [["vcc", "task", "move", n, "QA"]],
                          f"{NOTE} moved to QA. Its PR is merged: {r['pr']}. Runner proves it live, then Done."))
-        elif r["verdict"] in ("NO-PR", "PR-CLOSED"):
+        elif r["verdict"] == "MERGED-NOT-MOVED" and r.get("live"):
+            plan.append((n, [["vcc", "task", "move", n, "Done"]],
+                         f"{NOTE} moved to Done. Its PR {r['pr']} is merged and live."))
+        elif r["verdict"] in ("NO-PR", "PR-CLOSED") and board in HOME:
             plan.append((n, [["vcc", "task", "update", n, "--section", str(home(r, board))]],
                          f"{NOTE} back to the queue. {'No PR linked' if r['verdict'] == 'NO-PR' else 'Its PR closed unmerged'}"
                          f" while it sat in {r['column']}."))
@@ -490,7 +493,6 @@ WORKING_H = 3  # a live runner's ticket that moved within this many hours is bei
 SENDBACK_SKIP_LABELS = {"incident", "design-pass"}
 SENDBACK_NOTE = "Sent back to the queue: {why}. Unassigned; it re-enters the queue by priority. Valentin 2026-11-07, abandoned tickets."
 TICKET_URL = "https://app.hypertask.ai/detail/project-{b}/{n}"
-PICK = HERE.parents[2] / "fleet" / "pick"
 
 
 def home_column(board, labels, title):
@@ -595,30 +597,44 @@ def open_pr_states(keys):
     return found
 
 
-def live_pool_runners():
-    """fleet/pick's live_runner: Runner N works unless the pacer stopped it and it runs nothing now."""
-    from importlib.machinery import SourceFileLoader
-    pick = SourceFileLoader("fleet_pick", str(PICK)).load_module()
-    return {f"runner {n}" for n in range(1, pick.RUNNERS + 1) if pick.live_runner(f"runner {n}")}
+def live_workers():
+    """Lowered names of every worker that works right now, on any fleet board (pool runners as fleet/pick sees them)."""
+    live = scopes.sessions()
+    return {n for b in sorted(QUEUE_FIX_BOARDS) for k in scopes.for_board(b) for n in scopes.workers(scopes.get(k), live)[1]}
 
 
-def sendback_board(board):
-    """Read only: (rows, plan) for one whole board."""
+def sendback_board(board, status):
+    """Read only: (rows, plan) for one whole board. status: wrong-status's result; its fixes move merged tickets on,
+    and closed or PR-less ones on boards with a HOME map, so those are left to plan_fixes."""
     tickets = board_tickets(board)
     building = {t["ticketNumber"] for t in tickets if (t.get("section") or "") in BUILD_COLUMNS.get(board, ())}
-    status = run_json([str(HERE / "wrong-status"), "--board", str(board)]) or {}
-    # wrong-status's own fixes move merged tickets on; on FIX_BOARDS they also move its closed and PR-less ones home
-    merged = {r["ticket"] for r in status.get("rows", [])
-              if board in FIX_BOARDS or r["verdict"] in ("MERGED-NOT-MOVED", "LIVE-READY")}
-    rows = sendback_rows(board, tickets, open_pr_states(building), merged, live_pool_runners(), datetime.now(timezone.utc))
+    merged = {r["ticket"] for r in (status or {}).get("rows", [])
+              if board in HOME or r["verdict"] in ("MERGED-NOT-MOVED", "LIVE-READY")}
+    rows = sendback_rows(board, tickets, open_pr_states(building), merged, live_workers(), datetime.now(timezone.utc))
     return rows, plan_sendback(rows)
+
+
+def fleet_line():
+    """Valentin's question in one line: every ticket being built or waiting for its live check, on every fleet board,
+    against the workers that work right now; then the shared pool's own WIP cap, as fleet/pick applies it."""
+    from importlib.machinery import SourceFileLoader
+    try:
+        pick = SourceFileLoader("fleet_pick", str(HERE.parents[2] / "fleet" / "pick")).load_module()
+        pick.SNAP = pick.load_snapshot()
+        building = {t["key"] for t in pick.SNAP["tickets"] if t["section"] in pick.BOARDS[t["board"]][1]}
+        units, pool, excluded = pick.pipeline()
+    except (RuntimeError, OSError, ValueError) as e:
+        return f"FLEET pipeline unknown: {type(e).__name__}: {e}"
+    workers = live_workers()
+    return (f"FLEET pipeline {len(building)} tickets in In Progress, AI Review and QA on boards 15, 2060, 4060, 11514 "
+            f"for {len(workers)} live workers{' OVER' if len(building) > len(workers) else ''}. Pool {pick.wip_line(units, pool, excluded)}")
 
 
 def show_sendback(board, rows, plan):
     keep = [r for r in rows if not r["why"]]
     print(f"SENDBACK board {board}: {len(plan)} of {len(rows)} tickets in In Progress or AI Review go back to the queue; "
           f"{len(keep)} stay (green or fresh PR, or being worked)")
-    for why, n in Counter(r["why"].split(" sat ")[0] if r["why"] else "stays" for r in rows).most_common():
+    for why, n in Counter(re.sub(r"\d+h", "48h or more", r["why"]) if r["why"] else "stays" for r in rows).most_common():
         print(f"  {why}: {n}")
 
 
@@ -701,12 +717,11 @@ def main():
             print(f"FIX not available on {name}: the shared login cannot write there. The lead fixes by hand.")
         else:
             plan, rows, back = [], queue_holds(a.board) if a.only != "sendback" else [], ([], [])
-            if a.board in FIX_BOARDS and not a.only:
-                flow = run_json([str(HERE / "flow-check"), "--scope", name])
-                status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)])
-                plan = plan_fixes(a.board, flow, status)
+            status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)]) if a.only != "queue" else None
+            if not a.only:  # cheap first: merged moves on, live ones close, doubles (solo devs too) drop extras
+                plan = plan_fixes(a.board, run_json([str(HERE / "flow-check"), "--scope", name]), status)
             if a.only != "queue":
-                back = sendback_board(a.board)
+                back = sendback_board(a.board, status)
                 sent = {t for t, _, _ in back[1]}
                 plan = [p for p in plan if p[0] not in sent] + back[1]
             plan += plan_queue_fixes(rows)
@@ -742,9 +757,10 @@ def main():
     lines, head, escalate = scorecard(name, measured, red_for, last, sc["lead"])
     print("\n".join(lines))
     if not a.fix and whole and a.board in QUEUE_FIX_BOARDS:
-        fixable = (plan_fixes(a.board, f, status) if a.board in FIX_BOARDS else []) + plan_queue_fixes(held.result())
+        fixable = plan_fixes(a.board, f, status) + plan_queue_fixes(held.result())
         if fixable:
             print(f"FIXABLE {len(fixable)} safe fixes waiting: rerun with --plan to read them, --fix to run them")
+    print(fleet_line())
     print(headline(numbers, before, at))
     print(head)
     if escalate and a.apply:

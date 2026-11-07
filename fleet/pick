@@ -3,6 +3,7 @@
 
     fleet/pick <N> [--dry-run] [--json]    pick (and claim) one ticket for Runner N
     fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 4060, 11514?
+    fleet/pick --wip                       read only: wip: N of M, the units counted and the ones left out
 
 Valentin 2026-11-07: one pool, Runner 1..N, each runner on the engine the pacer gives it (engine-N, else the engine file,
 else cursor): cursor (Cursor plan), codex (hax on Codex), opencode (hax on OpenCode Go) or claude (Claude Code on the Claude plan). The model per brain tag (and for
@@ -922,11 +923,12 @@ def pipeline():
     workers = live_workers()
     skip_brains = pool_skip(workers)
     with_pr = {pr_ticket(p) for p in open_prs()} - {None}
-    units, excluded = set(), {}
+    units, excluded, seen = set(), {}, set()
     for t in SNAP["tickets"]:
         building = t["section"] in BOARDS[t["board"]][1]
-        if not building and t["key"] not in with_pr:
+        if (not building and t["key"] not in with_pr) or t["key"] in seen:
             continue
+        seen.add(t["key"])
         why = pipeline_reason(t, skip_brains, t["key"] in with_pr)
         if why:
             excluded.setdefault(why, []).append(t["key"])
@@ -1235,6 +1237,15 @@ def main():
         return check_access()
     if args == ["--self-test"]:
         return self_test()
+    if args == ["--wip"]:  # read only: the WIP line every pick logs, and the units behind it
+        SNAP = load_snapshot()
+        units, workers, excluded = pipeline()
+        print(wip_line(units, workers, excluded))
+        print("units: " + " ".join(sorted(units)))
+        print("workers: " + " ".join(f"Runner {m}" for m in workers))
+        for why, keys in sorted(excluded.items()):
+            print(f"not counted, {why}: {' '.join(sorted(keys))}")
+        return
     dry = "--dry-run" in args
     pos = [a for a in args if not a.startswith("--")]
     if len(pos) != 1 or not pos[0].isdigit() or not 1 <= int(pos[0]) <= max(RUNNERS, 1):
