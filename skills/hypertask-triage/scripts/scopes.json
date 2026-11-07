@@ -1,28 +1,23 @@
 {
-  "_doc": "One scope per board or board view a lead owns. Workers: tmux_prefix pools (agent has {n} or {x}), exact tmux sessions for solo devs, a state file of sessions, or always-on workers. The PR queue cap and the building cap both come from here.",
+  "_doc": "One scope per board or board view a lead owns. Workers: the shared pool (pool: Runner N, live only when fleet/pick says it works: no pacer stop, or still running), tmux_prefix pools (agent has {n} or {x}), exact tmux sessions for solo devs, a state file of sessions, or always-on workers. The PR queue cap and the building cap both come from here.",
   "15": {
     "board": 15, "lead": "HT Product Lead", "alarm_board": 4060,
     "repos": ["hypertask-ai/hypertask"],
     "workers": [
-      {"tmux_prefix": "ht-or-runner-", "agent": "Runner {n}"},
-      {"tmux": "poteto-cursor-1", "agent": "Runner 11"},
-      {"tmux": "poteto-cursor-2", "agent": "Runner 12"},
-      {"tmux": "poteto-cursor-3", "agent": "Runner 13"},
-      {"tmux": "poteto-cursor-4", "agent": "Runner 14"},
-      {"tmux": "poteto-cursor-5", "agent": "Runner 15"},
+      {"pool": true, "agent": "Runner {n}"},
       {"agent": "HT Design Builder", "always": true},
       {"agent": "Speed Runner", "always": true}
     ]
   },
   "4060": {
-    "board": 4060, "lead": "Infra Lead", "alarm_board": 4060,
+    "board": 4060, "lead": "Chief Of Staff", "alarm_board": 4060,
     "repos": ["hypertask-ai/hypertask"],
-    "workers": [{"tmux_prefix": "infra-runner-", "agent": "Infra Runner {n}"}]
+    "workers": [{"pool": true, "agent": "Runner {n}"}]
   },
   "11514": {
-    "board": 11514, "lead": "CI Boss", "alarm_board": 11514,
+    "board": 11514, "lead": "Chief Of Staff", "alarm_board": 11514,
     "repos": ["hypertask-ai/hypertask"],
-    "workers": [{"tmux_prefix": "ht-ci-runner-", "agent": "CI Runner {n}"}]
+    "workers": [{"pool": true, "agent": "Runner {n}"}]
   },
   "2060": {
     "board": 2060, "lead": "Chief Of Staff", "alarm_board": 2060,
@@ -30,6 +25,7 @@
               "valentinyeo/chromescribe", "valentinyeo/pecunia", "valentinyeo/screencast2-go",
               "valentinyeo/token-ladder", "valentinyeo/upwork-auto-applier", "valentinyeo/triage"],
     "workers": [
+      {"pool": true, "agent": "Runner {n}"},
       {"tmux_prefix": "multibot-runner-", "agent": "Multi Bot Runner {x}"},
       {"tmux_prefix": "ceo-runner-", "agent": "CEO Runner {n}"},
       {"tmux_prefix": "hax-runner-", "agent": "Hax Runner {n}"},

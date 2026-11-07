@@ -42,11 +42,38 @@ def _state_rows(path, agent=None):
     return [r for r in rows if r["session"] and (r.get("name") or agent)]
 
 
+POOL = []
+
+
+def pool_live():
+    """The shared pool's runners that work right now, as fleet/pick sees them: the pacer has not stopped Runner N, or it
+    still runs the ticket it had when the stop came. A tmux session alone is no worker: stopped runners keep theirs."""
+    if not POOL:
+        pick = pick_module()
+        POOL.append({f"runner {n}" for n in range(1, pick.RUNNERS + 1) if pick.live_runner(f"runner {n}")})
+    return POOL[0]
+
+
+PICK = []
+
+
+def pick_module():
+    """fleet/pick loaded once, for its view of the pool (live_runner, running, pipeline)."""
+    if not PICK:
+        from importlib.machinery import SourceFileLoader
+        PICK.append(SourceFileLoader("fleet_pick", str(HERE.parents[2] / "fleet" / "pick")).load_module())
+    return PICK[0]
+
+
 def workers(scope, live_sessions=None):
     """Returns (patterns that name a worker, live worker names lowered, always-on names lowered)."""
     live_sessions = sessions() if live_sessions is None else live_sessions
     patterns, live, always = [], set(), set()
     for w in scope["workers"]:
+        if w.get("pool"):
+            patterns.append(_pattern(w["agent"]))
+            live |= pool_live()
+            continue
         if w.get("state"):
             for r in _state_rows(w["state"], w.get("agent")):
                 name = w["agent"].replace("{n}", r["key"]) if w.get("agent") else r["name"]

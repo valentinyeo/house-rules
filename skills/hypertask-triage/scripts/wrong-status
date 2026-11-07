@@ -110,9 +110,10 @@ def production_sha(repo):
 
 
 def in_production(repo, merge):
+    """Production runs the merge. A repo with no Production deployments (our tools, house-rules) is live on merge."""
     prod = production_sha(repo)
     if not prod:
-        return False
+        return bool(merge)
     cmp = gh_json(f"repos/{repo}/compare/{merge}...{prod}") or {}
     return cmp.get("status") in ("ahead", "identical")
 
@@ -161,11 +162,12 @@ def run(board):
     keys = sorted({k for ls in links for k in ls})
     with ThreadPoolExecutor(4) as ex:
         raw = dict(zip(keys, ex.map(pr_state, keys)))
-    qa_newest = {ls[-1] for (c, _), ls in zip(tickets, links) if c == "QA" and ls and raw[ls[-1]][0] == "MERGED"}
-    for repo in {k.split("#")[0] for k in qa_newest}:
+    # every merged newest PR, not only QA's: a merged ticket off board 15 goes to Done once its merge is live
+    merged_newest = {ls[-1] for ls in links if ls and raw[ls[-1]][0] == "MERGED"}
+    for repo in {k.split("#")[0] for k in merged_newest}:
         production_sha(repo)
     with ThreadPoolExecutor(4) as ex:
-        live = dict(zip(qa_newest, ex.map(lambda k: in_production(k.split("#")[0], raw[k][1]), qa_newest)))
+        live = dict(zip(merged_newest, ex.map(lambda k: in_production(k.split("#")[0], raw[k][1]), merged_newest)))
     states = {k: (s, live.get(k, False)) for k, (s, _) in raw.items()}
     rows = []
     for (col, t), prs in zip(tickets, links):
@@ -174,7 +176,8 @@ def run(board):
             rows.append({"ticket": t["ticketNumber"], "column": col, "verdict": v, "pr": prs[-1] if prs else None,
                          "move_to": {"MERGED-NOT-MOVED": merged_to, "LIVE-READY": "Done after the runner's live check"}
                          .get(v, "home column"), "title": t["title"], "assignees": t.get("assignees") or [],
-                         "labels": [l.get("name") for l in t.get("labels") or []]})
+                         "labels": [l.get("name") for l in t.get("labels") or []],
+                         "live": bool(prs) and states.get(prs[-1], ("", False))[1]})
     return rows, len(tickets)
 
 
