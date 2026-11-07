@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# House rule (Valentin 2026-11-08): CI work on this VPS is strictly forbidden.
+# Switches off every GitHub Actions runner service and kills any runner process on this server.
+# Runs every 5 minutes from the no-vps-ci timer. --check only reports (exit 1 when something was found).
+set -uo pipefail
+LOG="${XDG_STATE_HOME:-$HOME/.local/state}/no-vps-ci.log"
+mkdir -p "$(dirname "$LOG")"
+check=0; [ "${1:-}" = "--check" ] && check=1
+found=0
+units=$(systemctl list-units --all --type=service --no-legend 'actions.runner.*' 2>/dev/null | sed 's/^[^a-z]*//' | awk '{print $1}')
+for u in $units; do
+  state=$(systemctl is-enabled "$u" 2>/dev/null); active=$(systemctl is-active "$u" 2>/dev/null)
+  [ "$state" = disabled ] && [ "$active" != active ] && continue
+  found=1
+  if [ $check = 1 ]; then echo "FOUND $u ($state, $active)"; continue; fi
+  sudo -n systemctl disable --now "$u" >/dev/null 2>&1 && echo "$(date -u +%FT%TZ) off $u" >> "$LOG" || echo "$(date -u +%FT%TZ) FAIL $u" >> "$LOG"
+done
+for pid in $(pgrep -f 'Runner\.(Listener|Worker)|act_runner'); do
+  found=1
+  if [ $check = 1 ]; then echo "FOUND pid $pid $(ps -o user=,args= -p "$pid" | cut -c1-100)"; continue; fi
+  echo "$(date -u +%FT%TZ) kill $pid $(ps -o user=,args= -p "$pid" | cut -c1-100)" >> "$LOG"
+  sudo -n kill "$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+done
+[ $check = 1 ] && { [ $found = 0 ] && echo "no-vps-ci: clean"; exit $found; }
+exit 0
