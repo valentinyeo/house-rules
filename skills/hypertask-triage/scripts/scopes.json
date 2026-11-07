@@ -1,0 +1,51 @@
+{
+  "_doc": "One scope per board or board view a lead owns. Workers: tmux_prefix pools (agent has {n} or {x}), exact tmux sessions for solo devs, a state file of sessions, or always-on workers. The PR queue cap and the building cap both come from here.",
+  "15": {
+    "board": 15, "lead": "HT Product Lead", "alarm_board": 4060,
+    "repos": ["hypertask-ai/hypertask"],
+    "workers": [
+      {"tmux_prefix": "ht-or-runner-", "agent": "Runner {n}"},
+      {"agent": "HT Design Builder", "always": true},
+      {"agent": "Speed Runner", "always": true}
+    ]
+  },
+  "4060": {
+    "board": 4060, "lead": "Infra Lead", "alarm_board": 4060,
+    "repos": ["hypertask-ai/hypertask"],
+    "workers": [{"tmux_prefix": "infra-runner-", "agent": "Infra Runner {n}"}]
+  },
+  "11514": {
+    "board": 11514, "lead": "CI Boss", "alarm_board": 11514,
+    "repos": ["hypertask-ai/hypertask"],
+    "workers": [{"tmux_prefix": "ht-ci-runner-", "agent": "CI Runner {n}"}]
+  },
+  "2060": {
+    "board": 2060, "lead": "Mini Boss CEO", "alarm_board": 2060,
+    "repos": ["valentinyeo/multiprompt", "valentinyeo/multiprompt-android", "valentinyeo/postbox",
+              "valentinyeo/chromescribe", "valentinyeo/pecunia", "valentinyeo/screencast2-go",
+              "valentinyeo/token-ladder", "valentinyeo/upwork-auto-applier", "valentinyeo/triage"],
+    "workers": [
+      {"tmux_prefix": "multibot-runner-", "agent": "Multi Bot Runner {x}"},
+      {"tmux_prefix": "ceo-runner-", "agent": "CEO Runner {n}"},
+      {"tmux_prefix": "hax-runner-", "agent": "Hax Runner {n}"},
+      {"state": "~/.local/state/mp-runners/runners.json"},
+      {"tmux": "postbox", "agent": "Postbox Dev"},
+      {"tmux": "multiprompt-android", "agent": "Multiprompt Android Dev"}
+    ]
+  },
+  "2060/multi-bot": {
+    "board": 2060, "view": "6334f64c-8a04-449d-a7ad-7fcb5be23b4a", "lead": "Multi Bot Opus Lead", "alarm_board": 2060,
+    "repos": ["valentinyeo/multiprompt"],
+    "workers": [{"state": "~/.local/state/mp-runners/runners.json"}]
+  },
+  "2060/postbox": {
+    "board": 2060, "view": "2c143454-003b-4384-b261-c755f43a2d90", "lead": "Postbox Dev", "alarm_board": 2060,
+    "repos": ["valentinyeo/postbox"],
+    "workers": [{"tmux": "postbox", "agent": "Postbox Dev"}]
+  },
+  "2060/multi-bot-android": {
+    "board": 2060, "view": "daaa8d18-da52-4df0-883e-481e8fcce3a1", "lead": "Multiprompt Android Dev", "alarm_board": 2060,
+    "repos": ["valentinyeo/multiprompt-android"],
+    "workers": [{"tmux": "multiprompt-android", "agent": "Multiprompt Android Dev"}]
+  }
+}

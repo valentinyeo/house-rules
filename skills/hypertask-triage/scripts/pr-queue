@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""PR queue per scope (a board, or a board view one lead owns).
+
+A runner stays on its ticket until it is live. So every open PR belongs to a ticket being built
+by a live assigned worker, and open PRs never outnumber the scope's workers.
+
+Per open PR, from the PR side: ticket key from title or branch, then the ticket's real board,
+view labels, column and assignee.
+  OK            ticket being built, assignee is a live worker
+  ORPHAN        ticket being built or queued, but no live worker is assigned
+  NOT-A-WORKER  ticket assigned to a lead or advisor, not a worker: hand it to a runner
+  WRONG-COLUMN  a live worker has it, but the ticket sits in the queue: move it to the building column
+  STALE-TICKET  ticket in QA while its PR is still open
+  TICKET-CLOSED ticket done or archived, PR still open
+  PARKED        ticket waits in Agent Blocked, Valentin Review or UX with its PR open
+  DUPLICATE     an older open PR for the same ticket
+  NO-TICKET     no ticket key in title or branch
+  BOT           dependabot or renovate: CI Boss's, not counted against workers
+Read only. Owner of every line: the scope's lead. Same line red three runs: fix the picker.
+
+Usage: pr-queue --scope 15 [--json out.json] | --self-test
+"""
+import argparse
+import json
+import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scopes  # noqa: E402
+
+KEY = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
+BOTS = ("dependabot", "renovate")
+BUILD = {"in progress", "doing", "ai review"}
+QUEUE = {"bugs", "improvements", "features", "backlog", "todo"}
+CLOSED = re.compile(r"^(done|flag:|no flag)", re.I)
+
+
+def ht(*args):
+    r = subprocess.run(["hypertask", "--json", *args], capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def open_prs(repo):
+    r = subprocess.run(["gh", "pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json",
+                        "number,isDraft,title,headRefName,author,createdAt,url"], capture_output=True, text=True)
+    try:
+        return [dict(p, repo=repo) for p in json.loads(r.stdout)]
+    except ValueError:
+        return []
+
+
+def ticket_key(pr):
+    m = KEY.search(pr["title"]) or KEY.search(pr["headRefName"].upper())
+    return m.group(1) if m else None
+
+
+def is_bot(pr):
+    return any(b in ((pr.get("author") or {}).get("login") or "").lower() for b in BOTS)
+
+
+def verdict(task, patterns, live, always):
+    """(verdict, who) for one PR's ticket."""
+    if not task:
+        return "TICKET-CLOSED", "ticket not found"
+    section = task.get("section") or ""
+    if task.get("status") not in (None, "Normal") or CLOSED.match(section):
+        return "TICKET-CLOSED", section or task.get("status")
+    if section.lower() == "qa":
+        return "STALE-TICKET", "QA"
+    agents = [a["agent"]["displayName"] for a in task.get("assignees") or [] if a.get("agent")]
+    workers = [n for n in agents if scopes.is_worker(n, patterns)]
+    alive = [n for n in workers if n.lower() in live or n.lower() in always]
+    if section.lower() in BUILD or section.lower() in QUEUE:
+        if alive and section.lower() in BUILD:
+            return "OK", alive[0]
+        if alive:
+            return "WRONG-COLUMN", f"{alive[0]} has it, but it sits in {section}"
+        if agents and not workers:
+            return "NOT-A-WORKER", agents[0]
+        return "ORPHAN", (f"{workers[0]} not running" if workers else "nobody assigned")
+    return "PARKED", section
+
+
+def judge(scope, prs, tasks, labels, patterns, live, always, first_scope_for_repo, cap):
+    """prs: open PRs on the scope's repos. tasks: ticket key -> task (None when missing).
+    patterns, live, always: every worker on the board, so a runner from a sibling view still counts.
+    cap: the scope's own live workers."""
+    rows = []
+    for pr in prs:
+        key = ticket_key(pr)
+        task = tasks.get(key) if key else None
+        if is_bot(pr) or not key:
+            if not first_scope_for_repo.get(pr["repo"]):
+                continue
+            rows.append(dict(pr, ticket=key, verdict="BOT" if is_bot(pr) else "NO-TICKET",
+                             who="CI Boss" if is_bot(pr) else None))
+            continue
+        if task and (task.get("projectId") != scope["board"] or not scopes.in_view(task, labels)):
+            continue
+        v, who = verdict(task, patterns, live, always)
+        rows.append(dict(pr, ticket=key, verdict=v, who=who))
+    newest = {}
+    for r in rows:
+        if r["ticket"] and r["verdict"] not in ("BOT",):
+            k = r["ticket"]
+            if k not in newest or r["createdAt"] > newest[k]["createdAt"]:
+                newest[k] = r
+    for r in rows:
+        if r["ticket"] and r["verdict"] != "BOT" and newest[r["ticket"]] is not r:
+            r["verdict"], r["who"] = "DUPLICATE", f"newer PR #{newest[r['ticket']]['number']}"
+    counted = [r for r in rows if r["verdict"] != "BOT"]
+    summary = {"scope": scope["key"], "lead": scope["lead"], "open": len(counted), "workers": cap,
+               "over": len(counted) > cap, "bots": sum(r["verdict"] == "BOT" for r in rows),
+               "bad": [{"pr": r["url"], "number": r["number"], "ticket": r["ticket"], "verdict": r["verdict"],
+                        "who": r["who"], "title": r["title"][:70]} for r in counted if r["verdict"] != "OK"]}
+    return rows, summary
+
+
+def run(key):
+    scope = scopes.get(key)
+    live_sessions = scopes.sessions()
+    _, own_live, own_always = scopes.workers(scope, live_sessions)
+    patterns, live, always = [], set(), set()
+    for k in scopes.for_board(scope["board"]):
+        p, l, a = scopes.workers(scopes.get(k), live_sessions)
+        patterns, live, always = patterns + p, live | l, always | a
+    labels = scopes.view_labels(scope, ht)
+    first = {repo: next(k for k, s in scopes.SCOPES.items() if repo in s["repos"]) == scope["key"]
+             for repo in scope["repos"]}
+    with ThreadPoolExecutor(4) as ex:
+        prs = [p for ps in ex.map(open_prs, scope["repos"]) for p in ps]
+    keys = sorted({k for k in map(ticket_key, prs) if k})
+    with ThreadPoolExecutor(4) as ex:
+        found = ex.map(lambda k: (ht("task", "get", k).get("tasks") or [None])[0], keys)
+    return judge(scope, prs, dict(zip(keys, found)), labels, patterns, live, always, first, len(own_live) + len(own_always))
+
+
+def show(summary):
+    s = summary
+    print(f"PR-QUEUE scope {s['scope']}: {s['open']} open PRs for {s['workers']} workers"
+          + (" OVER" if s["over"] else "") + f", {len(s['bad'])} not owned, {s['bots']} bot PRs. Lead {s['lead']}.")
+    for b in sorted(s["bad"], key=lambda b: (b["verdict"], b["number"])):
+        print(f"  {b['verdict']:<13} {b['pr']}  {b['ticket'] or '-'}  {b['who'] or ''}")
+
+
+def self_test():
+    scope = {"key": "t", "board": 15, "lead": "L", "repos": ["o/r"]}
+    pats = [scopes._pattern("Runner {n}"), scopes._pattern("Postbox Dev")]
+    live, always = {"runner 1", "postbox dev"}, set()
+
+    def pr(n, title, branch="b", author="valentinyeo", at="2026-11-01"):
+        return {"number": n, "title": title, "headRefName": branch, "author": {"login": author}, "createdAt": at,
+                "repo": "o/r", "url": f"https://github.com/o/r/pull/{n}", "isDraft": False}
+
+    def task(section, who=None, project=15, status="Normal", labels=()):
+        return {"section": section, "status": status, "projectId": project,
+                "assignees": [{"agent": {"displayName": who}}] if who else [], "labels": [{"id": l} for l in labels]}
+    prs = [pr(1, "HTPR-1 ok"), pr(2, "HTPR-2 dead"), pr(3, "HTPR-3 old", at="2026-10-01"), pr(4, "HTPR-3 new"),
+           pr(5, "HTPR-5 done"), pr(6, "Bump x", author="app/dependabot"), pr(7, "Refresh copy"),
+           pr(8, "x", branch="runner2/yper4-9"), pr(9, "HTPR-9 qa"), pr(10, "HTPR-10 view"), pr(11, "HTPR-11 parked"),
+           pr(12, "HTPR-12 todo"), pr(13, "HTPR-13 lead")]
+    tasks = {"HTPR-1": task("In Progress", "Runner 1"), "HTPR-2": task("AI Review", "Runner 7"),
+             "HTPR-3": task("In Progress", "Runner 1"), "HTPR-5": task("Done", "Runner 1"),
+             "YPER4-9": task("In Progress", "Infra Runner 1", project=4060), "HTPR-9": task("QA", "Runner 1"),
+             "HTPR-10": task("In Progress", "Postbox Dev", labels=["x"]), "HTPR-11": task("Valentin Review"),
+             "HTPR-12": task("Todo", "Postbox Dev"), "HTPR-13": task("In Progress", "Poteto Advisor")}
+    rows, s = judge(scope, prs, tasks, None, pats, live, always, {"o/r": True}, 2)
+    got = {r["number"]: r["verdict"] for r in rows}
+    want = {1: "OK", 2: "ORPHAN", 3: "DUPLICATE", 4: "OK", 5: "TICKET-CLOSED", 6: "BOT", 7: "NO-TICKET",
+            9: "STALE-TICKET", 10: "OK", 11: "PARKED",
+            12: "WRONG-COLUMN", 13: "NOT-A-WORKER"}
+    assert got == want, got
+    assert s["open"] == 11 and s["workers"] == 2 and s["over"] and s["bots"] == 1, s
+    _, s2 = judge(scope, prs, tasks, {"y"}, pats, live, always, {"o/r": False}, 2)
+    assert s2["open"] == 0, "view label filter and shared repo: other scope's PRs must not count"
+    _, live_x, _ = scopes.workers({"workers": [{"tmux": "postbox", "agent": "Postbox Dev"},
+                                              {"tmux_prefix": "multibot-runner-", "agent": "Multi Bot Runner {x}"}]},
+                                  {"postbox", "multibot-runner-b"})
+    assert live_x == {"postbox dev", "multi bot runner b"}, live_x
+    print("SELF_TEST_OK")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--scope", default="15")
+    p.add_argument("--json")
+    p.add_argument("--self-test", action="store_true")
+    a = p.parse_args()
+    if a.self_test:
+        return self_test()
+    rows, summary = run(a.scope)
+    show(summary)
+    if a.json:
+        json.dump(summary, open(a.json, "w"), indent=1)
+    return 1 if summary["over"] or summary["bad"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
