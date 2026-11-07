@@ -37,7 +37,9 @@ Worker kinds: a tmux pool (`ht-or-runner-` = Runner N), one exact session (solo 
 - No PR in AI Review, or PR closed: back to its home column.
 - No brain tag: brain-medium.
 - Worker assigned two tickets being built: keeps its most recent, unassigned from the rest.
-- QA ticket already in the live production deploy: ready-to-close note. The runner checks live, then Done.
+- QA ticket already in the live production deploy, no flag on production: moves to No Flag, with the deploy proof.
+  The flag check reads the flag files on production. One named after the ticket means it has a flag.
+  Flagged: a ready-to-close note only. The runner picks the flag column after its live check.
 Never hand-write a one-off fix script. A fix that is missing goes into `plan_fixes` in board-health.
 
 The assignee is the one record of who owns a ticket. Unassign a worker and its double clears at once.
@@ -60,21 +62,26 @@ Each line shows "Was N, now M" since the last run. `TREND` shows tickets being b
 - A lead's or CI Boss's line: one agent-lane note on its alarm ticket, with the tickets. Never do runner work yourself.
 - Red over a day prints `ESCALATE`. `--apply` files or bumps one Urgent "Board health" alarm on 4060.
 - Same line red on three runs in a row? The owner's loop is broken. Fix that loop's skill or script, not the tickets.
-  `--dispatch` does this by itself. It files one ticket on 4060, "Board health: <scope> <check> red 3 runs".
-  Infra Runners pull it and fix the tool, script or picker behind the line. CI lines go to 11514 for CI Runners.
-  A rerun adds nothing. Still red a day later: one +1. Line green again: a green note on that ticket.
+  `--dispatch` does this by itself. Each such line gets one agent-lane note on the scope's alarm ticket.
+  The alarm ticket is "Board health: board <scope> red over a day". No alarm ticket yet: it skips and says so.
+  A rerun adds nothing. Still red a day later: one +1. Line green again: a green note there.
+  Dispatch to Infra Runners is built but off. It turns on after the runner picker loop is fixed.
+  The infra runners sit idle on the same loop today. On: one ticket per line on 4060, CI lines on 11514.
+- The steps below are the detail behind each line. Run one when its line is red.
 
 The loop, every hour:
-- The script fixes the safe things (`--fix`).
-- It dispatches tool fixes to Infra Runners (`--dispatch`).
-- The lead works the judgment lines: QA proof, pristine, idle runners.
+- The script fixes the safe things (`--fix`), closing live QA tickets too.
+- It notes each line red 3 runs on the alarm ticket (`--dispatch`).
+- The lead works the judgment lines: QA proof, pristine, idle runners, spin.
 
-`spin`: a runner restarted 6 times in 12 hours on one ticket that never changed column.
+`spin`: a runner restarted 6 times in 12 hours on one ticket that never really moved.
+- Real movement only: a column change, or a PR opened, pushed, merged or closed.
+- Agent-log notes never count. Notes are how the loop hid; `stale` misses it for that reason.
 - The picker log shows each pick: `~/.local/state/ht-or-runners/runner-N.log`. Board 15 only, set by `pick_logs` in `scopes.json`.
-- The line names the ticket, runner, pick count and the newest agent-log note. That note is the wait.
-- `stale` misses it: each restart writes a fresh note.
-- The lead unassigns it and posts the wait as a Blocker. The lasting fix: the picker releases a spinning ticket.
-- The steps below are the detail behind each line. Run one when its line is red.
+- The line names the ticket, runner, pick count and what it waits on: cross-QA, design QA or other.
+- Mostly cross-QA or design QA? The root cause is QA capacity. Nobody runs the independent check.
+  The lead gives QA work to idle runners first.
+- The 6-spin release in the picker is only a safety net. Until it ships, the lead unassigns and posts the wait as a Blocker.
 
 ## 1. Dry run
 `~/.local/share/house-rules/skills/hypertask-triage/scripts/archive-done --board <id>`

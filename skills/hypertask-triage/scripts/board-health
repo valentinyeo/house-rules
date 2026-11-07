@@ -12,9 +12,11 @@ agent-identities. The assignee owns a ticket. Tickets being built never
 exceed workers; QA has its own cap. --fix runs the safe fixes first.
 
 --dispatch makes red lines start their own fixing: a line red 3 runs in
-a row files one ticket for the Infra Runners on board 4060 (CI lines on
-11514), or adds a +1 once a day. A dispatched line that turns green gets
-a note on its ticket.
+a row gets one agent-lane note on the scope's alarm ticket, +1 once a
+day, and a green note when it clears. DISPATCH_TO_INFRA files one ticket
+per line for the Infra Runners on 4060 (CI lines on 11514) instead. It
+stays off until the runner picker loop is fixed: the infra runners spin
+on the same loop.
 
 Valentin, 2026-11-06: "the outcome of the skill is to force the chief of
 staff to fix all of this, and make sure that the system is running smoothly".
@@ -58,8 +60,10 @@ INVARIANTS = {
                 "keep its most recent ticket, unassign the rest; --fix does it"),
     "outside": ("only runners, Design Builder and Speed Runner hold tickets being built", "lead",
                 "leads hand the ticket to a runner"),
-    "spin": ("no runner is restarted 6 times in 12 hours on a ticket that never changes column", "lead",
-             "the picker must release a spinning ticket; until then unassign it and post the wait as a Blocker"),
+    "spin": ("no runner is restarted 6 times in 12 hours on a ticket with no column or PR move", "lead",
+             "QA waits mean QA capacity: idle runners take the cross-QA and design QA first. Safety net: the picker "
+             "releases an own ticket after 6 spins (Blocker naming the wait, unassign, home column or QA queue); "
+             "until it ships, unassign it and post the wait as a Blocker"),
     "stale": ("every In Progress ticket moved in the last 3 hours", "lead", "wake the runner or reassign"),
     "overdue": ("no ticket over its wait limit in QA, AI Review or Agent Blocked", "lead",
                 "drive the PR or live proof today"),
@@ -137,8 +141,10 @@ def measure_flow(flow):
     stale = [r["ticket"] for r in rows if r["verdict"] == "STALE"]
     m["stale"] = (len(stale), " ".join(stale))
     if s.get("spin") is not None:
-        m["spin"] = (len(s["spin"]), " ".join(f"{r['ticket']} ({r['runner']}, {r['picks']} picks: {r['reason']})"
-                                              for r in s["spin"]))
+        waits = Counter(r["wait"] for r in s["spin"])
+        m["spin"] = (len(s["spin"]), ("waits: " + ", ".join(f"{w} {n}" for w, n in waits.most_common()) + ". "
+                                      if waits else "") + " ".join(
+            f"{r['ticket']} ({r['runner']}, {r['picks']} picks, waits on {r['wait']}: {r['reason']})" for r in s["spin"]))
     over = [r["ticket"] for r in rows if r["verdict"] == "OVERDUE"]
     m["overdue"] = (len(over), " ".join(over))
     m["blocked_cap"] = (int(bool(s["blocked_over_cap"])), "")
@@ -217,6 +223,7 @@ def track(board, measured, numbers, now):
 
 
 DISPATCH_RUNS = 3
+DISPATCH_TO_INFRA = False
 DISPATCH_BOARD = {"ci": 11514, "ci_boss": 11514}
 DISPATCH_LABELS = "brain-medium,Cluster: Board Hygiene"
 DISPATCH_NOTE = "board-health dispatch:"
@@ -247,8 +254,10 @@ def dispatch_body(key):
     return DISPATCH_BODY.format(fix=DISPATCH_FIX.get(key, DISPATCH_GENERIC_FIX))
 
 
-def dispatch(scope, measured, runs, record, now, ops, lead=None):
+def dispatch(scope, measured, runs, record, now, ops, lead=None, alarm_at=None):
     """File or +1 one fix ticket per line red DISPATCH_RUNS runs in a row; note when a dispatched line turns green.
+    alarm_at: (board, title) of the scope's alarm ticket. Set, every note goes there and nothing new is filed;
+    None files one ticket per line for the Infra Runners.
     record: {key: {"ticket", "bumped"}} from the last run. ops: find(board) -> {title: ticket},
     create(board, title, body) -> ticket or None, note(ticket, text). Returns (new record, report lines)."""
     record, lines, found = dict(record), [], {}
@@ -263,7 +272,7 @@ def dispatch(scope, measured, runs, record, now, ops, lead=None):
         rec = record.get(key)
         if rec and (now - datetime.fromisoformat(rec["bumped"])).total_seconds() < 86400:
             continue
-        board, title = DISPATCH_BOARD.get(key, 4060), dispatch_title(scope, key)
+        board, title = alarm_at or (DISPATCH_BOARD.get(key, 4060), dispatch_title(scope, key))
         if board not in found:
             found[board] = ops.find(board)
         rule, owner, fix = INVARIANTS[key]
@@ -273,6 +282,9 @@ def dispatch(scope, measured, runs, record, now, ops, lead=None):
         if ticket:
             ops.note(ticket, "+1 " + info)
             lines.append(f"DISPATCH +1 {ticket} {key}")
+        elif alarm_at:
+            lines.append(f"DISPATCH skipped {key}: no open alarm ticket \"{title}\" on {board}")
+            continue
         else:
             ticket = ops.create(board, title, dispatch_body(key))
             if not ticket:
@@ -305,10 +317,11 @@ class LiveOps:
         subprocess.run(["vcc", "activity", "add", ticket, text], capture_output=True, text=True)
 
 
-def run_dispatch(scope, measured, runs, now, lead):
+def run_dispatch(scope, measured, runs, now, lead, alarm_board):
     path = STATE / f"{scope.replace('/', '-')}-dispatch.json"
     record = json.load(open(path)) if path.exists() else {}
-    record, lines = dispatch(scope, measured, runs, record, now, LiveOps(), lead)
+    alarm_at = None if DISPATCH_TO_INFRA else (alarm_board, alarm_title(scope))
+    record, lines = dispatch(scope, measured, runs, record, now, LiveOps(), lead, alarm_at)
     json.dump(record, open(path, "w"), indent=1)
     return lines
 
@@ -344,8 +357,12 @@ def scorecard(board, measured, red_for, last=None, lead=None):
     return lines, f"BOARD-HEALTH board {board}: {verdict}", escalate
 
 
+def alarm_title(board):
+    return f"Board health: board {board} red over a day"
+
+
 def alarm(board, alarm_board, lines, escalate):
-    title = f"Board health: board {board} red over a day"
+    title = alarm_title(board)
     found = next((t for t in json.loads(run_text(["hypertask", "--json", "task", "list", "--project", str(alarm_board),
                                                   "--status", "Normal", "--search", "Board health", "--limit", "50"])
                                         or "{}").get("tasks", []) if t.get("title") == title), None)
@@ -425,8 +442,11 @@ def self_test():
     assert plan["C"][0][0][-1] == "brain-medium" and "app feedback reporter" in plan["C"][1]
     assert "A" not in plan and plan["B"][0] == [["vcc", "task", "unassign", "B", "--agent", "Runner 1"]], "kept the wrong ticket"
     assert "HTPR-6" not in {n for n, _, _ in plan_fixes(4060, None, st)}, "merged moves to QA only on board 15"
+    closed = {n: c for n, c, _ in plan_fixes(15, None, st, ["htpr-50-x.ts", "htpr-55-y.ts"])}
+    assert closed["HTPR-5"] == [["vcc", "task", "move", "HTPR-5", "No Flag"]], "live, unflagged QA ticket not closed"
+    assert {n: c for n, c, _ in plan_fixes(15, None, st, ["htpr-5-y.ts"])}["HTPR-5"] == [], "flagged ticket closed to No Flag"
     spin = {"rows": [], "summary": {**flow["summary"], "spin": [
-        {"ticket": "HTPR-9", "runner": "Runner 7", "picks": 6, "reason": "Waiting on cross QA"}]}}
+        {"ticket": "HTPR-9", "runner": "Runner 7", "picks": 6, "wait": "cross-QA", "reason": "Waiting on cross QA"}]}}
     assert measure(spin, "", None)["spin"][0] == 1 and "spin" not in measure(flow, "", None), "spin measured wrong"
     now = datetime(2026, 11, 7, 12, tzinfo=timezone.utc)
     seeded = count_runs({"first": {"qa": "2026-11-07T07:30:00+00:00"}, "last": {}}, {"qa": (3, ""), "wip": (1, "")}, now)
@@ -463,6 +483,15 @@ def self_test():
     assert out == ["DISPATCH green note T4060-1 spin"] and "spin" not in rec3 and "is green" in ops.notes[-1][1], out
     assert "ci_boss" in rec3, "a line not measured this run is not green"
     assert dispatch("15", {"spin": (0, "")}, {}, rec3, later, ops)[1] == [], "green note posted twice"
+    ops, at = Fake(), (4060, alarm_title("15"))
+    rec, out = dispatch("15", red, {"spin": 3}, {}, now, ops, "HT Product Lead", at)
+    assert out == [f"DISPATCH skipped spin: no open alarm ticket \"{at[1]}\" on 4060"] and not ops.notes, out
+    assert not ops.tickets[4060], "alarm mode filed a new ticket"
+    ops.tickets[4060][at[1]] = "YPER4-1"
+    rec, out = dispatch("15", red, {"spin": 3, "ci_boss": 3}, {}, now, ops, "HT Product Lead", at)
+    assert out == ["DISPATCH +1 YPER4-1 spin", "DISPATCH +1 YPER4-1 ci_boss"] and len(ops.tickets[4060]) == 1, out
+    assert dispatch("15", red, {"spin": 4, "ci_boss": 4}, rec, now, ops, "HT Product Lead", at)[1] == [], "rerun noted"
+    assert dispatch("15", {"spin": (0, "")}, {}, rec, now, ops, None, at)[1] == ["DISPATCH green note YPER4-1 spin"]
     for key in INVARIANTS:
         for text, flags in ((dispatch_title("2060/multi-bot", key), []), (dispatch_body(key), ["--shape"])):
             r = subprocess.run([str(TICKET_LINT), *flags, "-"], input=text, capture_output=True, text=True)
@@ -485,8 +514,22 @@ def home(t, board):
     return cols["other"]
 
 
-def plan_fixes(board, flow, status):
-    """Safe, reversible fixes as (ticket, commands, agent-lane note). Pure: reads results, writes nothing."""
+FLAG_DIR = "src/lib/flags/definitions"
+
+
+def flag_files(repo):
+    """File names of the flag definitions on production, one per flag, named after its ticket. None when unknown."""
+    d = json.loads(run_text(["gh", "api", f"repos/{repo}/contents/{FLAG_DIR}?ref=production"]) or "null")
+    return [f["name"] for f in d] if isinstance(d, list) else None
+
+
+def has_flag(ticket, files):
+    return any(f.lower().startswith(ticket.lower() + "-") for f in files)
+
+
+def plan_fixes(board, flow, status, flags=None):
+    """Safe, reversible fixes as (ticket, commands, agent-lane note). Pure: reads results, writes nothing.
+    flags: flag definition file names on production; None leaves LIVE-READY tickets with a note only."""
     plan = []
     for r in (status or {}).get("rows", []):
         n = r["ticket"]
@@ -497,6 +540,11 @@ def plan_fixes(board, flow, status):
             plan.append((n, [["vcc", "task", "update", n, "--section", str(home(r, board))]],
                          f"{NOTE} back to the queue. {'No PR linked' if r['verdict'] == 'NO-PR' else 'Its PR closed unmerged'}"
                          f" while it sat in {r['column']}."))
+        elif r["verdict"] == "LIVE-READY" and board == 15 and flags is not None and not has_flag(n, flags):
+            plan.append((n, [["vcc", "task", "move", n, "No Flag"]],
+                         f"{NOTE} closed to No Flag. Proof: its merged PR {r['pr']} is in the newest successful "
+                         "Production deployment (merge commit compared to the deployed commit). "
+                         "No flag definition for this ticket on production."))
         elif r["verdict"] == "LIVE-READY":
             plan.append((n, [], f"{NOTE} ready to close. Its merged PR {r['pr']} is in the live production deploy. "
                                 "Runner checks it live, then Done."))
@@ -550,13 +598,14 @@ def main():
     sc = scopes.get(a.scope or a.board)
     a.board, view, name = sc["board"], bool(sc.get("view")), sc["key"]
     alarm_board = a.alarm_board or sc["alarm_board"]
+    flags = flag_files(sc["repos"][0]) if a.board == 15 else None
     if a.fix:
         if a.board not in FIX_BOARDS or view:
             print(f"FIX not available on {name}: the shared login cannot write there. The lead fixes by hand.")
         else:
             flow = run_json([str(HERE / "flow-check"), "--scope", name])
             status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)])
-            apply_fixes(plan_fixes(a.board, flow, status))
+            apply_fixes(plan_fixes(a.board, flow, status, flags))
     whole = not view
     with ThreadPoolExecutor(6) as ex:
         status = ex.submit(run_json, [str(HERE / "wrong-status"), "--board", str(a.board)]) if whole else None
@@ -581,7 +630,7 @@ def main():
     lines, head, escalate = scorecard(name, measured, red_for, last, sc["lead"])
     print("\n".join(lines))
     if not a.fix and whole and a.board in FIX_BOARDS:
-        fixable = plan_fixes(a.board, f, status)
+        fixable = plan_fixes(a.board, f, status, flags)
         if fixable:
             print(f"FIXABLE {len(fixable)} safe fixes waiting: rerun with --fix")
     print(headline(numbers, before, at))
@@ -589,7 +638,7 @@ def main():
     if escalate and a.apply:
         print(alarm(name, alarm_board, lines, escalate))
     if a.dispatch:
-        print("\n".join(run_dispatch(name, measured, runs, now, sc["lead"])) or "DISPATCH nothing new")
+        print("\n".join(run_dispatch(name, measured, runs, now, sc["lead"], alarm_board)) or "DISPATCH nothing new")
     return 0 if not any(b for b, _ in measured.values()) else 1
 
 

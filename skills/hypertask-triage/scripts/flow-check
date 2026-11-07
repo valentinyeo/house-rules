@@ -26,8 +26,11 @@ but the ticket still waits; CI-NO-TICKET is a CI failure blocker with no CI
 ticket, so CI Boss never hears of it.
 
 Spin: the runner picker logs each pick. A ticket picked 6 or more times
-in 12 hours without a column change is SPINNING: its runner waits on
-something that never comes, so the tick restarts it on the same ticket.
+in 12 hours without a column change or PR event (opened, new commit,
+merged, closed) is SPINNING. Agent-log notes never count as movement.
+Its runner waits on something that never comes, so the tick restarts it
+on the same ticket. Each row names the wait class: cross-QA, design QA
+or other.
 Only scopes with pick_logs in scopes.json measure it.
 
 Valentin, 2026-11-05: "20 tickets in progress. That's impossible. We don't
@@ -128,13 +131,52 @@ def spinning(picks, moved, now):
     return {t: (c.most_common(1)[0][0], sum(c.values())) for t, c in counts.items() if sum(c.values()) >= SPIN_PICKS}
 
 
+WAIT_CLASS = [("cross-QA", re.compile(r"cross[ -]?qa|independent (qa|review|check|verif)|second runner|another runner", re.I)),
+              ("design QA", re.compile(r"design[ -]?(qa|review|pass|check|doctor)|verify-design|figma", re.I))]
+PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
+
+
 def spin_reason(log):
     text = next((a.get("text") or "" for a in log if not (a.get("text") or "").lower().startswith("board-health")), "")
-    return " ".join(re.sub(r"<[^>]+>", " ", text).split()[:10])
+    text = " ".join(re.sub(r"<[^>]+>", " ", text).split())
+    kind = next((name for name, rx in WAIT_CLASS if rx.search(text)), "other")
+    return kind, " ".join(text.split()[:10])
 
 
-def spins(scope, info, now):
-    """SPINNING rows. info: {ticket: (agent log, column moved at)} already fetched for the flow columns."""
+def stamp(value):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+
+
+def pr_moves(repo, number):
+    """Times the PR really moved: opened, newest commit, merged or closed. Agent-log notes never count."""
+    r = subprocess.run(["gh", "pr", "view", number, "--repo", repo, "--json", "createdAt,mergedAt,closedAt,commits"],
+                       capture_output=True, text=True)
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        return []
+    last = (d.get("commits") or [{}])[-1].get("committedDate")
+    return [t for t in (stamp(d.get(k)) for k in ("createdAt", "mergedAt", "closedAt")) if t] + \
+        ([stamp(last)] if stamp(last) else [])
+
+
+def last_move(num):
+    """(newest real movement: column change or PR event, agent log). Notes and edits are not movement."""
+    task = (ht("task", "get", num).get("tasks") or [{}])[0]
+    log = ht("task", "agent-log", num).get("activities") or []
+    text = (task.get("description") or "") + json.dumps(task.get("pullRequests") or []) + \
+        " ".join(a.get("text") or "" for a in log)
+    times = [stamp((task.get("staleness") or {}).get("sectionChangedAt"))]
+    for repo, n in sorted(set(PR_URL.findall(text))):
+        times += pr_moves(repo, n)
+    return max((t for t in times if t), default=None), log
+
+
+def spins(scope, now):
+    """SPINNING rows: picked SPIN_PICKS+ times in SPIN_HOURS with no column change and no PR event."""
     picks = pool_picks(scope)
     if picks is None:
         return None
@@ -142,18 +184,13 @@ def spins(scope, info, now):
     often = Counter(t for t, _, when in picks if when.timestamp() > window)
     fresh = [t for t, n in often.items() if n >= SPIN_PICKS]
     with ThreadPoolExecutor(6) as ex:
-        known = dict(info)
-        known.update({num: (log, moved) for num, log, moved in ex.map(
-            lambda n: details({"ticketNumber": n}), [t for t in fresh if t not in info])})
-    moved = {}
-    for t in fresh:
-        stamp = known[t][1]
-        try:
-            moved[t] = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-        except (AttributeError, ValueError):
-            pass
-    return [{"ticket": t, "runner": r, "picks": n, "reason": spin_reason(known[t][0])}
-            for t, (r, n) in sorted(spinning(picks, moved, now).items(), key=lambda x: -x[1][1])]
+        known = dict(zip(fresh, ex.map(last_move, fresh)))
+    moved = {t: m for t, (m, _) in known.items() if m}
+    rows = []
+    for t, (r, n) in sorted(spinning(picks, moved, now).items(), key=lambda x: -x[1][1]):
+        kind, reason = spin_reason(known[t][1])
+        rows.append({"ticket": t, "runner": r, "picks": n, "wait": kind, "reason": reason})
+    return rows
 
 
 def ci_block(log):
@@ -385,7 +422,7 @@ def run(key):
                       "writer": writer(t)} for t in bare],
         "qa": len(cols.get("QA", [])),
         "qa_cap": cfg.get("qa_cap"),
-        "spin": spins(scope, info, now),
+        "spin": spins(scope, now),
     }
     return rows, summary
 
@@ -440,7 +477,7 @@ def show(rows, s):
             print(f"{'CI-BOSS-QUIET' if quiet else 'CI-BOSS'}: {seen}")
     for r in s.get("spin") or []:
         print(f"SPINNING     {url.format(b=s['board'], n=r['ticket'].rsplit('-', 1)[1])}  {r['runner']} picked it "
-              f"{r['picks']} times, no column change. Last note: {r['reason']}")
+              f"{r['picks']} times, no column or PR move. Waits on {r['wait']}: {r['reason']}")
     by_col = {}
     for t in s["no_brain"]:
         by_col[t["column"]] = by_col.get(t["column"], 0) + 1
@@ -501,8 +538,10 @@ def self_test():
     assert "HTPR-1" not in spinning(picks, moved, now), "a ticket that changed column still spins"
     assert "HTPR-4" not in spinning(picks * 6, {}, now), "picks older than 12 hours counted"
     assert spin_reason([{"text": "board-health fix: ready to close"}, {"text": "<p>Waiting on an independent cross QA run</p>"}]) \
-        == "Waiting on an independent cross QA run", "own board-health note used as the reason"
-    assert spins({"key": "4060"}, {}, now) is None, "a scope with no pick logs must not measure spin"
+        == ("cross-QA", "Waiting on an independent cross QA run"), "own board-health note used as the reason"
+    assert spin_reason([{"text": "Blocker: verify-design needs a Figma frame pass"}])[0] == "design QA"
+    assert spin_reason([{"text": "Blocker: Vercel preview 403"}])[0] == "other"
+    assert spins({"key": "4060"}, now) is None, "a scope with no pick logs must not measure spin"
     print("SELF_TEST_OK")
 
 
