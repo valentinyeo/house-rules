@@ -1,5 +1,5 @@
 {
- "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name and loads role_skill. No row: it reports 'not in roster' to Chief Of Staff and takes no work. kind: chief, lead, view-lead, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371.",
+ "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name and loads role_skill. No row: it reports 'not in roster' to Chief Of Staff and takes no work. kind: chief, lead, view-lead, solo-dev, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371.",
  "_updated": "2026-11-07 switch",
  "runners": 17,
  "rows": [
@@ -97,40 +97,41 @@
   {
    "name": "Multi Bot desktop lead",
    "multibot": "Multi Bot Opus Runner",
-   "kind": "view-lead",
-   "role_skill": "/view-lead",
+   "kind": "solo-dev",
+   "role_skill": "/solo-dev",
    "login": "Multi Bot Opus Lead",
    "board": "2060",
    "view": "2060/multi-bot",
    "app": "multiprompt",
    "fallback": "Mini Boss CEO",
    "status": "unknown",
-   "notes": "Multibot label from the sidebar; confirm with mp-layout."
+   "notes": "Solo dev (Valentin 2026-11-07: keep solo devs). Builds and ships its own app's tickets live, while Valentin chats with it. Assign yourself before you start a ticket; runners never take a ticket a solo dev holds. Hand a ticket to the runner pool only by leaving it unassigned in Todo."
   },
   {
    "name": "multiprompt-android",
    "multibot": "Multi Bot Android",
-   "kind": "view-lead",
-   "role_skill": "/view-lead",
+   "kind": "solo-dev",
+   "role_skill": "/solo-dev",
    "login": "Multiprompt Android Dev",
    "board": "2060",
    "view": "2060/multi-bot-android",
    "app": "multiprompt-android",
    "fallback": "Mini Boss CEO",
-   "status": "live"
+   "status": "live",
+   "notes": "Solo dev (Valentin 2026-11-07: keep solo devs). Builds and ships its own app's tickets live, while Valentin chats with it. Assign yourself before you start a ticket; runners never take a ticket a solo dev holds. Hand a ticket to the runner pool only by leaving it unassigned in Todo."
   },
   {
    "name": "postbox",
    "multibot": "Postbox",
-   "kind": "view-lead",
-   "role_skill": "/view-lead",
+   "kind": "solo-dev",
+   "role_skill": "/solo-dev",
    "login": "Postbox Dev",
    "board": "2060",
    "view": "2060/postbox",
    "app": "postbox",
    "fallback": "Mini Boss CEO",
    "status": "live",
-   "notes": "tmux Claude idle 37h; the Multibot chat may be the live one. Live Claude session wazig-20 in tmux postbox."
+   "notes": "Solo dev (Valentin 2026-11-07: keep solo devs). Builds and ships its own app's tickets live, while Valentin chats with it. Assign yourself before you start a ticket; runners never take a ticket a solo dev holds. Hand a ticket to the runner pool only by leaving it unassigned in Todo."
   },
   {
    "name": "Pecunia",
