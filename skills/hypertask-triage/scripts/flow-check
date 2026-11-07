@@ -28,7 +28,7 @@ ticket, so CI Boss never hears of it.
 Valentin, 2026-11-05: "20 tickets in progress. That's impossible. We don't
 have that many runners."
 
-usage: flow-check [--board 15] [--json PATH] [--self-test]
+usage: flow-check [--board 15 | --scope 2060/postbox] [--json PATH] [--self-test]
 Read-only. It flags; the board lead moves tickets.
 """
 import argparse
@@ -38,25 +38,31 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 
-# board: (runner tmux prefix and agent name pattern, columns with their limits in hours)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scopes  # noqa: E402
+
+# board: columns with their limits in hours. Workers per board or view live in scopes.json.
 BOARDS = {
     15: {
-        "runners": [("ht-or-runner-", "Runner {n}")],
         "in_progress": "In Progress",
         "waits": {"QA": 24, "AI Review": 6, "Agent Blocked (Infra)": 24},
         "blocked_cap": 5,
         "qa_cap": 15,
     },
     4060: {
-        "runners": [("infra-runner-", "Infra Runner {n}")],
         "in_progress": "In Progress",
         "waits": {"AI Review": 6, "Agent Blocked": 24},
         "blocked_cap": 5,
     },
     11514: {
-        "runners": [("ht-ci-runner-", "CI Runner {n}")],
         "in_progress": "In Progress",
+        "waits": {"AI Review": 6},
+        "blocked_cap": 5,
+    },
+    2060: {
+        "in_progress": "Doing",
         "waits": {"AI Review": 6},
         "blocked_cap": 5,
     },
@@ -124,25 +130,25 @@ def hours_since(stamp, now):
         return None
 
 
-def live_runners(board):
-    out = subprocess.run(["tmux", "ls", "-F", "#S"], capture_output=True, text=True).stdout.split()
-    names = set()
-    for prefix, pattern in BOARDS[board]["runners"]:
-        for s in out:
-            m = re.fullmatch(re.escape(prefix) + r"(\d+)", s)
-            if m:
-                names.add(pattern.format(n=m.group(1)).lower())
-    return names
+def workers_for(scope):
+    """Every worker on the board identifies an owner; the scope's own live workers set its cap."""
+    live_sessions = scopes.sessions()
+    patterns, live, always = [], set(), set()
+    for k in scopes.for_board(scope["board"]):
+        p, l, a = scopes.workers(scopes.get(k), live_sessions)
+        patterns, live, always = patterns + p, live | l, always | a
+    _, own_live, _ = scopes.workers(scope, live_sessions)
+    return (patterns, live, always), own_live
 
 
-def column(board, name):
+def column(board, name, labels=None):
     tickets, offset = [], 0
     while True:
         page = ht("task", "list", "--project", str(board), "--section", name, "--status", "Normal",
                   "--limit", "100", "--offset", str(offset)).get("tasks", [])
         tickets += page
         if len(page) < 100:
-            return tickets
+            return [t for t in tickets if scopes.in_view(t, labels)]
         offset += 100
 
 
@@ -183,34 +189,35 @@ def details(t):
     return num, log, (task.get("staleness") or {}).get("sectionChangedAt") or t.get("updatedAt")
 
 
-BUILDING = ("In Progress", "AI Review")
 QUEUE = {"bugs", "improvements", "features", "backlog", "todo"}
-WORKERS = {"ht design builder", "speed runner"}
 
 
-def holder(t, live):
-    """The assignee is the one record of ownership. Returns (kind, name): owned, orphan or outside."""
+def holder(t, w):
+    """The assignee is the one record of ownership. w: (worker patterns, live names, always-on names).
+    Returns (kind, name): owned, orphan or outside."""
+    patterns, live, always = w
     agents = [a["agent"]["displayName"] for a in t.get("assignees") or [] if a.get("agent")]
-    workers = [n for n in agents if n.lower().startswith(("runner ", "ci runner ")) or n.lower() in WORKERS]
+    workers = [n for n in agents if scopes.is_worker(n, patterns)]
     if not workers:
         return ("outside", agents[0]) if agents else ("orphan", "nobody assigned")
-    alive = [n for n in workers if n.lower() in WORKERS or n.lower() in live]
+    alive = [n for n in workers if n.lower() in always or n.lower() in live]
     return ("owned", alive[0]) if alive else ("orphan", f"{workers[0]} not running")
 
 
-def ownership(building, live):
-    """One runner, one ticket being built. QA waits on its own cap."""
+def ownership(building, w, own_live=None):
+    """One worker, one ticket being built. QA waits on its own cap. own_live: the scope's own live workers."""
+    own_live = w[1] if own_live is None else own_live
     owners, orphans, outside = {}, [], []
     for t in building:
-        kind, who = holder(t, live)
+        kind, who = holder(t, w)
         if kind == "owned":
             owners.setdefault(who, []).append(t["ticketNumber"])
         else:
             (orphans if kind == "orphan" else outside).append((t["ticketNumber"], who))
-    workers_busy = sum(1 for w in owners if w.lower() in WORKERS)
-    return {"active": len(building), "live": len(live) + workers_busy, "owners": owners, "orphans": orphans,
-            "outside": outside, "doubles": {w: n for w, n in owners.items() if len(n) > 1},
-            "idle_runners": sorted(r for r in live if r not in {o.lower() for o in owners})}
+    always_busy = sum(1 for o in owners if o.lower() in w[2])
+    return {"active": len(building), "live": len(own_live) + always_busy, "owners": owners, "orphans": orphans,
+            "outside": outside, "doubles": {o: n for o, n in owners.items() if len(n) > 1},
+            "idle_runners": sorted(r for r in own_live if r not in {o.lower() for o in owners})}
 
 
 def in_progress_verdict(t, own, log, now):
@@ -233,16 +240,19 @@ def in_progress_verdict(t, own, log, now):
     return "OK", who, idle
 
 
-def run(board):
+def run(key):
+    scope = scopes.get(key)
+    board = scope["board"]
     cfg = BOARDS[board]
     now = datetime.now(timezone.utc)
-    live = live_runners(board) if cfg["runners"] else None
-    cols = {name: column(board, name) for name in [cfg["in_progress"], *cfg["waits"]]}
+    w, own_live = workers_for(scope)
+    live = own_live
+    labels = scopes.view_labels(scope, ht)
+    cols = {name: column(board, name, labels) for name in [cfg["in_progress"], *cfg["waits"]]}
     with ThreadPoolExecutor(6) as ex:
         info = {num: (log, moved) for num, log, moved in ex.map(details, [t for ts in cols.values() for t in ts])}
-    own = None
-    if live is not None:
-        own = ownership([t for c in BUILDING if c in cols for t in cols[c]], live)
+    building = (cfg["in_progress"], "AI Review")
+    own = ownership([t for c in building if c in cols for t in cols[c]], w, own_live)
     rows = []
     for t in cols[cfg["in_progress"]]:
         num = t["ticketNumber"]
@@ -277,12 +287,12 @@ def run(board):
         boss = max((a.get("createdAt") or "" for log in ci_logs for a in log
                     if (a.get("agentName") or "").lower() == "ci boss"), default="")
         ci_boss_h = hours_since(boss, now) if boss else None
-    opened = open_tickets(board)
+    opened = [t for t in open_tickets(board) if scopes.in_view(t, labels)]
     bare = no_brain(opened)
     working = sum(1 for r in rows if r["column"] == cfg["in_progress"] and r["verdict"] == "OK")
     blocked = [c for c in cfg["waits"] if c.startswith("Agent Blocked")]
     summary = {
-        "board": board,
+        "board": board, "scope": scope["key"], "lead": scope["lead"],
         "live_runners": len(live) if live is not None else None,
         "in_progress": len(cols[cfg["in_progress"]]),
         "really_worked": working,
@@ -360,18 +370,19 @@ def show(rows, s):
 def self_test():
     now = datetime(2026, 11, 5, 22, 0, tzinfo=timezone.utc)
     fresh, old = "2026-11-05T21:30:00Z", "2026-11-01T10:00:00Z"
-    live = {"runner 1", "runner 2"}
+    w = ([scopes._pattern(p) for p in ("Runner {n}", "HT Design Builder", "Speed Runner")],
+         {"runner 1", "runner 2"}, {"ht design builder", "speed runner"})
     claim = lambda who, at: {"agentName": who, "createdAt": at, "text": "Claimed. Session working it now."}
     note = lambda who, at: {"agentName": who, "createdAt": at, "text": "Plan: reproduce"}
     tk = lambda num, *names: {"ticketNumber": num, "assignees": [{"agent": {"displayName": n}} for n in names]}
     board = [tk("A", "Runner 1"), tk("B", "Runner 1"), tk("C", "Runner 12"), tk("D"), tk("E", "HT Design Builder"),
              tk("F", "HT Product Lead"), tk("G", "Speed Runner")]
-    o = ownership(board, live)
+    o = ownership(board, w)
     assert o["doubles"] == {"Runner 1": ["A", "B"]}, o
     assert o["orphans"] == [("C", "Runner 12 not running"), ("D", "nobody assigned")], o
     assert o["outside"] == [("F", "HT Product Lead")], "design builder or speed runner counted as outsiders"
     assert o["idle_runners"] == ["runner 2"] and o["active"] == 7 and o["live"] == 4, o
-    o2 = ownership([tk("A", "Runner 1"), tk("B")], live)
+    o2 = ownership([tk("A", "Runner 1"), tk("B")], w)
     assert o2["doubles"] == {}, "unassigning a runner must clear its double at once"
     assert in_progress_verdict(tk("A", "Runner 1"), o, [note("Runner 1", fresh)], now)[0] == "DOUBLE"
     assert in_progress_verdict(tk("C", "Runner 12"), o, [claim("Runner 12", fresh)], now)[0] == "DEAD-RUNNER"
@@ -403,12 +414,13 @@ def self_test():
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--board", type=int, default=15, choices=sorted(BOARDS))
+    p.add_argument("--scope", help="a key in scopes.json, for a board view; default: the board")
     p.add_argument("--json")
     p.add_argument("--self-test", action="store_true")
     a = p.parse_args()
     if a.self_test:
         return self_test()
-    rows, summary = run(a.board)
+    rows, summary = run(a.scope or str(a.board))
     show(rows, summary)
     if a.json:
         json.dump({"rows": rows, "summary": summary}, open(a.json, "w"), indent=1, default=str)

@@ -14,7 +14,7 @@ Default board: your fleet's product board (Hypertask: 15). Software Factory: its
 
 ## How often to run it
 Two layers. The script runs on a timer, the chief session works what it cannot fix.
-- Script, every hour at :05: timer `ht-board-health` runs `board-health --fix --apply` for 15 and 4060, `--apply` for 11514. Safe fixes happen even when no chief is awake. Output: `~/.local/state/board-health/last-<board>.log`. Alarms bump at most once a day. Other fleets add their own boards to a timer like it.
+- Script, every hour at :05: timer `ht-board-health` runs `board-health --fix --apply` for 15 and 4060, `--apply` for 11514, and a read-only run for 2060 and each Software Factory view scope. Safe fixes happen even when no chief is awake. Output: `~/.local/state/board-health/last-<scope>.log` (`/` becomes `-`). Alarms bump at most once a day.
 - Chief session, every hour at :20: read the last logs, work each red line. The script runs at :05, so the log is fresh by :20. A session cron dies with its session, so check `CronList` at every shift start and recreate it when missing: `CronCreate` cron `20 * * * *`, prompt `/hypertask-triage step 0: read ~/.local/state/board-health/last-*.log, work every red line, rerun board-health until GREEN`. Never more often: runners take about an hour per ticket.
 - Full clean-up (steps 1 to 7): once a day at 08:00 London, a second session cron `0 8 * * *`, prompt `/hypertask-triage`. The blocker check also runs alone at 07:30.
 - Right away after big changes: a runner restart or a batch of merges.
@@ -24,7 +24,13 @@ Valentin, 2026-11-06:
 > the outcome of the skill is to force the chief of staff to fix all of this, and make sure that the system is running smoothly
 
 `~/.local/share/house-rules/skills/hypertask-triage/scripts/board-health --board 15 --fix --apply`
-Run it for every board your fleet owns. Hypertask: 15, 4060, 11514. Software Factory: 2060.
+Run it for every scope you own. A scope is a board, or a board view one lead owns.
+- Hypertask: 15, 4060, 11514.
+- Software Factory: 2060 (Mini Boss CEO), plus views `2060/multi-bot`, `2060/postbox`, `2060/multi-bot-android`.
+- A view lead or solo dev runs `board-health --scope 2060/postbox`. It scores only that view's tickets and PRs.
+Scopes live in `scripts/scopes.json`: board, view, lead, alarm board, repos and workers.
+New lead, view, solo dev or runner pool? Add it there the same turn. Both caps read the same worker list.
+Worker kinds: a tmux pool (`ht-or-runner-` = Runner N), one exact session (solo dev `postbox` = Postbox Dev), a runner state file, or always-on (HT Design Builder).
 
 `--fix` runs the safe fixes first, then scores. Each gets an agent-lane note. Board 15 and 4060 only.
 - Merged ticket before QA: moves to QA (board 15).
@@ -35,8 +41,9 @@ Run it for every board your fleet owns. Hypertask: 15, 4060, 11514. Software Fac
 Never hand-write a one-off fix script. A fix that is missing goes into `plan_fixes` in board-health.
 
 The assignee is the one record of who owns a ticket. Unassign a worker and its double clears at once.
-Workers: live runners, plus HT Design Builder and Speed Runner, one ticket each.
-- Tickets being built (In Progress, AI Review) never outnumber workers.
+Workers: the scope's workers in `scopes.json`, one ticket each.
+- Tickets being built (In Progress or Doing, plus AI Review) never outnumber workers.
+- Open PRs never outnumber workers. Each open PR sits on a ticket a live worker is building. See 6i.
 - Merged tickets waiting for the live check (QA) have their own cap: 15 on board 15.
 - Every ticket being built has one live assigned worker. No worker holds two.
 - No live runner idles while orphans or queued tickets wait.
@@ -204,6 +211,27 @@ It reads every GitHub PR link on each work ticket and asks GitHub for the newest
 It only reads. The board lead moves them, as its agent, with the reason in the agent lane.
 Same runner forgets twice? Fix its ship step, not the ticket.
 
+## 6i. Keep the PR queue no longer than the workers
+Valentin, 2026-11-07:
+> the hyper task PRQ is currently 35. That should not be possible. If every runner stays on the ticket until it's live, there should not be no backlog in the queue.
+
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/pr-queue --scope 15`
+board-health shows it as the `prq` line. Owner: the scope's lead.
+It reads open PRs on the scope's repos. It finds each PR's ticket by the key in its title or branch.
+The ticket's real board and view decide the scope, never the PR author or branch name.
+- `OK`: a live worker is assigned and the ticket is being built.
+- `ORPHAN`: no live worker on it. Hand the ticket to an idle runner; the PR comes with it.
+- `NOT-A-WORKER`: a lead or advisor holds it. Hand it to a runner.
+- `WRONG-COLUMN`: a live worker has it, but it sits in the queue. Move it to the building column.
+- `DUPLICATE`: an older PR for the same ticket. Close it, link the newer one.
+- `TICKET-CLOSED`: the ticket is done or archived. Close the PR, or reopen the ticket.
+- `STALE-TICKET`: the ticket is in QA but its PR is open. Back to AI Review.
+- `PARKED`: the ticket waits in Agent Blocked, Valentin Review or UX. Clear the wait.
+- `NO-TICKET`: no ticket key. File or link one.
+- `BOT`: dependabot. CI Boss's, not counted against workers.
+It only reads. Closing PRs stays with the lead, as its own GitHub identity.
+Same line red three runs in a row? The runner picker skips the PR queue. Fix the picker: `ht-or-runner-pick`, `mp-pick` or `mb-pick`.
+
 ## 6f. Keep tickets clean: count chatter and fix its origin
 Valentin, 2026-11-06:
 > Every bot has currently this problem that agent chatter is just out of control ... force the chief of staff for each of the departments to run this skill and then get active fixing the house rules that caused the agent chatter on the ticket.
@@ -245,6 +273,7 @@ Caveman:
 - Blocked by CI: X tickets, counts per CI flag, slow CI tickets as links.
 - Chatter: X bad items, split code, agent and personal. Top writer each, and the rule you changed.
 - Agent logins: extra and duplicate counts per pool.
+- PR queue: open PRs against workers per scope, counts per verdict, orphan PRs as links.
 - Wrong calls fixed in the rule, if any.
 
 Auto-archive of done tickets on a timer comes later, after Valentin trusts the manual runs.

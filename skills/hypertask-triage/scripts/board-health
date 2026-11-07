@@ -31,11 +31,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import scopes  # noqa: E402
 STATE = Path.home() / ".local/state/board-health"
 ESCALATE_HOURS = 24
 LEADS = {15: "HT Product Lead", 4060: "Infra Lead", 11514: "CI Boss", 2060: "Mini Boss CEO"}
 CHATTER_LINE = 10
-FLOW_BOARDS = {15, 4060, 11514}
+FLOW_BOARDS = {15, 4060, 11514, 2060}
 
 # key: (what must hold, owner role, fix). Owner "lead" means the board's lead.
 INVARIANTS = {
@@ -72,6 +74,9 @@ INVARIANTS = {
     "status": ("no merged, closed or PR-less ticket in a pre-merge column", "lead",
                "merged: QA on board 15, Done elsewhere after the live check; closed or no PR: home column; "
                "--fix does board 15 and 4060"),
+    "prq": ("open PRs at most the workers, each on a ticket a live worker is building", "lead",
+            "hand each orphan PR's ticket to an idle runner; close duplicates and PRs of closed tickets; "
+            "red three runs: fix the runner picker's PR queue step"),
     "identities": ("runner logins match live runner sessions, no duplicate names", "Chief Of Staff",
                    "/agent-housekeeping files the extra logins for Valentin's yes; sync logins whenever runners change"),
 }
@@ -98,12 +103,12 @@ def number(pattern, text):
     return tuple(int(g) for g in m.groups()) if m else None
 
 
-def measure(flow, blockers, chatter, identities=None, status=None, board=None):
+def measure(flow, blockers, chatter, identities=None, status=None, board=None, prq=None):
     """Turn the three checks into {key: (bad count, detail)}; None means not measured on this board."""
     m = {}
     if flow:
         m.update(measure_flow(flow))
-    m.update(measure_rest(blockers, chatter, identities, status, board))
+    m.update(measure_rest(blockers, chatter, identities, status, board, prq))
     return m
 
 
@@ -144,9 +149,10 @@ def pristine_on(board, blockers):
     return (sum(n == "0" for n in rows), len(rows))
 
 
-def measure_rest(blockers, chatter, identities, status, board=None):
+def measure_rest(blockers, chatter, identities, status, board=None, prq=None):
     m = {}
-    pristine = pristine_on(board, blockers) if board else number(r"^PRISTINE (\d+) of (\d+)", blockers)
+    blockers = blockers or ""
+    pristine = (pristine_on(board, blockers) if board else number(r"^PRISTINE (\d+) of (\d+)", blockers)) if blockers else None
     if pristine:
         m["pristine"] = (pristine[1] - pristine[0], f"{pristine[0]} of {pristine[1]} clean")
     parked = number(r"^PARKED SUMMARY (\d+) parked .* (\d+) break no ticket rule", blockers)
@@ -160,8 +166,16 @@ def measure_rest(blockers, chatter, identities, status, board=None):
         live = [r["ticket"] for r in status["rows"] if r["verdict"] == "LIVE-READY"]
         m["status"] = (len(wrong), " ".join(f"{r['ticket']}({r['verdict']})" for r in wrong))
         m["shipped"] = (len(live), " ".join(live))
+    if prq is not None:
+        bad = prq["bad"]
+        kinds = {}
+        for b in bad:
+            kinds.setdefault(b["verdict"], []).append(f"#{b['number']}")
+        detail = f"{prq['open']} open PRs for {prq['workers']} workers. " + " ".join(
+            f"{v} {' '.join(n)}" for v, n in sorted(kinds.items()))
+        m["prq"] = (len(bad) + max(0, prq["open"] - prq["workers"] - len(bad)), detail.strip())
     if identities is not None:
-        extra = {p: v["extra"] for p, v in identities["pools"].items() if v.get("extra")}
+        extra ={p: v["extra"] for p, v in identities["pools"].items() if v.get("extra")}
         detail = " ".join(f"{p}: {len(e)} extra" for p, e in extra.items())
         if identities["duplicates"]:
             detail += f" duplicates: {', '.join(identities['duplicates'])}"
@@ -192,9 +206,9 @@ def trend(bad, before):
     return "" if before is None or before == bad else f" Was {before}, now {bad}."
 
 
-def scorecard(board, measured, red_for, last=None):
+def scorecard(board, measured, red_for, last=None, lead=None):
     last = last or {}
-    lead = LEADS.get(board, "the board lead")
+    lead = lead or LEADS.get(board, "the board lead")
     lines, escalate = [], []
     for key, (rule, owner, fix) in INVARIANTS.items():
         if key not in measured:
@@ -221,7 +235,7 @@ def alarm(board, alarm_board, lines, escalate):
                                         or "{}").get("tasks", []) if t.get("title") == title), None)
     red = [l for l in lines if l.startswith(("RED", "ESCALATE"))]
     if found:
-        mark = STATE / f"alarm-bump-{board}"
+        mark = STATE / f"alarm-bump-{str(board).replace('/', '-')}"
         if mark.exists() and time.time() - mark.stat().st_mtime < 86400:
             return f"ALARM {found['ticketNumber']} already bumped today"
         mark.parent.mkdir(parents=True, exist_ok=True)
@@ -229,15 +243,22 @@ def alarm(board, alarm_board, lines, escalate):
         subprocess.run(["vcc", "activity", "add", found["ticketNumber"],
                         f"board-health: still red over a day: {', '.join(escalate)}."], check=False)
         return f"ALARM bumped {found['ticketNumber']}"
-    body = ("## Problem\n" + "\n".join(f"- {l.split('. Owner')[0].split(None, 1)[1]}" for l in red) +
-            "\n\n## Fix\n- Fleet chief runs /hypertask-triage step 0 until GREEN.\n- Each owner fixes its line today.\n\n"
-            "## Done when\n- board-health prints GREEN.\n\n## Risk\n- None. Board moves only.\n\n## Decision\nnone\n")
+    body = (f"## Problem\n- Board health has been red for over a day.\n- {len(red)} checks are red.\n"
+            "- The agent lane lists each one.\n\n"
+            "## Fix\n- The fleet chief works each red line.\n- Each owner fixes its line today.\n\n"
+            "## Done when\n- Board health shows green.\n\n## Risk\n- None. Only tickets move.\n\n## Decision\nnone\n")
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(body)
     r = subprocess.run(["vcc", "task", "create", "--project", str(alarm_board), "--priority", "urgent", "--labels",
                         "brain-medium", "--title", title, "--description-file", f.name, "--markdown"],
                        capture_output=True, text=True)
-    return "ALARM filed" if r.returncode == 0 else f"ALARM failed: {(r.stderr or r.stdout)[:160]}"
+    if r.returncode:
+        return f"ALARM failed: {(r.stderr or r.stdout)[:160]}"
+    num = re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", r.stdout)
+    if num:
+        subprocess.run(["vcc", "activity", "add", num.group(0), "board-health red over a day:\n" + "\n".join(red)],
+                       capture_output=True, text=True)
+    return f"ALARM filed {num.group(0) if num else ''}".strip()
 
 
 def self_test():
@@ -360,46 +381,53 @@ def main():
     p.add_argument("--board", type=int, default=15)
     p.add_argument("--apply", action="store_true", help="file or bump the alarm when a line is red over a day")
     p.add_argument("--fix", action="store_true", help="run the safe fixes, then score again")
-    p.add_argument("--alarm-board", type=int, default=4060)
+    p.add_argument("--scope", help="a key in scopes.json: a board view one lead owns, e.g. 2060/postbox")
+    p.add_argument("--alarm-board", type=int, help="default: the scope's alarm board")
     p.add_argument("--self-test", action="store_true")
     a = p.parse_args()
     if a.self_test:
         return self_test()
+    sc = scopes.get(a.scope or a.board)
+    a.board, view, name = sc["board"], bool(sc.get("view")), sc["key"]
+    alarm_board = a.alarm_board or sc["alarm_board"]
     if a.fix:
-        if a.board not in FIX_BOARDS:
-            print(f"FIX not available on board {a.board}: the shared login cannot write there. The lead fixes by hand.")
+        if a.board not in FIX_BOARDS or view:
+            print(f"FIX not available on {name}: the shared login cannot write there. The lead fixes by hand.")
         else:
-            flow = run_json([str(HERE / "flow-check"), "--board", str(a.board)])
+            flow = run_json([str(HERE / "flow-check"), "--scope", name])
             status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)])
             apply_fixes(plan_fixes(a.board, flow, status))
-    with ThreadPoolExecutor(5) as ex:
-        status = ex.submit(run_json, [str(HERE / "wrong-status"), "--board", str(a.board)])
-        flow = ex.submit(run_json, [str(HERE / "flow-check"), "--board", str(a.board)])
-        blockers = ex.submit(run_text, [str(HERE / "blocker-review"), "--boards", str(a.board)])
-        chatter = ex.submit(run_json, [str(HERE / "ticket-check"), "--board", str(a.board)])
+    whole = not view
+    with ThreadPoolExecutor(6) as ex:
+        status = ex.submit(run_json, [str(HERE / "wrong-status"), "--board", str(a.board)]) if whole else None
+        flow = ex.submit(run_json, [str(HERE / "flow-check"), "--scope", name])
+        blockers = ex.submit(run_text, [str(HERE / "blocker-review"), "--boards", str(a.board)]) if whole else None
+        chatter = ex.submit(run_json, [str(HERE / "ticket-check"), "--board", str(a.board)]) if whole else None
         identities = ex.submit(run_json, [str(HERE / "agent-identities")]) if a.board == 15 else None
+        prq = ex.submit(run_json, [str(HERE / "pr-queue"), "--scope", name])
+    status = status and status.result()
     if flow.result() is None and a.board in FLOW_BOARDS:
-        print(f"BOARD-HEALTH board {a.board}: UNKNOWN, flow-check failed")
+        print(f"BOARD-HEALTH {name}: UNKNOWN, flow-check failed")
         return 1
     now = datetime.now(timezone.utc)
-    measured = measure(flow.result(), blockers.result(), chatter.result(), identities and identities.result(),
-                       status.result(), a.board)
+    measured = measure(flow.result(), blockers.result() if blockers else "", chatter and chatter.result(),
+                       identities and identities.result(), status, a.board, prq.result())
     f = flow.result() or {}
     s = f.get("summary") or {}
     numbers = {"being built": (s.get("ownership") or {}).get("active"), "in QA": s.get("qa"),
                "problems": sum(b for b, _ in measured.values())}
     numbers = {k: v for k, v in numbers.items() if v is not None}
-    red_for, last, before, at = track(a.board, measured, numbers, now)
-    lines, head, escalate = scorecard(a.board, measured, red_for, last)
+    red_for, last, before, at = track(name.replace("/", "-"), measured, numbers, now)
+    lines, head, escalate = scorecard(name, measured, red_for, last, sc["lead"])
     print("\n".join(lines))
-    if not a.fix and a.board in FIX_BOARDS:
-        fixable = plan_fixes(a.board, f, status.result())
+    if not a.fix and whole and a.board in FIX_BOARDS:
+        fixable = plan_fixes(a.board, f, status)
         if fixable:
             print(f"FIXABLE {len(fixable)} safe fixes waiting: rerun with --fix")
     print(headline(numbers, before, at))
     print(head)
     if escalate and a.apply:
-        print(alarm(a.board, a.alarm_board, lines, escalate))
+        print(alarm(name, alarm_board, lines, escalate))
     return 0 if not any(b for b, _ in measured.values()) else 1
 
 
