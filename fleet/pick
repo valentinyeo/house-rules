@@ -4,12 +4,15 @@
     fleet/pick <N> [--dry-run] [--json]    pick (and claim) one ticket for Runner N
     fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 4060, 11514?
 
-Valentin 2026-11-07: one pool, Runner 1..N, all on Cursor CLI with Grok. The model per brain tag (and for park and
-incident runs) comes from the pacer's ~/.local/state/pacing/allocation.json when it is under an hour old and names
-Cursor; else the built-in map. This replaces ht-or-runner-pick,
+Valentin 2026-11-07: one pool, Runner 1..N, each runner on the engine the pacer gives it (engine-N, else the engine file,
+else cursor): cursor (Cursor plan), codex (hax on Codex) or opencode (hax on OpenCode Go). The model per brain tag (and for
+park and incident runs) comes from the pacer's ~/.local/state/pacing/allocation.json when it is under an hour old; else the
+built-in ENGINES map, which is the house-rules brain map. A brain the runner's engine skips is never handed to it, and a
+ticket held by a runner whose engine skips its brain counts as an orphan, so a runner that can do it adopts it. This
+replaces ht-or-runner-pick,
 ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/). Order:
-  0. a live incident (YPER4-1375): an open board 15 ticket labelled incident that no live runner works. Any runner takes it
-     first, whatever it holds. Lane cap, app freeze, rests, queue brake and holds do not apply (ship-claim runs with
+  0. a live incident (YPER4-1375): an open board 15 ticket labelled incident that no live runner works. Any Cursor runner
+     takes it first, whatever it holds (the house rule names grok-4.7 high; other engines skip step 0). Lane cap, app freeze, rests, queue brake and holds do not apply (ship-claim runs with
      SHIP_CLAIM_INCIDENT=1). Model grok-4.7-high, brief briefs/incident.txt in front of the app brief. A runner assigned to
      an incident it is not running right now (log) is handed it again; an incident another runner is running is left alone.
   a. my own ticket in a building column on any board
@@ -62,7 +65,6 @@ CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
 REST_MAX = 3 * 86400  # an IDLE rest never outlives this, changed or not
 REST_GRACE = 60  # seconds: the run's own last write may land just after its IDLE end
-PARK_BRAIN = ("brain-light", "grok-4.7-medium", "medium")  # a park run reads one ticket and runs fleet/park
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
 
@@ -77,7 +79,8 @@ BOARD_ORDER = {b: i for i, b in enumerate(BOARDS)}
 PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "YPER4": "4060", "HYCI": "11514"}
 RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 CI_LABELS = {"ci", "hypertask ci"}
-SKIP_ALL = {"brain-extra-hard"}
+BASE_SKIP = {"brain-extra-hard"}
+SKIP_ALL = set(BASE_SKIP)  # plus the brains the runner's engine skips (set_engine)
 SKIP_APP = {"design-pass", "cursor bugs 7 nov", "cursor runners 6 nov", "cursor cloud 7 nov"}
 SKIP_INFRA = {"agent feedback"}
 # a solo dev keeps a ticket by holding it (assignee), not by label; android needs the shared phone, so it stays with its solo dev
@@ -90,8 +93,20 @@ SF_REPOS = {"multiprompt": "multiprompt", "triage": "triage", "chromescribe": "c
             "claude cro": "claude-cro", "screencast2": "screencast2-go", "token ladder": "token-ladder",
             "upwork auto applier": "upwork-auto-applier"}
 SF_HOLD = HOME / ".local/state/multibot/hold.txt"
-BRAINS = (("brain-hard", "grok-4.7-high", "high"), ("brain-medium", "composer-2.5", "medium"),
-          ("brain-light", "composer-2.5", "medium"))
+# engine -> plan, (model, effort) per brain tag, park run, incident run. A brain missing here is skipped on that engine.
+# House rules "Every runner, any harness, takes its brain per ticket from the brain tag". Park reads one ticket (light).
+ENGINES = {
+    "cursor": dict(plan="grok", brains={"light": ("composer-2.5", "medium"), "medium": ("composer-2.5", "medium"),
+                                        "hard": ("grok-4.7-high", "high")},
+                   park=("grok-4.7-medium", "medium"), incident=("grok-4.7-high", "high")),
+    "codex": dict(plan="codex", brains={"light": ("gpt-6.1-terra", "medium"), "medium": ("gpt-6.1-sol", "medium"),
+                                        "hard": ("gpt-6.1-sol", "high")},
+                  park=("gpt-6.1-terra", "medium"), incident=None),
+    "opencode": dict(plan="opencode", brains={"light": ("deepseek-v4.1-flash", "low"), "medium": ("deepseek-v4.1-flash", "high")},
+                     park=("deepseek-v4.1-flash", "low"), incident=None),
+}
+ENGINE = "cursor"
+RUN_START = re.compile(r"^\S+ (?:cursor|hax): (.*)$")
 TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|YPER4|HYCI)-([0-9]+)\b")
 RETIRED = re.compile(r"^(?:ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 PR_REPO = "hypertask-ai/hypertask"
@@ -245,9 +260,38 @@ def retired(name):
     return (bool(RETIRED.match(name)) and not legacy_alive(name)) or (bool(re.fullmatch(r"runner \d+", name)) and not live_runner(name))
 
 
+def runner_engine(n):
+    """Runner n's engine: engine-n (the pacer's per-runner choice), else the pool-wide engine file, else cursor.
+    None: the file names no known engine."""
+    for f in (RUNNER_STATE / f"engine-{n}", RUNNER_STATE / "engine"):
+        try:
+            e = f.read_text().strip()
+        except OSError:
+            continue
+        return e if e in ENGINES else None
+    return "cursor"
+
+
+def brain_tag(t):
+    return next((b for b in ("hard", "medium", "light") if f"brain-{b}" in t["labels"]), "medium")
+
+
+def cannot_do(name, t):
+    """A live runner whose engine skips this ticket's brain (opencode and brain-hard): it holds the ticket in name only."""
+    m = re.fullmatch(r"runner (\d+)", name)
+    e = m and runner_engine(int(m[1]))
+    return bool(e) and brain_tag(t) not in ENGINES[e]["brains"]
+
+
 def orphan(t):
-    """Nobody holds it, or only retired logins: any runner may adopt it."""
-    return all(retired(n) for n in names(t))
+    """Nobody holds it, or only retired logins or runners whose engine skips its brain: any runner may adopt it."""
+    return all(retired(n) or cannot_do(n, t) for n in names(t))
+
+
+def set_engine(engine):
+    global ENGINE, SKIP_ALL
+    ENGINE = engine
+    SKIP_ALL = BASE_SKIP | {f"brain-{b}" for b in ("light", "medium", "hard") if b not in ENGINES[engine]["brains"]}
 
 
 def free_for(t, me):
@@ -269,23 +313,25 @@ def in_lane(t):
 
 
 def paced_models():
-    """Model per brain tag (light, medium, hard, park, incident) from the pacer (poteto-2-advisor bin/pacer, every 15 min).
-    Used only when the allocation is fresh and its engine is Cursor; otherwise the built-in map above applies."""
+    """Model per brain tag (light, medium, hard, park, incident) for this runner's engine, from the pacer (poteto-2-advisor
+    bin/pacer, every 15 min): models_by_engine[ENGINE], or the older single-engine shape (engine + models). Used only when
+    the allocation is fresh; otherwise the built-in ENGINES map applies."""
     try:
         a = json.loads(ALLOCATION.read_text())
-        if a.get("engine") != "cursor" or time.time() - float(a["at"]) > ALLOCATION_MAX_AGE:
+        if time.time() - float(a["at"]) > ALLOCATION_MAX_AGE:
             return {}
-        return {k: (v["id"], v["effort"]) for k, v in (a.get("models") or {}).items() if v and v.get("id") and v.get("effort")}
+        if "models_by_engine" in a:
+            m = a["models_by_engine"].get(ENGINE)
+        else:
+            m = a.get("models") if a.get("engine") == ENGINE else None
+        return {k: (v["id"], v["effort"]) for k, v in (m or {}).items() if v and v.get("id") and v.get("effort")}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {}
 
 
 def brain(t):
-    paced = paced_models()
-    for label, model, effort in BRAINS:
-        if label in t["labels"]:
-            return (label, *paced.get(label.split("-", 1)[1], (model, effort)))
-    return ("brain-medium", *paced.get("medium", ("composer-2.5", "medium")))
+    b = brain_tag(t)
+    return (f"brain-{b}", *paced_models().get(b, ENGINES[ENGINE]["brains"][b]))
 
 
 def sf_repo(t):
@@ -719,8 +765,8 @@ def fresh_claims():
 
 
 def active_run(m):
-    """The ticket Runner m is running right now, from its launcher log: the last 'cursor: KEY' line with no 'end'
-    after it, started under CLAIM_TTL ago. None when idle, sleeping, or the log is missing."""
+    """The ticket Runner m is running right now, from its launcher log: the last 'cursor: KEY' or 'hax: KEY' line with no
+    'end' after it, started under CLAIM_TTL ago. None when idle, sleeping, or the log is missing."""
     key = stamp = None
     try:
         with open(RUNNER_STATE / f"runner-{m}.log", "rb") as f:
@@ -732,8 +778,8 @@ def active_run(m):
     for line in lines:
         if line.endswith(" end"):
             key = None
-        elif " cursor: " in line:
-            found = TICKET.match(line.split(" cursor: ", 1)[1])
+        elif RUN_START.match(line):
+            found = TICKET.match(RUN_START.match(line)[1])
             if found:
                 key, stamp = found[0], line.split(" ", 1)[0]
     if not key:
@@ -775,6 +821,8 @@ def incident_step(n, dry):
     """Step 0. The open incident that no other runner works, oldest and most urgent first. Lane cap, app freeze,
     rests and the skip sets of the other steps do not apply; only brain-extra-hard and design-pass tickets (which
     ship-claim refuses) and tickets that wait on a person are left out."""
+    if not ENGINES[ENGINE]["incident"]:
+        return None
     me = f"runner {n}"
     cands = [t for t in SNAP.get("incidents") or []
              if t["board"] in INCIDENT_BOARDS and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & (SKIP_ALL | {"design-pass"})]
@@ -891,14 +939,14 @@ def render(n, t, source):
     if source == "park":
         brief_file = HERE / "briefs" / "park-job.txt"
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + (HERE / "briefs" / "park.txt").read_text().rstrip()
-        label, model, effort = ("brain-light", *paced_models().get("park", PARK_BRAIN[1:]))
+        label, model, effort = ("brain-light", *paced_models().get("park", ENGINES[ENGINE]["park"]))
     if source == "incident":
         brief_file = HERE / "briefs" / ("release-stop.txt" if t["board"] == "11514" else "incident.txt")
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
-        label, model, effort = ("brain-hard", *paced_models().get("incident", ("grok-4.7-high", "high")))
+        label, model, effort = ("brain-hard", *paced_models().get("incident", ENGINES[ENGINE]["incident"]))
     return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
             "title": t["title"], "url": url(t), "repo": repo_for(t), "brief_file": str(brief_file), "brief": brief,
-            "brain": label, "model": model, "effort": effort, "labels": t["labels"]}
+            "brain": label, "engine": ENGINE, "model": model, "effort": effort, "labels": t["labels"]}
 
 
 def self_test():
@@ -936,7 +984,7 @@ def self_test():
     ALLOCATION.write_text(json.dumps({"at": time.time() - 7200, "engine": "cursor", "models": m}))
     assert brain(hard)[1] == "grok-4.7-high", "a stale allocation is ignored"
     ALLOCATION.write_text(json.dumps({"at": time.time(), "engine": "hax", "models": m}))
-    assert brain(hard)[1] == "grok-4.7-high", "an allocation for another engine is ignored: only Cursor runs here"
+    assert brain(hard)[1] == "grok-4.7-high", "an old-shape allocation for another engine is ignored"
     ALLOCATION.write_text("{not json")
     assert brain(hard)[1] == "grok-4.7-high", "a broken allocation is ignored"
     held = {**t, "holders": [("runner 12", None)]}
@@ -945,6 +993,34 @@ def self_test():
     assert orphan(held), "a ticket held by a runner the pacer stopped is an orphan: live runners adopt it"
     (STATE / "stop-12").write_text("manual\n")
     assert not orphan(held), "a hand-made stop file does not hand the ticket away"
+    hard_held = {**held, "labels": ["brain-hard"]}
+    (STATE / "engine-12").write_text("opencode\n")
+    assert orphan(hard_held), "a hard ticket held by an OpenCode runner is an orphan: a runner that can do it adopts it"
+    assert not orphan(held), "a medium ticket held by an OpenCode runner stays with it"
+    (STATE / "engine-12").write_text("claude\n")
+    assert runner_engine(12) is None, "an unknown engine name is refused, not guessed"
+    (STATE / "engine-12").unlink()
+    (STATE / "engine").write_text("codex\n")
+    assert runner_engine(12) == "codex", "no engine-N file: the pool-wide engine file"
+    (STATE / "engine").unlink()
+    assert runner_engine(12) == "cursor", "no file at all: cursor"
+    set_engine("opencode")
+    assert "brain-hard" in SKIP_ALL and "brain-extra-hard" in SKIP_ALL and "brain-medium" not in SKIP_ALL
+    assert brain(t)[1:] == ("deepseek-v4.1-flash", "high"), "untagged is medium: DeepSeek high"
+    assert brain({**t, "labels": ["brain-light"]})[1:] == ("deepseek-v4.1-flash", "low")
+    assert render(5, t, "park")["model"] == "deepseek-v4.1-flash" and render(5, t, "board")["engine"] == "opencode"
+    SNAP_BACKUP = globals().get("SNAP")
+    globals()["SNAP"] = {"incidents": [{**t, "labels": []}]}
+    assert incident_step(5, True) is None, "OpenCode never takes an incident"
+    globals()["SNAP"] = SNAP_BACKUP
+    set_engine("codex")
+    assert "brain-hard" not in SKIP_ALL and brain(hard)[1:] == ("gpt-6.1-sol", "high")
+    assert brain({**t, "labels": ["brain-light"]})[1:] == ("gpt-6.1-terra", "medium")
+    ALLOCATION.write_text(json.dumps({"at": time.time(), "engine": "cursor", "models": m,
+                                      "models_by_engine": {"codex": {"hard": {"id": "gpt-6.1-sol", "effort": "medium"}}}}))
+    assert brain(hard)[1:] == ("gpt-6.1-sol", "medium"), "the per-engine allocation sets the codex model"
+    set_engine("cursor")
+    assert brain(hard)[1] == "grok-4.7-high", "a per-engine allocation without cursor: the built-in map, not the old shape"
     print("fleet/pick self-test ok")
 
 
@@ -960,6 +1036,10 @@ def main():
     if len(pos) != 1 or not pos[0].isdigit() or not 1 <= int(pos[0]) <= max(RUNNERS, 1):
         sys.exit(f"usage: fleet/pick <1..{RUNNERS}> [--dry-run] [--json] | --check-access")
     n = int(pos[0])
+    engine = runner_engine(n)
+    if not engine:
+        sys.exit(f"fleet/pick: runner {n} engine file names no known engine ({', '.join(ENGINES)}); do not pick")
+    set_engine(engine)
     lock = None
     if not dry:
         STATE.mkdir(parents=True, exist_ok=True)

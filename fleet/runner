@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# One launcher for every runner (YPER4-1371). Valentin 2026-11-07: one pool, Runner 1..N, all on Cursor CLI with Grok.
+# One launcher for every runner (YPER4-1371). Valentin 2026-11-07: one pool, Runner 1..N, every runner subscription used
+# at once. Each runner runs the engine the pacer (poteto-2-advisor bin/pacer) writes to engine-N: cursor (Cursor CLI on the
+# Cursor plan), codex (hax on Codex) or opencode (hax on OpenCode Go, DeepSeek 4.1 Flash). No engine-N: the engine file,
+# else cursor. The engine is read when the picker runs, so a change lands between tickets.
 # Generalised from ht-or-runner (copy in fleet/legacy/): same PAUSED file, stop-N files, top-up, load gate, tick and
-# log format. The ticket, repo, brief and model now come from fleet/pick; this script only runs the agent.
-#   fleet/runner <N> | top-up | tick | status | stop-all | check
+# log format. The ticket, repo, brief, engine and model come from fleet/pick; this script only runs the agent.
+#   fleet/runner <N> | top-up | tick | status | stop-all | check | launch-check <engine> <model> <effort> [--noop]
 set -u
 export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
 STATE=$HOME/.local/state/ht-or-runners
@@ -23,7 +26,43 @@ validate_targets() {
     [ "$t" -le "$cap" ] && [ "$cap" -le 40 ] || { echo "target/max must satisfy 1 <= target <= max <= 40" >&2; return 1; }
 }
 log() { echo "$(date -u +%FT%TZ) $*" >> "$STATE/keeper.log"; }
-engine() { cat "$STATE/engine" 2>/dev/null || echo "${HT_RUNNER_ENGINE:-cursor}"; }
+engine() { cat "$STATE/engine-${1:-0}" 2>/dev/null || cat "$STATE/engine" 2>/dev/null || echo "${HT_RUNNER_ENGINE:-cursor}"; }
+known_engine() { case $1 in cursor|codex|opencode) return 0 ;; *) return 1 ;; esac; }
+
+# One stack-key read per runner process, kept in this shell only (house rule: keys once per job, never in a loop).
+opencode_key() {
+  [ -n "${OC_KEY:-}" ] || OC_KEY=$("$HOME/.local/bin/stack-key" 'opencode go' 'API KEY' 2>/dev/null)
+  [ -n "$OC_KEY" ]
+}
+
+# Runs one agent turn. LAUNCH_DRY=1 prints the command instead, key and brief left out. The OpenCode key goes only into
+# the hax process environment, never into argv or a cursor run.
+launch() {
+  local eng=$1 model=$2 effort=$3 repo=$4 brief=$5 base=()
+  case $eng in
+    cursor) base=("$HOME/.local/bin/cursor-agent" -p --output-format text --model "$model" -f --trust --approve-mcps --workspace "$repo") ;;
+    codex) base=("$HOME/.local/bin/hax" --provider=codex --model="$model" --effort="$effort" --no-session -p) ;;
+    opencode) base=("$HOME/.local/bin/hax" --provider=opencode-go --model="$model" --effort="$effort" --no-session -p) ;;
+    *) echo "unknown engine: $eng" >&2; return 2 ;;
+  esac
+  if [ "${LAUNCH_DRY:-}" = 1 ]; then
+    printf 'cd %q &&' "$repo"
+    [ "$eng" = cursor ] || printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1'
+    [ "$eng" = opencode ] && printf ' OPENCODE_API_KEY=<from stack-key, %s>' "$([ -n "${OC_KEY:-}" ] && echo loaded || echo 'not loaded')"
+    printf ' timeout 3h'; printf ' %q' "${base[@]}"
+    if [ "$eng" = cursor ]; then printf ' <brief, %d chars>\n' "${#brief}"; else printf ' < <brief, %d chars on stdin>\n' "${#brief}"; fi
+    return 0
+  fi
+  if [ "$eng" = cursor ]; then timeout 3h "${base[@]}" "$brief"; return; fi
+  [ "$eng" = opencode ] && [ -z "${OC_KEY:-}" ] && { echo "no OpenCode Go key loaded" >&2; return 1; }
+  (
+    cd "$repo" || exit 1
+    export HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1
+    unset OPENCODE_API_KEY
+    [ "$eng" = opencode ] && export OPENCODE_API_KEY="$OC_KEY"
+    printf '%s' "$brief" | timeout 3h "${base[@]}"
+  )
+}
 
 green() {
   local cores load5 avail proc=${HT_HAX_PROC_ROOT:-/proc}
@@ -50,9 +89,16 @@ start_one() {
 # The words every run starts with: the ticket the picker chose, then the lane's brief, then the repo.
 run_brief() {
   local n=$1 json=$2 ticket source brief repo lane title
+  local eng model effort engine_line
   ticket=$(jq -r .ticket <<< "$json"); source=$(jq -r .source <<< "$json"); lane=$(jq -r .lane <<< "$json")
   repo=$(jq -r .repo <<< "$json"); brief=$(jq -r .brief <<< "$json"); title=$(jq -r .title <<< "$json")
-  echo "ENGINE (Valentin 2026-11-07): you run in Cursor CLI on the Cursor plan as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Codex, hax or Claude only. No subagents, no helpers." \
+  eng=$(jq -r '.engine // "cursor"' <<< "$json"); model=$(jq -r .model <<< "$json"); effort=$(jq -r .effort <<< "$json")
+  case $eng in
+    cursor) engine_line="you run in Cursor CLI on the Cursor plan as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Codex, hax or Claude only. No subagents, no helpers." ;;
+    codex) engine_line="you run in hax on the Codex plan ($model, effort $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok or Claude only. Single thread: never start hax helpers, subagents or any other agent." ;;
+    opencode) engine_line="you run in hax on the OpenCode Go plan with DeepSeek 4.1 Flash (effort $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok, Codex or Claude only. Single thread: never start hax helpers, subagents or any other agent, and never use any other provider or key." ;;
+  esac
+  echo "ENGINE (Valentin 2026-11-07): $engine_line" \
        "YOUR TICKET THIS RUN (set by the launcher, overrides every pick rule below): $ticket ($source; claimed for you). Work only on $ticket; do not run pr-drain-pick, ci-pick or any other picker and do not pick another ticket." \
        "The launcher already claimed it for you with claim id \"$SHIP_CLAIM_RESUME\": never run ship-claim again with any other resume text; if a step needs a claim or resume command, use exactly \"$SHIP_CLAIM_RESUME\". A same-runner \"Stepping back\" note is not a blocker: carry on." \
        "$(cat "$STATE/brief-extra" 2>/dev/null) If it cannot move, park it with fleet/park (last paragraph of this brief), then end with RUNNER IDLE and the reason. $brief" \
@@ -83,12 +129,26 @@ case "${1:-}" in
     fi ;;
   tick) "$SELF" top-up ;;
   status)
-    echo "target=$(target) max=$(maxcap) engine=$(engine)"; green && echo "green: $GREEN_WHY" || echo "not green: $GREEN_WHY"
+    echo "target=$(target) max=$(maxcap) engines: $(for i in $(seq 1 "$(target)"); do printf '%s=%s ' "$i" "$(engine "$i")"; done)"; green && echo "green: $GREEN_WHY" || echo "not green: $GREEN_WHY"
     [ -f "$STATE/PAUSED" ] && echo "PAUSED"
     tmux ls 2>/dev/null | grep '^ht-or-runner-' || echo "no runner sessions" ;;
   stop-all)
     for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep '^ht-or-runner-'); do tmux kill-session -t "$s"; echo "stopped $s"; done ;;
-  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check' ;;
+  launch-check)
+    # Proves the launch path for one engine without a ticket: prints the command; --noop also runs it on a one-line
+    # brief in an empty directory and checks the reply.
+    eng=${2:-}; model=${3:-}; effort=${4:-medium}
+    known_engine "$eng" && [ -n "$model" ] || { echo 'fleet/runner launch-check <cursor|codex|opencode> <model> <effort> [--noop]' >&2; exit 2; }
+    [ "$eng" = opencode ] && { opencode_key || { echo "no OpenCode Go key from stack-key" >&2; exit 1; }; }
+    dir=$(mktemp -d); noop="Reply with exactly this line and nothing else: RUNNER_LAUNCH_OK"
+    LAUNCH_DRY=1 launch "$eng" "$model" "$effort" "$dir" "$noop"
+    trap 'rm -rf "$dir"' EXIT
+    if [ "${5:-}" = --noop ]; then
+      out=$(launch "$eng" "$model" "$effort" "$dir" "$noop" 2>&1); rc=$?
+      printf '%s\n' "$out" | tail -5
+      grep -q RUNNER_LAUNCH_OK <<< "$out" && echo "launch-check ok: $eng $model $effort" || { echo "launch-check FAILED: exit $rc"; exit 1; }
+    fi ;;
+  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | launch-check <engine> <model> <effort> [--noop]' ;;
   *)
     n=$1
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
@@ -100,32 +160,39 @@ case "${1:-}" in
     IFS=$'\t' read -r _ident _tokfile < <("$HOME/.agents/skills/ship/scripts/ship-identity")
     [ "$_ident" = "RUNNER $n" ] && [ -s "$_tokfile" ] || { echo "identity check failed for RUNNER $n" >&2; exit 1; }
     HT_TOKEN="$(cat "$_tokfile")"; export HT_TOKEN; unset _ident _tokfile
+    self_mtime=$(stat -c %Y "$SELF")
     while :; do
-      if [ -f "$STATE/PAUSED" ] || [ -f "$STATE/stop-$n" ]; then sleep 300; continue; fi
-      if [ "$(engine)" != cursor ]; then
-        echo "$(date -u +%FT%TZ) gate: engine file says $(engine); only cursor is supported" >> "$rlog"; sleep 300; continue
+      # A launcher update (house-rules sync) reaches a running loop here, between tickets.
+      if [ "$(stat -c %Y "$SELF" 2>/dev/null)" != "$self_mtime" ] && bash -n "$SELF" 2>/dev/null; then
+        echo "$(date -u +%FT%TZ) relaunch: launcher changed" >> "$rlog"; exec "$SELF" "$n" --loop
       fi
+      if [ -f "$STATE/PAUSED" ] || [ -f "$STATE/stop-$n" ]; then sleep 300; continue; fi
       if ! pick=$("$PICK" "$n" --json 2>>"$rlog"); then
         echo "$(date -u +%FT%TZ) pick: nothing to start" >> "$rlog"; sleep 900; continue
       fi
-      IFS=$'\t' read -r pick_ticket pick_model pick_effort pick_source pick_repo cmodel < <(jq -r '[.ticket,.model,.effort,.source,.repo,.model] | @tsv' <<< "$pick")
+      IFS=$'\t' read -r pick_ticket pick_engine pick_model pick_effort pick_source pick_repo < <(jq -r '[.ticket,(.engine // "cursor"),.model,.effort,.source,.repo] | @tsv' <<< "$pick")
       [ -d "$pick_repo" ] || pick_repo=$HOME/projects/hypertask
-      echo "$(date -u +%FT%TZ) pick: $pick_ticket $pick_model $pick_effort ($pick_source)" >> "$rlog"
+      echo "$(date -u +%FT%TZ) pick: $pick_ticket $pick_engine $pick_model $pick_effort ($pick_source)" >> "$rlog"
+      if ! known_engine "$pick_engine" || { [ "$pick_engine" = opencode ] && ! opencode_key; }; then
+        echo "$(date -u +%FT%TZ) gate: engine $pick_engine cannot start (unknown engine or no OpenCode Go key)" >> "$rlog"; sleep 900; continue
+      fi
       brief=$(run_brief "$n" "$pick")
       echo "$(date -u +%FT%TZ) start" >> "$rlog"
       clear; tmux clear-history -t "$TMUX_PANE"
       : > "$runlog"
       : > "$STATE/runner-$n.result"
-      echo "$(date -u +%FT%TZ) cursor: $pick_ticket $cmodel" >> "$rlog"
-      tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n $cmodel"
-      timeout 3h "$HOME/.local/bin/cursor-agent" -p --output-format text --model "$cmodel" -f --trust --approve-mcps --workspace "$pick_repo" "$brief" 2>&1 | tee "$runlog"
+      # The pacer reads this line to count runner-hours per plan: "cursor: TICKET MODEL" or "hax: TICKET MODEL", nothing after.
+      echo "$(date -u +%FT%TZ) $([ "$pick_engine" = cursor ] && echo cursor || echo hax): $pick_ticket $pick_model" >> "$rlog"
+      tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n $pick_engine $pick_model"
+      cmodel=$pick_model
+      launch "$pick_engine" "$pick_model" "$pick_effort" "$pick_repo" "$brief" 2>&1 | tee "$runlog"
       echo "$(date -u +%FT%TZ) end" >> "$rlog"
       if grep -q "RUNNER IDLE" "$runlog"; then res=IDLE; else res=DONE; fi
       # One ledger line per finished run. The launcher log keeps no reasons (runner-N.latest.log is cut on the next run), so the
       # brain tagger reads this to tell a model that could not do the work from a ticket that waits on someone else.
       reason=$(grep -a -o 'RUNNER IDLE.*' "$runlog" | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300)
-      jq -nc --arg ts "$(date -u +%FT%TZ)" --arg ticket "$pick_ticket" --arg model "$cmodel" --arg result "$res" --argjson runner "$n" --arg reason "$reason" \
-        '{ts:$ts,runner:$runner,ticket:$ticket,model:$model,result:$result,reason:$reason}' >> "$STATE/run-ledger.jsonl" 2>/dev/null || true
+      jq -nc --arg ts "$(date -u +%FT%TZ)" --arg ticket "$pick_ticket" --arg engine "$pick_engine" --arg model "$cmodel" --arg result "$res" --argjson runner "$n" --arg reason "$reason" \
+        '{ts:$ts,runner:$runner,ticket:$ticket,engine:$engine,model:$model,result:$result,reason:$reason}' >> "$STATE/run-ledger.jsonl" 2>/dev/null || true
       echo "$res" > "$STATE/runner-$n.result"
       if [ "$res" = IDLE ]; then sleep 600; else sleep 30; fi
     done ;;
