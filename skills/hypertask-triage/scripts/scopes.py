@@ -35,7 +35,9 @@ def _state_rows(path):
     except (OSError, ValueError):
         return []
     rows = data.values() if isinstance(data, dict) else data
-    return [r for r in rows if isinstance(r, dict) and r.get("session") and r.get("name")]
+    # mp-runners/runners.json names the pane "tmux", older state files "session".
+    rows = [dict(r, session=r.get("session") or r.get("tmux")) for r in rows if isinstance(r, dict)]
+    return [r for r in rows if r["session"] and r.get("name")]
 
 
 def workers(scope, live_sessions=None):
