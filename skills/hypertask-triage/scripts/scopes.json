@@ -25,7 +25,7 @@
     "workers": [{"tmux_prefix": "ht-ci-runner-", "agent": "CI Runner {n}"}]
   },
   "2060": {
-    "board": 2060, "lead": "Mini Boss CEO", "alarm_board": 2060,
+    "board": 2060, "lead": "Chief Of Staff", "alarm_board": 2060,
     "repos": ["valentinyeo/multiprompt", "valentinyeo/multiprompt-android", "valentinyeo/postbox",
               "valentinyeo/chromescribe", "valentinyeo/pecunia", "valentinyeo/screencast2-go",
               "valentinyeo/token-ladder", "valentinyeo/upwork-auto-applier", "valentinyeo/triage"],
