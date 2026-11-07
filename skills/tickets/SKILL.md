@@ -60,6 +60,12 @@ Check: `skills/hypertask-triage/scripts/flow-check --board <id>` prints the NO-B
 
 ## Question comment
 One open Question per ticket. Mark it as the blocker. Retire older ones.
+Only Chief Of Staff and the ticket's board lead (scopes.json) may write it or make Valentin the waiting person.
+A runner that cannot go on sets the waiting person to its lead or Chief Of Staff and adds an agent-lane note with
+what it tried. Lead first, Chief Of Staff after 2 hours or when no live lead. The vcc wrapper refuses a runner
+and a Question outside his call classes (`blocker-review --gate`, one definition with `blocker-review`).
+Valentin, 2026-11-07:
+> When I'm the blocker, an AI, Claude Opus 5.5, needs to become active and actually try to unblock it as themselves. If they fail and I'm literally the only instance that can unblock it, the AI writes a proper comment with an easy to understand summary and a recommended action.
 ```
 What this is: <4 to 8 short pospeak lines>
 Question: **<yes/no question?>**
