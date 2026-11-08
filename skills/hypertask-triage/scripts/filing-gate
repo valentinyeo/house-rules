@@ -6,7 +6,8 @@ Valentin, 2026-11-08: "210 tickets to build 3 apps!!!!!!!!!! that is insane".
 On boards 11514 (Fleet CI) and 4060 (Fleet Infra):
 1. An open ticket with a near-duplicate title exists: add a +1 note to its agent lane, print its link, file nothing.
 2. The board holds its backlog cap (2 open tickets per live pool runner, the pileup-watch cap) or more:
-   file nothing. Only a ticket labelled Incident passes.
+   file nothing.
+A ticket labelled Incident skips both: outage filers (production-red-alert, fleet-watch) keep their own dedupe.
 Any other board, or any other command: allowed, no network call.
 A board read that fails lets the ticket through with a warning, so a rate limit never blocks an outage.
 
@@ -104,6 +105,10 @@ def main():
         return 0
     board, title, labels = parsed
     name = f"{BOARDS[board]} ({board})"
+    if "incident" in labels:
+        if a.dry_run:
+            print(f"ALLOW incident on {name}")
+        return 0
     tickets = [t for t in pileup.column_tickets(board, None) if t.get("section") != "Done"]
     if not tickets:
         print(f"filing-gate: {name} read back no open tickets; not checked", file=sys.stderr)
@@ -126,10 +131,6 @@ def main():
               "\"<what you saw>\". Link your app ticket BlockedBy it if it blocks you.", file=sys.stderr)
         return DUPLICATE
 
-    if "incident" in labels:
-        if a.dry_run:
-            print(f"ALLOW incident on {name}")
-        return 0
     counted = [t for t in tickets if "incident" not in {l["name"].lower() for l in t.get("labels", [])}]
     runners = live_runners()
     cap = pileup.BACKLOG_PER_RUNNER * runners
@@ -144,8 +145,7 @@ def main():
     print(f"vcc: not filed. {name} is full: {len(counted)} open tickets, cap {cap} (2 per live runner, "
           f"{runners} runners). Valentin, 2026-11-08: \"210 tickets to build 3 apps!!!!!!!!!! that is insane\".\n"
           "Do this instead: search the board and +1 the open ticket for the same problem with "
-          "vcc activity add <ticket> \"<what you saw>\", or wait until the board drops under its cap. "
-          "Only a live outage passes: add the Incident label." + (f"\nClosest open tickets:{hint}" if hint else ""),
+          "vcc activity add <ticket> \"<what you saw>\", or wait until the board drops under its cap." + (f"\nClosest open tickets:{hint}" if hint else ""),
           file=sys.stderr)
     return REFUSE
 
