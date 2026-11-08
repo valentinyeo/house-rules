@@ -54,6 +54,7 @@ BACKLOG_UNTOUCHED_DAYS = 7
 BACKLOG_MIN_RUNNERS = 5  # house rules: never under 5 runners
 BUSY_SECTIONS = {"In Progress", "AI Review", "QA", "Done"}
 APP_BOARDS = {15, 2060}
+DONE_NOTE = "Archived from Done: fleet boards keep only open work (Valentin, 8 Nov). Undo: set status Normal."
 BACKLOG_NOTE = ("Archived by the backlog cap: board over {cap} open tickets (2 per live runner), untouched {days} days. "
                 "Valentin, 2026-11-08: archive what we do not need to keep working. Reopen if it happens again.")
 PICK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "fleet", "pick")
@@ -190,6 +191,13 @@ def backlog_cap(boards, apply, now):
     cap = BACKLOG_PER_RUNNER * runners
     failed = 0
     for board in boards:
+        done = [t for t in column_tickets(board, None) if t.get("section") == "Done"]
+        print(f"{'archive' if done else 'ok':7} board {board:5} done {len(done)}: fleet boards keep only open work")
+        for t in done if apply else []:
+            r = vcc("task", "update", t["ticketNumber"], "--status", "Archive", "--project", str(board))
+            if r.returncode == 0:
+                r = vcc("activity", "add", t["ticketNumber"], DONE_NOTE)
+            failed += r.returncode != 0
         tickets = [t for t in column_tickets(board, None) if t.get("section") != "Done"
                    and "incident" not in {l["name"].lower() for l in t.get("labels", [])}]
         over = len(tickets) - cap
