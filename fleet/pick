@@ -903,9 +903,10 @@ def pipeline_reason(t, skip_brains, pr):
         return "waits on a person"
     if any(not re.fullmatch(r"runner \d+", h) and not retired(h) for h in names(t)):
         return "outside the pool"
-    if t["key"] in SNAP["rel"] and blocked(t):
-        return "blocked"
     held = any(live_runner(h) for h in names(t))
+    # an unheld ticket's link is read within the pick's relation budget, as the orphan lane does: a blocked orphan no lane takes
+    if (t["key"] in SNAP["rel"] or (not held and CHECKED[0] < BLOCK_LOOKUPS * 2)) and held_back(t, own=True):
+        return "blocked"
     if t["section"] in BOARDS[t["board"]][1]:
         if "design-pass" in labels:
             return "design-pass"
