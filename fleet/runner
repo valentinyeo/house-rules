@@ -9,12 +9,15 @@
 #   fleet/runner <N> | top-up | tick | status | stop-all | check | launch-check <engine> <model> <effort> [--noop]
 set -u
 export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
-STATE=$HOME/.local/state/ht-or-runners
+STATE=${FLEET_RUNNER_STATE:-$HOME/.local/state/ht-or-runners}
 HERE=$(dirname "$(readlink -f "$0")")
 SELF=$(readlink -f "$0")
 PICK=$HERE/pick
-FIRST=1
-LAST=$(jq -r '.runners // 20' "$HERE/roster.json" 2>/dev/null || echo 20)
+SESS_PFX=${FLEET_RUNNER_SESS_PREFIX:-ht-or-runner}
+sess_name() { echo "${SESS_PFX}-$1"; }
+FIRST=${FLEET_RUNNER_FIRST:-1}
+LAST=${FLEET_RUNNER_LAST:-}
+[ -z "$LAST" ] && LAST=$(jq -r '.runners // 20' "$HERE/roster.json" 2>/dev/null || echo 20)
 [[ "$LAST" =~ ^[1-9][0-9]?$ ]] || LAST=20
 mkdir -p "$STATE"
 target() { cat "$STATE/target" 2>/dev/null || echo "$LAST"; }
@@ -70,6 +73,7 @@ launch() {
 }
 
 green() {
+  [ "${FLEET_RUNNER_SKIP_GREEN:-}" = 1 ] && { GREEN_WHY='drill: skip load gate'; return 0; }
   local cores load5 avail proc=${HT_HAX_PROC_ROOT:-/proc}
   GREEN_WHY='resource reading unavailable'
   cores=$(nproc) && load5=$(awk '{print $2}' "$proc/loadavg") &&
@@ -82,8 +86,14 @@ green() {
 }
 
 start_one() {
-  local n=$1 sess="ht-or-runner-$1"
+  local n=$1 sess
+  sess=$(sess_name "$n")
   tmux has-session -t "=$sess" 2>/dev/null && { echo "running: $sess"; return 0; }
+  if [ "${FLEET_RUNNER_DRILL:-}" = 1 ]; then
+    tmux new-session -d -s "$sess" -c "$HOME" "$SELF $n --drill-idle" || return 1
+    tmux select-pane -t "$sess" -T "DRILL $n"
+    log "drill started $sess"; echo "started: $sess"; return 0
+  fi
   ( cd "$HOME/projects/hypertask" && SHIP_SESSION_NAME="RUNNER $n" .claude/skills/setup-runner/scripts/setup-runner "$n" ) >>"$STATE/setup-$n.log" 2>&1 \
     || { log "RUNNER $n: setup-runner failed, not started"; echo "login failed: RUNNER $n"; return 1; }
   tmux new-session -d -s "$sess" -x 200 -y 50 -c "$HOME/projects/hypertask" "$SELF $n --loop" || return 1
@@ -117,11 +127,11 @@ case "${1:-}" in
     exec 9>"$STATE/.keeper.lock"; flock -n 9 || exit 0
     [ -f "$STATE/PAUSED" ] && exit 0
     validate_targets || exit 2
-    live=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | awk '/^ht-or-runner-[0-9]+$/ {n++} END {print n+0}')
+    live=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | awk -v p="$SESS_PFX" '$0 ~ "^"p"-[0-9]+$" {n++} END {print n+0}')
     started=0
     for n in $(seq $FIRST $LAST); do
       [ "$live" -ge "$t" ] && break
-      tmux has-session -t "=ht-or-runner-$n" 2>/dev/null && continue
+      tmux has-session -t "=$(sess_name "$n")" 2>/dev/null && continue
       [ -f "$STATE/stop-$n" ] && continue
       [ "$started" -ge 2 ] && break
       if green; then start_one "$n" && { started=$((started+1)); live=$((live+1)); sleep 20; } || break
@@ -137,9 +147,9 @@ case "${1:-}" in
   status)
     echo "target=$(target) max=$(maxcap) engines: $(for i in $(seq 1 "$(target)"); do printf '%s=%s ' "$i" "$(engine "$i")"; done)"; green && echo "green: $GREEN_WHY" || echo "not green: $GREEN_WHY"
     [ -f "$STATE/PAUSED" ] && echo "PAUSED"
-    tmux ls 2>/dev/null | grep '^ht-or-runner-' || echo "no runner sessions" ;;
+    tmux ls 2>/dev/null | grep "^${SESS_PFX}-" || echo "no runner sessions" ;;
   stop-all)
-    for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep '^ht-or-runner-'); do tmux kill-session -t "$s"; echo "stopped $s"; done ;;
+    for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep "^${SESS_PFX}-"); do tmux kill-session -t "$s"; echo "stopped $s"; done ;;
   launch-check)
     # Proves the launch path for one engine without a ticket: prints the command; --noop also runs it on a one-line
     # brief in an empty directory and checks the reply.
@@ -158,11 +168,12 @@ case "${1:-}" in
   *)
     n=$1
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
+    [ "${2:-}" = --drill-idle ] && { exec sleep 86400; }
     [ "${2:-}" = --loop ] || { start_one "$n"; exit; }
     rlog="$STATE/runner-$n.log"
     runlog="$STATE/runner-$n.latest.log"
     unset OPENCODE_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
-    export SHIP_SESSION_NAME="RUNNER $n" CEO_AGENT="RUNNER $n" SHIP_CLAIM_RESUME="tmux attach -t ht-or-runner-$n (Cursor Grok RUNNER $n)"
+    export SHIP_SESSION_NAME="RUNNER $n" CEO_AGENT="RUNNER $n" SHIP_CLAIM_RESUME="tmux attach -t $(sess_name "$n") (Cursor Grok RUNNER $n)"
     IFS=$'\t' read -r _ident _tokfile < <("$HOME/.agents/skills/ship/scripts/ship-identity")
     [ "$_ident" = "RUNNER $n" ] && [ -s "$_tokfile" ] || { echo "identity check failed for RUNNER $n" >&2; exit 1; }
     HT_TOKEN="$(cat "$_tokfile")"; export HT_TOKEN; unset _ident _tokfile

@@ -1,0 +1,6 @@
+[Unit]
+Description=Fleet runner top-up tick (YPER4-1380)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/house-rules/fleet/runner tick

@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# YPER4-1380: prove a dead runner loop comes back on fleet/runner, not legacy ht-or-runner.
+set -euo pipefail
+sess=drill-runner-1
+HERE=$(dirname "$(readlink -f "$0")")
+RUNNER=$(readlink -f "$HERE/runner")
+
+usage() { echo 'fleet/drill dead-runner'; exit 2; }
+
+dead_runner() {
+  local unit_text
+  sess=drill-runner-1
+  unit_text=$(systemctl --user cat fleet-runner-tick.service 2>/dev/null || systemctl --user cat ht-or-runner-tick.service 2>/dev/null || true)
+  printf '%s\n' "$unit_text" | grep -q 'fleet/runner tick' || {
+    echo 'FAIL: user timer service must ExecStart fleet/runner tick'; exit 1; }
+
+  DRILL_STATE=$(mktemp -d)
+  cleanup() {
+    tmux kill-session -t "$sess" 2>/dev/null || true
+    rm -rf "${DRILL_STATE:-}"
+  }
+  trap cleanup EXIT
+
+  export FLEET_RUNNER_STATE="$DRILL_STATE"
+  export FLEET_RUNNER_SESS_PREFIX=drill-runner
+  export FLEET_RUNNER_DRILL=1
+  export FLEET_RUNNER_SKIP_GREEN=1
+  export FLEET_RUNNER_FIRST=1
+  export FLEET_RUNNER_LAST=1
+  echo 1 >"$DRILL_STATE/target"
+
+  FLEET_RUNNER_LAST=1 "$RUNNER" 1
+  tmux has-session -t "=$sess" 2>/dev/null || { echo 'FAIL: drill session not started'; exit 1; }
+  cmd=$(tmux list-panes -t "$sess" -F '#{pane_start_command}' 2>/dev/null | head -1)
+  printf '%s\n' "$cmd" | grep -q 'fleet/runner' || {
+    echo "FAIL: pane must start fleet/runner, got: $cmd"; exit 1; }
+
+  tmux kill-session -t "$sess"
+  sleep 1
+  tmux has-session -t "=$sess" 2>/dev/null && { echo 'FAIL: session still alive after kill'; exit 1; }
+
+  FLEET_RUNNER_LAST=1 "$RUNNER" tick
+  local i=0
+  while [ "$i" -lt 30 ]; do
+    tmux has-session -t "=$sess" 2>/dev/null && break
+    sleep 1
+    i=$((i + 1))
+  done
+  tmux has-session -t "=$sess" 2>/dev/null || { echo 'FAIL: tick did not restart drill session within 30s'; exit 1; }
+  cmd=$(tmux list-panes -t "$sess" -F '#{pane_start_command}' 2>/dev/null | head -1)
+  printf '%s\n' "$cmd" | grep -q 'fleet/runner' || {
+    echo "FAIL: restarted pane must use fleet/runner, got: $cmd"; exit 1; }
+  printf '%s\n' "$cmd" | grep -q '/\.local/bin/ht-or-runner' && {
+    echo "FAIL: legacy ht-or-runner still in pane command: $cmd"; exit 1; }
+
+  echo 'dead-runner drill ok'
+}
+
+case "${1:-}" in
+  dead-runner) dead_runner ;;
+  ''|-h|--help) usage ;;
+  *) usage ;;
+esac

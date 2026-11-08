@@ -1,0 +1,10 @@
+[Unit]
+Description=Fleet runner tick every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=true
+Unit=fleet-runner-tick.service
+
+[Install]
+WantedBy=timers.target
