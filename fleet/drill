@@ -195,6 +195,7 @@ def load_pick(ctx):
         return _PICK
     os.environ["FLEET_PICK_STATE"] = str(ctx.pick_state)
     os.environ["FLEET_RUNNER_STATE"] = str(ctx.runner_state)
+    os.environ["FLEET_WATCH_STATE"] = str(ctx.watch_state)
     os.environ["FLEET_PICK_ALLOCATION"] = str(ctx.allocation)
     os.environ["FLEET_PICK_VIRTUAL"] = str(ctx.virtual)
     os.environ["FLEET_RUNNERS"] = "5"
@@ -207,7 +208,8 @@ def load_pick(ctx):
 
 
 def sandbox_pick(pick, ctx):
-    for label, path in (("pick", pick.STATE), ("runner", pick.RUNNER_STATE), ("allocation", pick.ALLOCATION)):
+    for label, path in (("pick", pick.STATE), ("runner", pick.RUNNER_STATE), ("watch", pick.WATCH),
+                        ("allocation", pick.ALLOCATION)):
         if not under_root(path, ctx.root):
             raise RuntimeError(f"{label} state is not in the sandbox: {path}")
 
