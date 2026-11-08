@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import subprocess
 import sys
 import time
@@ -121,7 +122,10 @@ def ensure_pick(as_json=False):
         else:
             print(out)
         return 0
-    ok, detail = run_self_test(PICK_SRC, ("--self-test",))
+    with tempfile.TemporaryDirectory() as alone:
+        served = Path(alone) / "pick"
+        shutil.copy2(PICK_SRC, served)
+        ok, detail = run_self_test(served, ("--self-test",))
     if ok:
         promote_lkg(sha)
         out = str(LKG_PICK)
