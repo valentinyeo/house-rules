@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""rules-changed-hook: tell a live session when house-rules.md changed since it last saw it.
+
+Claude Code UserPromptSubmit hook (also usable by Codex UserPromptSubmit). Reads the hook
+JSON on stdin, keys on session_id. Per session it remembers the git blob id of
+house-rules.md. First call: record, print nothing. Later call with a different blob: print
+additionalContext with the added lines of the diff (cap 40), then record the new blob.
+
+  HOUSE_RULES_FILE   rules file (default ~/.local/share/house-rules/house-rules.md)
+  RULES_HOOK_STATE   state dir (default ~/.local/state/rules-changed-hook)
+
+Never fails the prompt: any error exits 0 with no output. Writes only its state dir and, for uncommitted edits, a blob object in the rules repo.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+
+CAP = 40
+
+
+def git(repo, *args):
+    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=2)
+    return r.stdout if r.returncode == 0 else None
+
+
+def main():
+    try:
+        sid = json.load(sys.stdin).get("session_id") or ""
+    except Exception:
+        return
+    sid = "".join(c for c in sid if c.isalnum() or c in "-_")[:80]
+    if not sid:
+        return
+    rules = os.environ.get("HOUSE_RULES_FILE") or os.path.expanduser("~/.local/share/house-rules/house-rules.md")
+    state = os.environ.get("RULES_HOOK_STATE") or os.path.expanduser("~/.local/state/rules-changed-hook")
+    repo = os.path.dirname(rules)
+    blob = (git(repo, "hash-object", "-w", rules) or "").strip()
+    if not blob:
+        return
+    os.makedirs(state, exist_ok=True)
+    sf = os.path.join(state, sid)
+    try:
+        old = open(sf).read().strip()
+    except OSError:
+        old = ""
+    if old == blob:
+        return
+    with open(sf, "w") as f:
+        f.write(blob + "\n")
+    if not old:
+        # prune state of dead sessions, once per new session
+        cutoff = time.time() - 14 * 86400
+        for n in os.listdir(state):
+            p = os.path.join(state, n)
+            try:
+                if os.path.getmtime(p) < cutoff:
+                    os.remove(p)
+            except OSError:
+                pass
+        return
+    diff = git(repo, "diff", "--no-color", "-U0", old, blob)
+    if diff is None:
+        added = ["(old version not in git history; run /house-rules for the full file)"]
+    else:
+        added = [l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++") and l[1:].strip()]
+    if not added:
+        added = ["(only removals or edits to removed text; run /house-rules for the full file)"]
+    extra = len(added) - CAP
+    lines = added[:CAP] + ([f"... and {extra} more added lines"] if extra > 0 else [])
+    ctx = ("House rules changed since this session started. New or changed lines:\n"
+           + "\n".join(lines)
+           + "\nApply them now; run /house-rules for the full file.")
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException:
+        pass
+    sys.exit(0)
