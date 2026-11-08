@@ -7,6 +7,7 @@ greps those other sources for banned stale phrases (texts that once contradicted
 rules) and exits 1 with file:line for every hit.
 
   rules-drift               scan, print hits, log to ~/.local/state/rules-drift.log, exit 1 on any hit
+  rules-drift --house-rules scan only house-rules.md for retired runner-pool prose
   rules-drift --self-check  prove the scanner on fixtures (hit, no hit, allow marker, house-rules block skip)
 
 A line that must keep a banned phrase (for example a rule that forbids it) ends with
@@ -34,11 +35,41 @@ BANNED = [
     (r"85% stop", "stale pre-2026-11-07 reserve; the pacer owns it (house rules, Models and harnesses, Pace every subscription)"),
     (r"70% manager reserve", "stale pre-2026-11-07 reserve; the pacer owns it (house rules, Models and harnesses, Pace every subscription)"),
     (r"always eligible despite quota", "stale pre-2026-11-07 pacing; the pacer owns it (house rules, Models and harnesses, Pace every subscription)"),
+    (r"ht-ci-runner", "retired CI runner pool; one shared runner pool (factory plan, 2026-11-08)"),
+    (r"ht-hax-runner", "retired hax runner pool; fleet/runner (factory plan, 2026-11-08)"),
+    (r"mb-pick", "retired picker; fleet/pick (factory plan, 2026-11-08)"),
+    (r"mp-pick", "retired picker; fleet/pick (factory plan, 2026-11-08)"),
 ]
 BANNED_RE = [(re.compile(p, re.I), why) for p, why in BANNED]
 
+HOUSE_BANNED = [
+    (r"ht-ci-runner", "retired CI runner pool; one shared runner pool (factory plan, 2026-11-08)"),
+    (r"infra-runner-", "retired infra runner pool; one shared runner pool (factory plan, 2026-11-08)"),
+    (r"ht-hax-runner", "retired hax runner pool; fleet/runner (factory plan, 2026-11-08)"),
+    (r"mb-pick", "retired picker; fleet/pick (factory plan, 2026-11-08)"),
+    (r"mp-pick", "retired picker; fleet/pick (factory plan, 2026-11-08)"),
+    (r"runs its own\b.*\brunners?", "retired per-lane runner pools; one shared pool (factory plan, 2026-11-08)"),
+    (r"CI Boss runners", "retired separate CI runner pool (factory plan, 2026-11-08)"),
+    (r"infra-runner-1\.\.3", "retired infra-runner count line (factory plan, 2026-11-08)"),
+    (r"infra-lead/bin/infra-pick", "retired infra picker; fleet/pick (factory plan, 2026-11-08)"),
+    (r"ci-pick", "retired CI picker; fleet/pick (factory plan, 2026-11-08)"),
+    (r"infra-pick", "retired infra picker; fleet/pick (factory plan, 2026-11-08)"),
+]
+HOUSE_BANNED_RE = [(re.compile(p, re.I), why) for p, why in HOUSE_BANNED]
+
 BEGIN = "<!-- house-rules:begin"
 END = "<!-- house-rules:end -->"
+
+
+def house_rules_path():
+    env = os.environ.get("HOUSE_RULES_MD")
+    if env and os.path.isfile(env):
+        return os.path.realpath(env)
+    here = os.path.dirname(os.path.abspath(__file__))
+    in_repo = os.path.realpath(os.path.join(here, "..", "house-rules.md"))
+    if os.path.isfile(in_repo):
+        return in_repo
+    return os.path.realpath(os.path.join(HOME, ".local/share/house-rules/house-rules.md"))
 
 
 def sources():
@@ -111,6 +142,24 @@ def scan(files, hooks):
     return hits
 
 
+def scan_house_rules(path, hits=None):
+    out = hits if hits is not None else []
+    label = path
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return out
+    for n, line in enumerate(text.splitlines(), 1):
+        if ALLOW in line:
+            continue
+        for rx, why in HOUSE_BANNED_RE:
+            m = rx.search(line)
+            if m:
+                out.append((label, n, m.group(0), why, line.strip()[:160]))
+    return out
+
+
 def log(lines):
     os.makedirs(os.path.dirname(LOG), exist_ok=True)
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -126,7 +175,8 @@ def self_check():
         with open(bad, "w") as f:
             f.write("fine line\n")
             for p, _ in BANNED:
-                f.write(re.sub(r"\\", "", p.replace("?", "")) + " here\n")
+                sample = re.sub(r"\\b", "", re.sub(r"\\", "", p.replace("?", "")))
+                f.write(sample.strip() + " here\n")
             f.write("self-hosted runners allowed rules-drift:ok\n")
         hits = scan([bad], [])
         want = len(BANNED)
@@ -149,24 +199,46 @@ def self_check():
         if len(scan([agents2], [])) != 1:
             print("FAIL: a hit outside the synced block was missed")
             ok = False
+        hr_bad = os.path.join(d, "house-rules.md")
+        with open(hr_bad, "w") as f:
+            f.write("One shared runner pool.\nCI Boss runners ht-ci-runner-1..5\n")
+        if len(scan_house_rules(hr_bad)) < 2:
+            print("FAIL: house-rules retired pool phrases were not flagged")
+            ok = False
+        with open(hr_bad, "w") as f:
+            f.write("One shared runner pool. Pool runners use fleet/pick.\n")
+        if scan_house_rules(hr_bad):
+            print("FAIL: clean house-rules.md was flagged")
+            ok = False
     print("self-check " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
 
-def main():
-    if "--self-check" in sys.argv[1:]:
-        return self_check()
-    files = sources()
-    hits = scan(files, hook_texts())
+def report_hits(hits, clean_label):
     for label, n, phrase, why, text in hits:
         print(f"{label}:{n}: \"{phrase}\" banned: {why}. Line: {text}")
     if hits:
         log([f"HIT {h[0]}:{h[1]} \"{h[2]}\"" for h in hits])
-        print(f"rules-drift: {len(hits)} hit(s) in {len(files)} sources")
+        print(f"rules-drift: {len(hits)} hit(s) in {clean_label}")
         return 1
-    log([f"clean ({len(files)} sources)"])
-    print(f"rules-drift: clean ({len(files)} sources)")
+    log([f"clean ({clean_label})"])
+    print(f"rules-drift: clean ({clean_label})")
     return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if "--self-check" in args:
+        return self_check()
+    if "--house-rules" in args:
+        path = house_rules_path()
+        return report_hits(scan_house_rules(path), path)
+    files = sources()
+    hits = scan(files, hook_texts())
+    hr = house_rules_path()
+    if os.path.isfile(hr):
+        scan_house_rules(hr, hits)
+    return report_hits(hits, f"{len(files)} sources + house-rules")
 
 
 if __name__ == "__main__":
