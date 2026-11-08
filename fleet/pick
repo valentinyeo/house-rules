@@ -1440,6 +1440,7 @@ def wip_self_test():
         t, source = choose(2, True)
         assert source == "board" and t["key"] in ("HTPR-25", "HTPR-26"), "open WIP: new work starts again"
         SNAP["tickets"].append(tk("HTPR-32", "QA", "runner 2"))
+        SNAP["rel"]["HTPR-32"] = [[], []]
         assert choose(2, True)[1] == "own", "a merged ticket waiting for its live check goes back to its runner"
         SNAP["tickets"] = [x for x in SNAP["tickets"] if x["key"] != "HTPR-32"] + [tk("HTPR-40", "In Progress", "runner 2")]
         SNAP["rel"]["HTPR-40"] = [[], []]
