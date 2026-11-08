@@ -254,14 +254,18 @@ The fleet chief owns that alarm until the next count is under 10.
 Valentin, 2026-11-06:
 > runners create new agent identities, but they do not frequently release the old ones
 
+Valentin, 2026-11-08:
+> why would e keep a round a dismantled runner idenitty. of course deletion!!!!!!!!
+
 `~/.local/share/house-rules/skills/hypertask-triage/scripts/agent-identities`
 board-health runs it on board 15 as the `identities` line. Owner: Chief Of Staff.
 
 Per runner pool it compares active logins with live runner sessions on this server.
-- `EXTRA`: logins with no live session. List them.
+- `EXTRA`: logins with no live session.
 - `DUPLICATE`: one name, more than one active login. One agent, one identity.
 - Pools on another server (inne) are listed, not judged.
-Fix: run `/agent-housekeeping`. It files one ticket with the logins to remove. Revoking is Valentin's call.
+Fix: `board-health --board 15 --fix` (hourly timer) runs `agent-identities --apply`. It deletes EXTRA logins after 24 hours, unless a live process uses them. Never the Runner N pool or inne. Log: `~/.local/state/agent-housekeeping/deleted-<date>.json`.
+Duplicates: delete the unused one yourself, per `/agent-housekeeping`. No ticket, no Question.
 Changed the runner count, or restarted runners? Reuse each runner's login. Never mint a new one. Rerun this check the same turn.
 
 ## 7. Report to Valentin

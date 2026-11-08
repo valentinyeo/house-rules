@@ -94,7 +94,8 @@ INVARIANTS = {
             "hand each orphan PR's ticket to an idle runner; close duplicates and PRs of closed tickets; "
             "red three runs: fix the runner picker's PR queue step"),
     "identities": ("runner logins match live runner sessions, no duplicate names", "Chief Of Staff",
-                   "/agent-housekeeping files the extra logins for Valentin's yes; sync logins whenever runners change"),
+                   "--fix deletes dismantled runner logins after 24h (agent-identities --apply); "
+                   "duplicates: delete the unused one; sync logins whenever runners change"),
 }
 
 
@@ -778,7 +779,9 @@ def main():
         flow = ex.submit(run_json, [str(HERE / "flow-check"), "--scope", name])
         blockers = ex.submit(run_text, [str(HERE / "blocker-review"), "--boards", str(a.board)]) if whole else None
         chatter = ex.submit(run_json, [str(HERE / "ticket-check"), "--board", str(a.board)]) if whole else None
-        identities = ex.submit(run_json, [str(HERE / "agent-identities")]) if a.board == 15 else None
+        # --fix on board 15 (hourly timer) deletes dismantled runner logins: Valentin's order 2026-11-08
+        identities = ex.submit(run_json, [str(HERE / "agent-identities")] + (["--apply"] if a.fix else [])) \
+            if a.board == 15 else None
         prq = ex.submit(run_json, [str(HERE / "pr-queue"), "--scope", name])
         held = ex.submit(queue_holds, a.board) if whole and a.board in QUEUE_FIX_BOARDS else None
     status = status and status.result()
