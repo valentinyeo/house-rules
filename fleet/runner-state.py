@@ -6,6 +6,7 @@
     fleet/runner-state.py --self-test
 
 An unknown state is a fault. flag approval is not a state. Waiting on a person is not a state.
+Any other RUNNER IDLE line is WAIT_CHECK.
 The launcher writes `state` on run-ledger.jsonl. fleet-watch reads that field.
 """
 import json
@@ -72,6 +73,10 @@ def classify(final, rc, elapsed, stop, waited, ticket):
         return _out("IDLE_CAP", "IDLE_CAP", detail=line[:300])
     if line and re.search(r"\bIDLE_LOAD\b|not green", line, re.I):
         return _out("IDLE_LOAD", "IDLE_LOAD", detail=line[:160])
+    if line and re.search(r"\bRUNNER IDLE\b", line):
+        if waited is not None and int(waited) >= WAIT_LIMIT:
+            return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 30 min")
+        return _out("WAIT_CHECK", "WAIT_CHECK", detail=line[:160])
     if not line and (int(rc) != 0 or int(elapsed) < 120):
         return _out("FAULT", "FAIL", detail="crash or run ended before it started")
     if line:
@@ -127,7 +132,12 @@ def self_test():
     assert parked["state"] == "PARKED" and parked["park"] == "waits" and parked["waits"] == "YPER4-623"
     assert classify("RUNNER IDLE driving own PR to live", 0, 400, "", 0, "HTPR-1")["state"] == "OWN_PR"
     assert classify("", 1, 10, "", 0, "HTPR-1")["result"] == "FAIL"
-    assert classify("RUNNER IDLE something new", 0, 400, "", 0, "HTPR-1")["detail"] == "unknown state"
+    idle_checks = classify("CI RUNNER IDLE PR 3074 checks", 0, 400, "", 0, "HYCI-182")
+    assert idle_checks["state"] == "WAIT_CHECK" and idle_checks["park"] == "", idle_checks
+    idle_review = classify("CI RUNNER IDLE HYCI-171 waiting Codex re-review and gate on 50020e7977", 0, 400, "", 0, "HYCI-171")
+    assert idle_review["state"] == "WAIT_CHECK" and idle_review["park"] == "", idle_review
+    assert classify("RUNNER IDLE something new", 0, 400, "", 0, "HTPR-1")["state"] == "WAIT_CHECK"
+    assert classify("RUNNER IDLE something new", 0, 400, "", WAIT_LIMIT, "HTPR-1")["state"] == "FAULT"
     assert classify("", 0, 400, "pacer", 0, "")["state"] == "IDLE_PACER"
     cap = classify_pick("none: wip: 4 of 4, new work closed (not counted: waiting 2)", "")
     assert cap["state"] == "IDLE_CAP" and "not counted: waiting 2" in cap["detail"]
