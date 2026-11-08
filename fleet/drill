@@ -488,9 +488,14 @@ def drill_dead_supervisor(ctx):
     os.utime(hb, (old, old))
     detected = time.time()
     alarm = REPO / "bin" / "fleet-supervisor-alarm"
-    if alarm.exists():
-        return row("dead-supervisor", start, detected, detected, True, "")
-    return row("dead-supervisor", start, detected, None, False, "no outside alarm for a stopped supervisor heartbeat")
+    if not alarm.exists():
+        return row("dead-supervisor", start, detected, None, False, "no outside alarm for a stopped supervisor heartbeat")
+    env = {**os.environ, "FLEET_SUPERVISOR_DRILL": "1"}
+    r = subprocess.run([sys.executable, str(alarm), "--self-check"], capture_output=True, text=True, cwd=str(REPO), env=env)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "self-check failed").strip().splitlines()[-1]
+        return row("dead-supervisor", start, detected, None, False, detail)
+    return row("dead-supervisor", start, detected, detected, True, "")
 
 
 DRILLS = {
