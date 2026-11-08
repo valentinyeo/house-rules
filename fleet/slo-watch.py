@@ -7,6 +7,7 @@ Drill harness: missing-check.json with status drill-review means a required revi
 
 Reads ~/.local/state/fleet-switch by default (FLEET_WATCH_STATE). Emit one JSON line per breach on stdout; exit 1 when any fire.
 """
+import datetime
 import json
 import os
 import re
@@ -22,7 +23,11 @@ NOW = time.time()
 DRY = "--dry-run" in sys.argv
 FILE_CI = "--file-ci" in sys.argv
 TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|YPER4|HYCI)-([0-9]+)\b")
-RUNNER_STATES = {"BUILDING", "OWN_PR"}
+RUNNER_STATES = {"BUILDING", "OWN_PR", "WAIT_CHECK"}
+OPEN_MAX = 3 * 3600
+START_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) start$")
+END_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) end$")
+PICK_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) pick: (\S+)")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -185,6 +190,87 @@ def watch_missing_check():
     return None
 
 
+def _stamp(value):
+    return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+
+
+def open_ticket_run(text, now):
+    """A ticket run is open when the log shows pick + start, no later end, and the start is under 3 hours old."""
+    last_s = last_e = last_pick = None
+    for line in (text or "").splitlines():
+        picked = PICK_LINE.match(line)
+        if picked:
+            last_pick = picked.group(2)
+            continue
+        started = START_LINE.match(line)
+        if started:
+            last_s = started.group(1)
+            continue
+        ended = END_LINE.match(line)
+        if ended:
+            last_e = ended.group(1)
+    if not last_s or not last_pick or last_pick == "nothing":
+        return False
+    if last_e and last_e >= last_s:
+        return False
+    if isinstance(now, str):
+        now = _stamp(now)
+    age = (now - _stamp(last_s)).total_seconds()
+    return 0 <= age < OPEN_MAX
+
+
+def share_of(last, stopped, running):
+    """last maps runner id to a state. A pacer-stopped runner counts only while a ticket run is open."""
+    stopped = {int(r) for r in (stopped or ())}
+    running = {int(r) for r in (running or ())}
+    pool = {}
+    for rid, state in (last or {}).items():
+        rid = int(rid)
+        if rid in stopped and rid not in running:
+            continue
+        pool[rid] = state or ""
+    for rid in running:
+        pool.setdefault(rid, "BUILDING")
+    if not pool:
+        return None, None
+    live = sum(1 for rid, state in pool.items() if rid in running or state in RUNNER_STATES)
+    return live, len(pool)
+
+
+def stopped_runners(state_dir):
+    found = set()
+    try:
+        names = os.listdir(state_dir)
+    except OSError:
+        return found
+    for name in names:
+        if not name.startswith("stop-") or not name[5:].isdigit():
+            continue
+        try:
+            mark = open(os.path.join(state_dir, name), errors="replace").read(80).strip().lower()
+        except OSError:
+            continue
+        if mark.startswith("pacer"):
+            found.add(int(name[5:]))
+    return found
+
+
+def running_runners(state_dir, now):
+    found = set()
+    for n in range(1, 40):
+        path = os.path.join(state_dir, f"runner-{n}.log")
+        try:
+            with open(path, errors="replace") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - 100000))
+                text = fh.read()
+        except OSError:
+            continue
+        if open_ticket_run(text, now):
+            found.add(n)
+    return found
+
+
 def ledger_building_share():
     path = os.path.join(S, "run-ledger.jsonl")
     try:
@@ -198,11 +284,11 @@ def ledger_building_share():
         except ValueError:
             continue
         if row.get("runner"):
-            last[row["runner"]] = row
+            last[int(row["runner"])] = row.get("state") or ""
     if not last:
         return None, None
-    live = sum(1 for r in last.values() if (r.get("state") or "") in RUNNER_STATES)
-    return live, len(last)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return share_of(last, stopped_runners(S), running_runners(S, now))
 
 
 def watch_building_share():
@@ -260,14 +346,40 @@ def watch_pacer():
 
 def self_test():
     assert callable(file_incident) and callable(watch_pacer)
-    assert "BUILDING" in RUNNER_STATES
+    assert "BUILDING" in RUNNER_STATES and "WAIT_CHECK" in RUNNER_STATES
+    log = "\n".join([
+        "2026-11-08T09:00:00Z end",
+        "2026-11-08T09:42:34Z pick: HTPR-7553 cursor composer-2.5 medium (own)",
+        "2026-11-08T09:42:34Z start",
+    ])
+    assert open_ticket_run(log, "2026-11-08T09:50:00Z")
+    assert not open_ticket_run("2026-11-08T09:42:34Z pick: nothing to start\n", "2026-11-08T09:50:00Z")
+    assert not open_ticket_run("2026-11-08T01:00:00Z pick: HTPR-1 x\n2026-11-08T01:00:00Z start\n", "2026-11-08T09:50:00Z")
+    idle = {1: "IDLE_CAP", 2: "IDLE_CAP", 3: "IDLE_CAP", 4: "IDLE_CAP", 5: "IDLE_CAP", 7: "IDLE_CAP"}
+    assert share_of(idle, {7}, set()) == (0, 5), "a paused runner is not in the pool"
+    live, total = share_of(idle, {7}, {1, 3, 4, 5})
+    assert (live, total) == (4, 5) and live / total >= 0.70
+    one, five = share_of({i: "IDLE_CAP" for i in range(1, 6)}, set(), {1})
+    assert one / five < 0.70
+    assert share_of({7: "IDLE_CAP"}, {7}, set()) == (None, None)
     print("fleet/slo-watch self-test ok")
+
+
+def print_share():
+    live, total = ledger_building_share()
+    if live is None or not total or live / total < 0.70:
+        print(f"building share {live}/{total} under 70")
+        return 1
+    print(f"building share {live}/{total} meets 70")
+    return 0
 
 
 def main():
     if "--self-test" in sys.argv:
         self_test()
         return
+    if "--share" in sys.argv:
+        sys.exit(print_share())
     breaches = [b for b in (watch_missing_check(), watch_building_share(), watch_pacer()) if b]
     for b in breaches:
         print(b)
