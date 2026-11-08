@@ -25,6 +25,9 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      the live runners closes c0, d, e and f. Then only the PR queue and new-work tickets with an open PR remain.
       Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI (11514)
      tickets that are Urgent or that an open ticket is BlockedBy still go out, to runners that can join 11514 (LANE_CAP applies).
+  Kept slot (HYCI-186): while no other runner is on a checks-board (11514) or tools-board (4060) ticket, this runner takes
+     one before its own app ticket, before orphans and before the PR queue. The WIP cap and LANE_CAP do not hold that one
+     ticket. The stderr line starts with "kept slot:". App work only when no such ticket is open.
   c. Urgent new work on any board, then the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
   e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 4060
@@ -728,6 +731,83 @@ def blocks_open(t):
     return any(is_open(k) for k in relations(t["key"])[1])
 
 
+def blocks_known(t):
+    """True when this snapshot already shows an open ticket waiting on t. No extra board read."""
+    rel = (SNAP.get("rel") or {}).get(t["key"])
+    return bool(rel) and any(is_open(k) for k in rel[1])
+
+
+def other_on_blocker(n):
+    """Ticket key another runner is running, or claimed in the last two minutes, when that ticket is checks or tools work.
+    An older claim is not enough: the run may have ended and the slot has to be free again."""
+    for m in range(1, RUNNERS + 1):
+        if m == n:
+            continue
+        key = active_run(m)
+        if key and key.startswith(("HYCI-", "YPER4-")):
+            return key
+    now_s = time.time()
+    try:
+        for path in (STATE / "claims").iterdir():
+            if path.name.startswith(".") or now_s - path.stat().st_mtime >= FRESH_CLAIM:
+                continue
+            who, key = path.read_text().split("\t")[:2]
+            if who != str(n) and key.startswith(("HYCI-", "YPER4-")):
+                return key
+    except OSError:
+        pass
+    for key, who in virtual_claims().items():
+        if who != str(n) and key.startswith(("HYCI-", "YPER4-")):
+            return key
+    return None
+
+
+def slot_candidates(n, me, skip):
+    """(candidates, log line or None). Candidates are checks-board and tools-board tickets this runner may take."""
+    cands, missed, waiting = [], False, False
+    for t in SNAP["tickets"]:
+        if t["board"] not in ("11514", "4060"):
+            continue
+        if t["waiting"] or "design-pass" in t["labels"] or set(t["labels"]) & SKIP_ALL or t["key"] in skip:
+            continue
+        new_col = t["section"] in BOARDS[t["board"]][0]
+        building_col = t["section"] in BOARDS[t["board"]][1]
+        if not new_col and not building_col:
+            continue
+        if not can_join(n, t["board"]):
+            missed = True
+            continue
+        if any(live_runner(h) and h != me for h in names(t)):
+            waiting = True
+            continue
+        if new_col and eligible_new(t) and free_for(t, me):
+            cands.append(t)
+        elif building_col and (me in names(t) or (orphan(t) and orphan_ok(t))):
+            cands.append(t)
+    if cands:
+        cands.sort(key=lambda t: (t["prio"] != "Urgent", not blocks_known(t), rank(t), 0 if t["board"] == "11514" else 1, t["created"]))
+        return cands, None
+    if waiting:
+        return [], "kept slot: blocker open; its runner is not on it"
+    if missed:
+        return [], "kept slot: blocker open; this runner cannot take it"
+    return [], "kept slot: no blocker open"
+
+
+def take_kept_slot(n, me, cands, dry):
+    """Claim the first checks or tools ticket. None when every claim is refused."""
+    log(f"kept slot: blocker {cands[0]['key']} open; app work withheld")
+    for t in cands:
+        if me in names(t) and t["section"] in BOARDS[t["board"]][1]:
+            record_claim(n, t["key"], dry)
+            return t, "incident" if INCIDENT_LABEL in t["labels"] else "kept-slot"
+        how = "incident" if INCIDENT_LABEL in t["labels"] else (
+            "orphan" if t["section"] in BOARDS[t["board"]][1] and orphan(t) else "board")
+        if try_claim(n, t, how, dry):
+            return t, "incident" if INCIDENT_LABEL in t["labels"] else "kept-slot"
+    return None
+
+
 def ci_blockers(cands):
     """Fleet CI tickets the WIP cap must not hold: Urgent ones, then ones an open ticket waits on (one relations read per
     ticket, so only the top BLOCK_LOOKUPS non-Urgent are checked). They unblock the pipeline the cap is waiting on."""
@@ -1034,6 +1114,23 @@ def choose(n, dry):
     SKIP[0] = skip
     building = [t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][1]]
 
+    # kept slot: one runner on a checks or tools ticket before its own app work (HYCI-186)
+    held = other_on_blocker(n)
+    if held:
+        log(f"kept slot: held on {held}")
+    else:
+        cands, empty = slot_candidates(n, me, skip)
+        if not cands:
+            log(empty)
+        else:
+            got = take_kept_slot(n, me, cands, dry)
+            if got:
+                return got
+            own = any(me in names(t) and t["section"] in BOARDS[t["board"]][1] for t in SNAP["tickets"])
+            if not own:
+                raise SystemExit(f"none: kept slot waiting on {cands[0]['key']}")
+            log("kept slot: blocker open but this runner is held on its own ticket")
+
     # a. own ticket
     # a merged ticket waiting for its live check is its merging runner's; a design-pass one needs another runner's QA
     for t in sorted((t for t in building if me in names(t) and not set(t["labels"]) & SKIP_ALL
@@ -1299,8 +1396,34 @@ def wip_self_test():
 
     claimed = []
     real_claim = try_claim
+    global log
+    slot_logs = []
+    real_log = log
+    def capture(msg):
+        slot_logs.append(msg)
+        real_log(msg)
+    log = capture
     try_claim = lambda n, t, source, dry: claimed.append((t["key"], source)) or True
+
+    def set_members(board, names):
+        """The miss re-read loads members.json. Keep that file and the memory the same, or the test joins the live board."""
+        LOGGED.clear()
+        MEMBERS.pop(board, None)
+        path = STATE / "members.json"
+        try:
+            cached = json.loads(path.read_text())
+        except (OSError, ValueError):
+            cached = {}
+        cached[board] = {"at": time.time(), "names": sorted(names)}
+        path.write_text(json.dumps(cached))
+        MEMBERS[board] = set(names)
     try:
+        t, source = choose(2, True)
+        assert (t["key"], source) == ("HYCI-1", "kept-slot"), (t["key"], source)
+        assert any(s.startswith("kept slot: blocker HYCI-1 open") for s in slot_logs), slot_logs
+        tickets = [x for x in tickets if x["key"] != "HYCI-1"]
+        SNAP["tickets"] = list(tickets)
+        SNAP["open"]["HYCI-1"] = True
         t, source = choose(2, True)
         assert source == "orphan" and t["key"] in ("HTPR-20", "HTPR-29"), (t["key"], source)
         SNAP["tickets"] = [x for x in tickets if x["key"] not in ("HTPR-20", "HTPR-23", "HTPR-29")]
@@ -1325,7 +1448,7 @@ def wip_self_test():
         assert (t["key"], source) == ("HTPR-40", "park"), "an own ticket that rests is parked before anything else"
         (STATE / "runner-1.idle").unlink()
         # a runner whose login the board never added is offered nothing from it (HYCI-159: ship-claim refused Runner 5)
-        MEMBERS["11514"] = {"runner 1"}
+        set_members("11514", {"runner 1"})
         SNAP = {"tickets": [tk("HYCI-1", "Backlog")], "rel": {"HYCI-1": [[], []]}, "prs": [], "incidents": [], "open": {}}
         assert can_join(1, "11514") and not can_join(2, "11514") and can_join(2, "15")
         assert choose(1, True)[0]["key"] == "HYCI-1", "a member is offered the board's ticket"
@@ -1335,7 +1458,7 @@ def wip_self_test():
         except SystemExit as e:
             assert str(e).startswith("none:"), e
         # cap hit, Fleet CI blocker offered: Urgent and open-BlockedBy tickets go out, a plain one and a non-member do not
-        MEMBERS["11514"] = {"runner 1"}
+        set_members("11514", {"runner 1"})
         full_wip = [tk("HTPR-50", "In Progress", "runner 2"), tk("HTPR-51", "AI Review", "runner 2"), tk("HTPR-52", "Bugs")]
         ci = [tk("HYCI-2", "Backlog"), tk("HYCI-3", "Backlog"), tk("HYCI-4", "Backlog")]
         ci[2]["prio"] = "Urgent"
@@ -1343,24 +1466,40 @@ def wip_self_test():
         SNAP["rel"]["HYCI-3"] = [[], ["HTPR-52"]]
         assert pipeline()[0] == {"HTPR-50", "HTPR-51"} and len(pipeline()[1]) == 2
         assert [t["key"] for t in ci_blockers(ci)] == ["HYCI-4", "HYCI-3"], "Urgent first, then the one an open ticket waits on"
-        assert choose(1, True) == (ci[2], "ci-lane"), "cap hit: an Urgent Fleet CI ticket still goes out"
+        assert choose(1, True) == (ci[2], "kept-slot"), "cap hit: an Urgent checks ticket still goes out on the kept slot"
         ci[2]["prio"] = "Medium"
-        assert choose(1, True) == (ci[1], "ci-lane"), "cap hit: a Fleet CI ticket that blocks an open ticket still goes out"
+        assert choose(1, True) == (ci[1], "kept-slot"), "cap hit: a checks ticket an open ticket waits on still goes out"
         SNAP["rel"]["HYCI-3"] = [[], []]
+        assert choose(1, True) == (ci[0], "kept-slot"), "cap hit: the kept slot still takes a plain checks ticket"
+        (STATE / "runner-2.log").write_text(f"{iso(0.05)} cursor: HYCI-2 composer-2.5 medium\n")
+        RUNNING.clear()
+        slot_logs.clear()
         try:
             choose(1, True)
-            raise AssertionError("cap hit: a plain Fleet CI ticket started")
+            raise AssertionError("held slot let a second runner start a plain checks ticket at the cap")
         except SystemExit as e:
             assert "new work closed" in str(e), e
+        assert any(s.startswith("kept slot: held on HYCI-2") for s in slot_logs), slot_logs
+        (STATE / "runner-2.log").unlink()
+        RUNNING.clear()
         SNAP["rel"]["HYCI-3"] = [[], ["HTPR-52"]]
-        MEMBERS["11514"] = {"runner 2"}
+        set_members("11514", {"runner 2"})
         try:
             choose(1, True)
             raise AssertionError("cap hit: a non-member was offered a Fleet CI ticket")
         except SystemExit as e:
             assert "new work closed" in str(e), e
+        # every runner that is picking while the others are on app work still gets the blocker
+        set_members("11514", {"runner 1", "runner 2"})
+        (STATE / "runner-2.log").write_text(f"{iso(0.05)} cursor: HTPR-50 composer-2.5 medium\n")
+        RUNNING.clear()
+        ci[2]["prio"] = "Urgent"
+        assert choose(1, True) == (ci[2], "kept-slot"), "busy pool: the free runner still takes the blocker"
+        (STATE / "runner-2.log").unlink()
+        RUNNING.clear()
     finally:
         try_claim = real_claim
+        log = real_log
         (STATE / "stop-3").unlink()
 
 
