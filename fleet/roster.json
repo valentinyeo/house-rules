@@ -212,7 +212,7 @@
     "9": "dead",
     "10": "stale"
    },
-   "notes": "dead = empty shell; stale = Claude open, idle about 40h. Joins the shared pool."
+   "notes": "dead = empty shell; stale = Claude open, idle about 40h. Joins the shared pool. A runner picks only from boards whose member list holds its login (fleet/pick can_join, cached 1h; fleet/pick --check-access lists gaps). Runners 3-5 are on 15 and 4060 only."
   },
   {
    "name": "poteto-cursor-{n}",

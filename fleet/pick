@@ -147,6 +147,54 @@ def ht(*args):
         return None
 
 
+# ---------------------------------------------------------------- board membership
+
+MEMBERS = {}  # board -> lower-case display names of its members, or None when unreadable and nothing cached
+MEMBERS_TTL = 3600
+LOGGED = set()
+DRY_RUN = "--dry-run" in sys.argv
+
+
+def fetch_members(board):
+    d = ht("project", "members", "--project", board)
+    return {(m.get("displayName") or "").lower() for m in (d or {}).get("members") or []} if d else None
+
+
+def board_members(board):
+    """Who may join this board, cached an hour (a dry run reads the cache but never writes it). Unreadable: the stale cache, else None."""
+    if board not in MEMBERS:
+        path = STATE / "members.json"
+        try:
+            cached = json.loads(path.read_text())
+        except (OSError, ValueError):
+            cached = {}
+        hit = cached.get(board) or {}
+        if time.time() - hit.get("at", 0) < MEMBERS_TTL:
+            MEMBERS[board] = set(hit["names"])
+        else:
+            fresh = fetch_members(board)
+            MEMBERS[board] = fresh if fresh is not None else (set(hit["names"]) if hit else None)
+            if fresh is not None and not DRY_RUN:
+                cached[board] = {"at": time.time(), "names": sorted(fresh)}
+                STATE.mkdir(parents=True, exist_ok=True)
+                tmp = f"{path}.{os.getpid()}"
+                json.dump(cached, open(tmp, "w"))
+                os.replace(tmp, path)
+    return MEMBERS[board]
+
+
+def can_join(n, board):
+    """May Runner n claim tickets on this board? ship-claim refuses a login the board did not add ("the board decides who may
+    join it"), so the picker never offers those tickets. Membership unknown: offer them, ship-claim stays the backstop."""
+    names = board_members(board)
+    if names is None or f"runner {n}" in names:
+        return True
+    if (n, board) not in LOGGED:
+        LOGGED.add((n, board))
+        log(f"runner {n} is not a member of board {board}: its tickets are not offered")
+    return False
+
+
 # ---------------------------------------------------------------- snapshot
 
 def slim(t, board):
@@ -864,7 +912,7 @@ def incident_step(n, dry):
         return None
     me = f"runner {n}"
     cands = [t for t in SNAP.get("incidents") or []
-             if t["board"] in INCIDENT_BOARDS and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & (SKIP_ALL | {"design-pass"})]
+             if t["board"] in INCIDENT_BOARDS and can_join(n, t["board"]) and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & (SKIP_ALL | {"design-pass"})]
     for t in sorted(cands, key=lambda t: (rank(t), t["created"])):
         if incident_runner(t["key"], n):
             continue
@@ -980,7 +1028,7 @@ def choose(n, dry):
 
     # b. orphans
     for t in sorted((t for t in building if orphan(t) and t["key"] not in skip and not t["waiting"]
-                     and not set(t["labels"]) & (SKIP_ALL | {"design-pass"}) and orphan_ok(t)),
+                     and not set(t["labels"]) & (SKIP_ALL | {"design-pass"}) and orphan_ok(t) and can_join(n, t["board"])),
                     key=lambda t: (rank(t), t["updated"])):
         if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
             continue
@@ -996,7 +1044,7 @@ def choose(n, dry):
 
     # new work, ordered by priority across every board (Valentin 2026-11-07: use the priority field)
     new = [t for t in SNAP["tickets"] if t["key"] not in skip and t["key"] not in mine_claim and eligible_new(t)
-           and free_for(t, me)]
+           and free_for(t, me) and can_join(n, t["board"])]
     new.sort(key=lambda t: (rank(t), t["created"]))
     lane_new = [t for t in new if in_lane(t)]
     app_new = [t for t in new if not in_lane(t)]
@@ -1023,7 +1071,7 @@ def choose(n, dry):
     # c. PR queue
     for p, key in pr_candidates(n, others):
         t = fetch_ticket(key)
-        if (not t or t["key"] in skip or set(t["labels"]) & (SKIP_ALL | {"design-pass"})
+        if (not t or t["key"] in skip or set(t["labels"]) & (SKIP_ALL | {"design-pass"}) or not can_join(n, t["board"])
                 or any(live_runner(h) and h != me for h in names(t))):
             continue
         if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
@@ -1083,6 +1131,7 @@ def self_test():
     STATE = Path(tempfile.mkdtemp())
     ALLOCATION = STATE / "allocation.json"
     RUNNER_STATE = STATE
+    MEMBERS.update({b: None for b in BOARDS})  # membership unknown: the offline test offers every board
     t = {"key": "HTPR-1", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium"}
     SKIP[0] = Skip(set(), set())
     assert parkable(t), "a resting building ticket with no job yet is due one"
@@ -1237,6 +1286,16 @@ def wip_self_test():
         t, source = choose(2, True)
         assert (t["key"], source) == ("HTPR-40", "park"), "an own ticket that rests is parked before anything else"
         (STATE / "runner-1.idle").unlink()
+        # a runner whose login the board never added is offered nothing from it (HYCI-159: ship-claim refused Runner 5)
+        MEMBERS["11514"] = {"runner 1"}
+        SNAP = {"tickets": [tk("HYCI-1", "Backlog")], "rel": {"HYCI-1": [[], []]}, "prs": [], "incidents": [], "open": {}}
+        assert can_join(1, "11514") and not can_join(2, "11514") and can_join(2, "15")
+        assert choose(1, True)[0]["key"] == "HYCI-1", "a member is offered the board's ticket"
+        try:
+            choose(2, True)
+            raise AssertionError("offered a ticket on a board the runner is not a member of")
+        except SystemExit as e:
+            assert str(e).startswith("none:"), e
     finally:
         try_claim = real_claim
         (STATE / "stop-3").unlink()
@@ -1299,8 +1358,7 @@ def check_access():
     cred = HOME / ".config/hypertask-agents/credentials/sessions"
     members = {}
     for b in BOARDS:
-        d = ht("project", "members", "--project", b)
-        members[b] = {(m.get("displayName") or "").lower() for m in (d or {}).get("members") or []} if d else None
+        members[b] = fetch_members(b)
     ids = {}
     d = ht("agents", "list", "--query", "Runner", "--limit", "200")
     for a in (d or {}).get("agents") or []:
