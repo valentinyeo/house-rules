@@ -258,7 +258,16 @@ def watch_pacer():
     return "slo pacer: allocation stale"
 
 
+def self_test():
+    assert callable(file_incident) and callable(watch_pacer)
+    assert "BUILDING" in RUNNER_STATES
+    print("fleet/slo-watch self-test ok")
+
+
 def main():
+    if "--self-test" in sys.argv:
+        self_test()
+        return
     breaches = [b for b in (watch_missing_check(), watch_building_share(), watch_pacer()) if b]
     for b in breaches:
         print(b)

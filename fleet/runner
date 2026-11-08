@@ -12,7 +12,7 @@ export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
 STATE=${FLEET_RUNNER_STATE:-$HOME/.local/state/ht-or-runners}
 HERE=$(dirname "$(readlink -f "$0")")
 SELF=$(readlink -f "$0")
-PICK=$HERE/pick
+PICK_GATE=$HERE/tool-gate.py
 SESS_PFX=${FLEET_RUNNER_SESS_PREFIX:-ht-or-runner}
 sess_name() { echo "${SESS_PFX}-$1"; }
 FIRST=${FLEET_RUNNER_FIRST:-1}
@@ -144,7 +144,7 @@ run_brief() {
 }
 
 case "${1:-}" in
-  check) ls "$PICK" >/dev/null && "$PICK" --check-access ;;
+  check) python3 "$PICK_GATE" pick >/dev/null && "$(python3 "$PICK_GATE" pick)" --check-access ;;
   top-up)
     exec 9>"$STATE/.keeper.lock"; flock -n 9 || exit 0
     [ -f "$STATE/PAUSED" ] && exit 0
@@ -206,12 +206,13 @@ case "${1:-}" in
         echo "$(date -u +%FT%TZ) relaunch: launcher changed" >> "$rlog"; exec "$SELF" "$n" --loop
       fi
       if [ -f "$STATE/PAUSED" ] || [ -f "$STATE/stop-$n" ]; then sleep 300; continue; fi
-      if ! pick=$("$PICK" "$n" --json 2>>"$rlog"); then
+      pick_bin=$(python3 "$PICK_GATE" pick 2>>"$rlog") || { echo "$(date -u +%FT%TZ) pick-gate: no runnable picker" >> "$rlog"; sleep 900; continue; }
+      if ! pick=$("$pick_bin" "$n" --json 2>>"$rlog"); then
         echo "$(date -u +%FT%TZ) pick: nothing to start" >> "$rlog"
         note=$(grep -aE 'none:|fleet/pick:' "$rlog" | tail -1 | cut -c1-400 || true)
         case $note in
           *"not counted"*) wip=$note ;;
-          *) wip=$("$PICK" --wip 2>/dev/null | tr '\n' ' ' | cut -c1-500 || true) ;;
+          *) wip=$("$pick_bin" --wip 2>/dev/null | tr '\n' ' ' | cut -c1-500 || true) ;;
         esac
         python3 "$HERE/runner-state.py" --pick-fail --runner "$n" --note "$note" --wip "$wip" --ledger "$STATE/run-ledger.jsonl" >>"$rlog" 2>&1 || true
         sleep 900; continue
