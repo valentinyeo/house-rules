@@ -57,6 +57,8 @@ from pathlib import Path
 
 HOME = Path.home()
 HERE = Path(__file__).resolve().parent
+if not (HERE / "briefs").is_dir():
+    HERE = Path(os.environ.get("FLEET_HOME", Path.home() / ".local/share/house-rules/fleet"))
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
 STATE = Path(os.environ.get("FLEET_PICK_STATE", HOME / ".local/state/fleet-pick"))
 RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
