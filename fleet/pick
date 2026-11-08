@@ -97,7 +97,7 @@ RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 CI_LABELS = {"ci", "hypertask ci"}
 BASE_SKIP = {"brain-extra-hard"}
 SKIP_ALL = set(BASE_SKIP)  # plus the brains the runner's engine skips (set_engine)
-SKIP_APP = {"design-pass", "cursor bugs 7 nov", "cursor runners 6 nov", "cursor cloud 7 nov"}
+SKIP_APP = {"design-pass"}
 SKIP_INFRA = {"agent feedback"}
 # a solo dev keeps a ticket by holding it (assignee), not by label; android needs the shared phone, so it stays with its solo dev
 SKIP_SF = {"multiprompt android", "wazig", "postbox"}
