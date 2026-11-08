@@ -103,7 +103,7 @@ def main():
     a = p.parse_args()
     args = a.args[1:] if a.args[:1] == ["--"] else a.args
     parsed = create_args(args)
-    if parsed and parsed[0] in RETIRED:
+    if parsed and parsed[0] in RETIRED and "incident" not in parsed[2]:
         print(f"REFUSE board {parsed[0]} is archived: file on board {RETIRED[parsed[0]]} (Fleet CI & Infra)")
         return REFUSE
     if not parsed or parsed[0] not in BOARDS:

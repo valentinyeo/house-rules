@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Board 15: keep each shipped ticket in the flag column that matches its live feature flag.
+
+Runners and leads switch flags with ht-flag; the card often stays in the old column (Valentin, 8 Nov:
+"Their flags are already at Everyone, but the cards still sit in the Only Me + QA column").
+Reads every flag (ht-flag get) and the three flag columns, then moves a card whose column disagrees
+with its flag. A ticket with several flags goes to the column of its most restricted flag.
+Only cards already in a flag column move: work still being built or checked is left alone.
+
+flag-columns            list the moves
+flag-columns --apply    move them as your agent (vcc), with an agent-lane note each
+"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+HT_FLAG = Path(os.environ.get("HT_FLAG", Path.home() / "projects/hypertask/.claude/skills/ship/scripts/ht-flag"))
+VCC = str(Path.home() / ".local/bin/vcc")
+BOARD = "15"
+COLUMN = {"OFF": "Flag: Off", "OWNER_ONLY": "Flag: Only Me + QA", "OWNER_AND_QA": "Flag: Only Me + QA",
+          "EVERYONE": "Flag: Everyone"}
+RANK = ["OFF", "OWNER_ONLY", "OWNER_AND_QA", "EVERYONE"]
+
+
+def payload(text):
+    start = min(i for i in (text.find("["), text.find("{")) if i >= 0)
+    return json.loads(text[start:])
+
+
+def flag_modes():
+    got = payload(subprocess.run([str(HT_FLAG), "get"], capture_output=True, text=True, check=True).stdout)
+    flags = got if isinstance(got, list) else got.get("flags", [])
+    modes = {}
+    for f in flags:
+        t, m = f.get("ticketId"), f.get("mode")
+        if t and m in RANK:
+            modes[t] = min(modes.get(t, m), m, key=RANK.index)
+    return modes
+
+
+def column(name):
+    rows, offset = [], 0
+    while True:
+        out = subprocess.run([VCC, "--json", "task", "list", "--project", BOARD, "--section", name,
+                              "--limit", "100", "--offset", str(offset)], capture_output=True, text=True, check=True).stdout
+        page = payload(out).get("tasks", [])
+        rows += page
+        if len(page) < 100:
+            return rows
+        offset += 100
+
+
+def plan():
+    modes = flag_modes()
+    moves = []
+    for col in sorted(set(COLUMN.values())):
+        for t in column(col):
+            mode = modes.get(t["ticketNumber"])
+            if mode and COLUMN[mode] != col:
+                moves.append((t["ticketNumber"], col, COLUMN[mode], mode))
+    return moves
+
+
+def main():
+    apply = "--apply" in sys.argv[1:]
+    moves = plan()
+    failed = 0
+    for ticket, was, want, mode in moves:
+        print(f"{'move' if apply else 'would move'} {ticket}: {was} -> {want} (flag {mode})")
+        if not apply:
+            continue
+        r = subprocess.run([VCC, "task", "move", ticket, want], capture_output=True, text=True)
+        if r.returncode == 0:
+            r = subprocess.run([VCC, "activity", "add", ticket,
+                                f"flag-columns: moved from {was} to {want}. Its flag is {mode}; the column follows the flag."],
+                               capture_output=True, text=True)
+        failed += r.returncode != 0
+    print(f"flag-columns: {len(moves)} card(s) in the wrong flag column{f', {failed} failed' if failed else ''}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
