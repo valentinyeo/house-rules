@@ -152,6 +152,9 @@ def ht(*args):
 
 MEMBERS = {}  # board -> lower-case display names of its members, or None when unreadable and nothing cached
 MEMBERS_TTL = 3600
+# a runner missing from a cached list is re-read once the list is this old: a login a board just added (or an incident board
+# it just joined) is offered within minutes, not after the hour
+MEMBERS_MISS_TTL = 300
 LOGGED = set()
 DRY_RUN = "--dry-run" in sys.argv
 
@@ -161,16 +164,16 @@ def fetch_members(board):
     return {(m.get("displayName") or "").lower() for m in (d or {}).get("members") or []} if d else None
 
 
-def board_members(board):
+def board_members(board, max_age=MEMBERS_TTL):
     """Who may join this board, cached an hour (a dry run reads the cache but never writes it). Unreadable: the stale cache, else None."""
-    if board not in MEMBERS:
+    if board not in MEMBERS or max_age < MEMBERS_TTL:
         path = STATE / "members.json"
         try:
             cached = json.loads(path.read_text())
         except (OSError, ValueError):
             cached = {}
         hit = cached.get(board) or {}
-        if time.time() - hit.get("at", 0) < MEMBERS_TTL:
+        if time.time() - hit.get("at", 0) < max_age:
             MEMBERS[board] = set(hit["names"])
         else:
             fresh = fetch_members(board)
@@ -188,6 +191,8 @@ def can_join(n, board):
     """May Runner n claim tickets on this board? ship-claim refuses a login the board did not add ("the board decides who may
     join it"), so the picker never offers those tickets. Membership unknown: offer them, ship-claim stays the backstop."""
     names = board_members(board)
+    if names is not None and f"runner {n}" not in names and (n, board) not in LOGGED:
+        names = board_members(board, MEMBERS_MISS_TTL)  # once per pick: a board may have added the runner since the read
     if names is None or f"runner {n}" in names:
         return True
     if (n, board) not in LOGGED:
