@@ -3,7 +3,7 @@
 
 The assignee is the one record of who owns a ticket. Workers are live
 runners plus HT Design Builder and Speed Runner. Tickets being built (In
-Progress, AI Review) never outnumber workers; QA has its own cap.
+Progress, AI Review, QA) never outnumber workers.
 
 Per ticket, from the board and the ticket's own agent log:
   In Progress  OK only when its assigned worker is live, holds no other ticket
@@ -205,7 +205,7 @@ def holder(t, w):
 
 
 def ownership(building, w, own_live=None):
-    """One worker, one ticket being built. QA waits on its own cap. own_live: the scope's own live workers."""
+    """One worker, one ticket being built. own_live: the scope's own live workers."""
     own_live = w[1] if own_live is None else own_live
     owners, orphans, outside = {}, [], []
     for t in building:
@@ -251,7 +251,7 @@ def run(key):
     cols = {name: column(board, name, labels) for name in [cfg["in_progress"], *cfg["waits"]]}
     with ThreadPoolExecutor(6) as ex:
         info = {num: (log, moved) for num, log, moved in ex.map(details, [t for ts in cols.values() for t in ts])}
-    building = (cfg["in_progress"], "AI Review")
+    building = (cfg["in_progress"], "AI Review", "QA")  # a runner stays on its ticket until it is live
     own = ownership([t for c in building if c in cols for t in cols[c]], w, own_live)
     rows = []
     for t in cols[cfg["in_progress"]]:
