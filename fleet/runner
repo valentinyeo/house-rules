@@ -23,7 +23,29 @@ mkdir -p "$STATE"
 target() { cat "$STATE/target" 2>/dev/null || echo "$LAST"; }
 # The pacer (poteto-2-advisor bin/pacer) writes pace-cap: the most runners the subscriptions sustain. The auto-raise in
 # top-up never passes it; runners above it find a stop-N file marked "pacer" and stop between tickets.
-maxcap() { local p; p=$(cat "$STATE/pace-cap" 2>/dev/null); [[ "$p" =~ ^[1-9][0-9]?$ ]] && [ "$p" -lt "$LAST" ] && echo "$p" || echo "$LAST"; }
+ALLOC=${FLEET_PICK_ALLOCATION:-$HOME/.local/state/pacing/allocation.json}
+PACER_FLOOR=5
+FSWATCH=${FLEET_WATCH_STATE:-$HOME/.local/state/fleet-switch}
+allocation_stale() {
+  local at=0 now; now=$(date +%s)
+  [ -f "$ALLOC" ] || return 0
+  at=$(python3 -c "import json; print(int(json.load(open('$ALLOC')).get('at',0)))" 2>/dev/null) || return 0
+  [ "$at" -eq 0 ] || [ "$((now - at))" -ge 3600 ]
+}
+pacer_watch_log() {
+  mkdir -p "$FSWATCH"
+  echo "$(date -u +%FT%TZ) fleet-watch: pacer allocation stale; runner floor $PACER_FLOOR" >> "$FSWATCH/log.txt"
+}
+maxcap() {
+  local p
+  if allocation_stale; then
+    pacer_watch_log
+    echo "$PACER_FLOOR"
+    return
+  fi
+  p=$(cat "$STATE/pace-cap" 2>/dev/null)
+  [[ "$p" =~ ^[1-9][0-9]?$ ]] && [ "$p" -lt "$LAST" ] && echo "$p" || echo "$LAST"
+}
 validate_targets() {
   t=$(target); cap=$(maxcap)
   [[ "$t" =~ ^[1-9][0-9]?$ && "$cap" =~ ^[1-9][0-9]?$ ]] &&
