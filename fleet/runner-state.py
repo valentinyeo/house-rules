@@ -27,7 +27,7 @@ STATES = (
     "FAULT",
 )
 WAIT_LIMIT = 30 * 60
-TICKET = re.compile(r"\b((?:HTPR|HYFA|IGSH|YPER4|HYCI)-\d+)\b")
+TICKET = re.compile(r"\b((?:HTPR|HYFA|IGSH|HYCI)-\d+)\b")
 DONE = re.compile(r"\b(?:INFRA |CI )?RUNNER DONE\b")
 HUMAN = re.compile(r"\bvalentin\b|flag approval", re.I)
 WAIT = re.compile(r"ci-blocked|checks pending|awaiting checks|\bCI pending\b|\brecheck\b", re.I)
@@ -121,15 +121,15 @@ def self_test():
     assert human["state"] == "FAULT" and human["park"] == "lead", human
     assert "unknown state" in human["detail"] and "flag approval" in human["detail"], human
     assert classify("RUNNER IDLE waits on Valentin for a flag", 0, 600, "", 0, "HTPR-1")["park"] == "lead"
-    done = classify("INFRA RUNNER DONE YPER4-1 Done", 0, 400, "", 0, "YPER4-1")
+    done = classify("INFRA RUNNER DONE HYCI-1 Done", 0, 400, "", 0, "HYCI-1")
     assert done["state"] == "BUILDING" and done["result"] == "DONE" and done["park"] == ""
-    assert classify("PARKED YPER4-9", 0, 30, "", 0, "YPER4-9")["state"] == "PARKED"
+    assert classify("PARKED HYCI-9", 0, 30, "", 0, "HYCI-9")["state"] == "PARKED"
     wait = classify("RUNNER IDLE ci-blocked HYCI-117", 0, 400, "", 10, "HYCI-1")
     assert wait["state"] == "WAIT_CHECK" and wait["park"] == ""
     late = classify("RUNNER IDLE checks pending", 0, 400, "", WAIT_LIMIT, "HYCI-1")
     assert late["state"] == "FAULT" and late["park"] == "" and "30 min" in late["detail"]
-    parked = classify("RUNNER IDLE HYCI-160 BlockedBy YPER4-623", 0, 400, "", 0, "HYCI-160")
-    assert parked["state"] == "PARKED" and parked["park"] == "waits" and parked["waits"] == "YPER4-623"
+    parked = classify("RUNNER IDLE HYCI-160 BlockedBy HYCI-188", 0, 400, "", 0, "HYCI-160")
+    assert parked["state"] == "PARKED" and parked["park"] == "waits" and parked["waits"] == "HYCI-188"
     assert classify("RUNNER IDLE driving own PR to live", 0, 400, "", 0, "HTPR-1")["state"] == "OWN_PR"
     assert classify("", 1, 10, "", 0, "HTPR-1")["result"] == "FAIL"
     idle_checks = classify("CI RUNNER IDLE PR 3074 checks", 0, 400, "", 0, "HYCI-182")
@@ -146,7 +146,7 @@ def self_test():
     bare = classify_pick("none: no free ticket", "")
     assert bare["state"] == "IDLE_NO_TICKET" and "not counted:" in bare["detail"]
     day = [
-        classify("INFRA RUNNER DONE YPER4-1 Done", 0, 500, "", 0, "YPER4-1"),
+        classify("INFRA RUNNER DONE HYCI-1 Done", 0, 500, "", 0, "HYCI-1"),
         classify("RUNNER IDLE own PR", 0, 500, "", 0, "HTPR-2"),
         classify("RUNNER IDLE recheck 2026-11-08T10:00:00Z", 0, 500, "", 0, "HYCI-3"),
         classify_pick("none: no free ticket", "not counted: filter 3"),

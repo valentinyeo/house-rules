@@ -16,7 +16,7 @@ chief of staff for each of the departments to run this skill and then get
 active fixing the house rules that caused the agent chatter".
 
 usage: ticket-check [--board 15] [--hours 24] [--json PATH]
-                    [--alarm-board 4060] [--alarm-at 10] [--self-test]
+                    [--alarm-board 11514] [--alarm-at 10] [--self-test]
 Reads only, unless --alarm-board is set: then it files or bumps one alarm.
 """
 import argparse

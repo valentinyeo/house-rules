@@ -12,7 +12,7 @@
     fleet/park --sweep [--apply] [--waits-on KEY=T1,T2 ...] [--valentin KEY[=COMMENT] ...]
     fleet/park --self-test
 
-Home column: board 15 Bugs, Features or Improvements by label then title tag; 2060 Todo; 4060 and 11514 Backlog.
+Home column: board 15 Bugs, Features or Improvements by label then title tag; 2060 Todo; 11514 Backlog.
 A runner calls it before it ends a run with `RUNNER IDLE`. It writes as the caller (SHIP_SESSION_NAME), never as Valentin.
 --sweep is the one-time cleanup through the same code: it reads the runner launcher logs, finds board 15 tickets still In
 Progress that a runner ended IDLE on, classifies each (open BlockedBy link, waiting on Valentin, no PR at all) and prints the
@@ -31,9 +31,9 @@ HOME = Path.home()
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
 RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
 BUILDING = {"15": ("In Progress", "AI Review", "QA"), "2060": ("Doing", "AI Review"),
-            "4060": ("In Progress", "AI Review"), "11514": ("In Progress", "AI Review")}
-HOME_COLUMN = {"2060": "Todo", "4060": "Backlog", "11514": "Backlog"}
-TICKET = re.compile(r"^(HTPR|HYFA|IGSH|YPER4|HYCI)-[0-9]+$")
+            "11514": ("In Progress", "AI Review")}
+HOME_COLUMN = {"2060": "Todo", "11514": "Backlog"}
+TICKET = re.compile(r"^(HTPR|HYFA|IGSH|HYCI)-[0-9]+$")
 RUNNERISH = re.compile(r"^(?:runner \d+|ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 VALENTIN_REVIEW = "Valentin Review"
 
@@ -83,7 +83,7 @@ def blockers(key):
     return out
 
 
-PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "YPER4": "4060", "HYCI": "11514"}
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "HYCI": "11514"}
 
 
 def lead_for(key):
@@ -370,7 +370,7 @@ def self_test():
     assert home_section(15, ["IMPROVEMENT ⚒️", "INBOX"], "Rethink") == "Improvements"
     assert home_section(15, ["brain-medium"], "[FEATURE] Sign in an agent") == "Features"
     assert home_section(15, [], "something") == "Bugs"
-    assert home_section(2060, [], "x") == "Todo" and home_section("4060", [], "x") == "Backlog" and home_section(11514, [], "x") == "Backlog"
+    assert home_section(2060, [], "x") == "Todo" and home_section(11514, [], "x") == "Backlog"
     t = {"ticketNumber": "HTPR-1", "pullRequests": [], "waitingOnUserId": None, "blockerCommentId": None}
     assert classify(t, ["HTPR-2"], {}) == ("waits", ["HTPR-2"])
     assert classify(t, [], {}) == ("unstarted", None)
@@ -381,7 +381,6 @@ def self_test():
     co = {"assignees": [{"agent": {"displayName": "Infra Runner 3"}}, {"agent": {"displayName": "Runner 6"}}]}
     assert co_holders(co, "RUNNER 6") == (["Runner 6"], ["Infra Runner 3"]), "the caller leaves, the owner stays"
     assert co_holders(co, "RUNNER 7") == ([], ["Infra Runner 3", "Runner 6"]), "a runner that is not assigned releases nothing"
-    assert lead_for("YPER4-1") == ("Chief Of Staff", "4060")
     assert lead_for("HTPR-1") == ("HT Product Lead", "15")
     assert lead_for("HYCI-1")[0] == "Chief Of Staff" and lead_for("IGSH-1")[0] == "Chief Of Staff"
     print("fleet/park self-test ok")

@@ -60,7 +60,7 @@ Before any work starts, in the tracker from step 0:
 
 - The task already is a ticket? Use it. Add one child or linked ticket per further deliverable.
 - Otherwise file one ticket per deliverable. On Hypertask, use the `hypertask` skill: it picks the board, checks duplicates and tags the label.
-- Hypertask boards: app on 15, agents and infra on 4060, Hypertask CI on 11514, Software Factory apps on 2060. Other projects use their own board.
+- Hypertask boards: app on 15, agents, infra and CI on 11514 (Fleet CI & Infra), Software Factory apps on 2060. Other projects use their own board.
 - Each ticket: plain words, the user's words quoted with `> `, and the gate ids that prove it.
 - Post the ticket links in one `Plan:` note on the first ticket.
 - Task-list fallback: each deliverable is one numbered line with its gate ids.
