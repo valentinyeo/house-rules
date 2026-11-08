@@ -129,7 +129,7 @@ It checks these checkouts without changing them:
 | Design | `hypertask` | Hypertask fleet, HTPR 15; [contract](../design-lead/runners.md) |
 | Growth | `hypertask-astro` | No runners; ships itself, MARK 2108; core product via HTPR 15; [contract](../marketing-lead/SKILL.md) |
 | Finance | `pecunia` | No finance runners; code through HT Product Lead |
-| CI Boss | `ci-boss` | CI runners `ht-ci-runner-N` on CI tickets, board Fleet CI 11514 (see house rules, Between managers) |
+| CI Boss | `ci-boss` | Owns board Fleet CI 11514; pool runners build CI tickets in the CI lane via `fleet/pick` (see house rules, Between managers) |
 
 Clean means no tracked or untracked changes.
 Fast-forwardable means local HEAD precedes the remote tip.

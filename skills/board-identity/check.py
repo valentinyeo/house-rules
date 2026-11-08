@@ -16,7 +16,7 @@ ROLES = {
     "HT Finance Lead": ("ht-finance-lead", {2462}, ("pecunia",),
                         "No finance runners; code requests go to HT Product Lead"),
     "CI Boss": ("ci-boss", {15, 4060, 2060}, ("ci-boss",),
-                "CI service, both fleets; CI label on 15, 4060, 2060; runners ht-ci-runner-N"),
+                "CI service, both fleets; CI label on 15, 4060, 2060; pool runners via fleet/pick"),
 }
 
 

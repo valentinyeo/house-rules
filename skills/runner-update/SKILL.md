@@ -15,7 +15,7 @@ You start no runners (Design, Growth or Finance lead)? Stop here. Do not count r
 
 | Project | Claude Code runners | hax (Codex) runners |
 |---|---|---|
-| Hypertask | tmux `ht-runners` panes titled `RUNNER N` / `SPEED RUNNER` | sessions `ht-hax-runner-N`; `~/.local/bin/ht-hax-runner status` |
+| Hypertask | tmux `ht-or-runner-N` via `fleet/runner`; `fleet/pick` offers tickets | same pool; `fleet/runner status` |
 | Software Factory | sessions `ceo-runner-6..10` | sessions `hax-runner-1..10`; `~/projects/ceo/bin/hax-runner <n>` |
 | Other | read your project's setup skill or RUNNER.md | same |
 
@@ -30,7 +30,7 @@ For each runner: active (working a ticket now) or idle. For every idle one, name
 ## 3. Act
 
 - Launching = your project's own launcher (table above). No add-runner skill needed.
-- Pacing, runner counts and reserves: see house rules, Models and harnesses (Pace every subscription). The pacer owns them. While load says `add` and the pacer wants more, start hax runners with your launcher (Hypertask: `ht-hax-runner top-up`; SF: `hax-runner <n>`).
+- Pacing, runner counts and reserves: see house rules, Models and harnesses (Pace every subscription). The pacer owns them. While load says `add` and the pacer wants more, the pacer and `fleet-switch` add pool runners; never revive retired per-lane launchers.
 - Claude runners follow the ladder. Claude is scarce: brake only Claude.
 - Restart dead or stuck runners. Unstick panes waiting on a prompt.
 - Idle for "no tickets"? Get tickets written or groomed. That is your gap to close.

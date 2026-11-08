@@ -233,7 +233,7 @@ The ticket's real board and view decide the scope, never the PR author or branch
 - `NO-TICKET`: no ticket key. File or link one.
 - `BOT`: dependabot. CI Boss's, not counted against workers.
 It only reads. Closing PRs stays with the lead, as its own GitHub identity.
-Same line red three runs in a row? The runner picker skips the PR queue. Fix the picker: `ht-or-runner-pick`, `mp-pick` or `mb-pick`.
+Same line red three runs in a row? The runner picker skips the PR queue. Fix `fleet/pick` in house-rules.
 
 ## 6f. Keep tickets clean: count chatter and fix its origin
 Valentin, 2026-11-06:

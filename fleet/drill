@@ -449,6 +449,10 @@ def drill_rule_drift(ctx):
     r = subprocess.run([sys.executable, str(REPO / "bin" / "rules-drift"), "--self-check"], capture_output=True, text=True)
     if r.returncode != 0 or "self-check PASS" not in (r.stdout or ""):
         return row("rule-drift", start, detected, None, False, "rules-drift self-check failed")
+    r = subprocess.run([sys.executable, str(REPO / "bin" / "rules-drift"), "--house-rules"], capture_output=True, text=True)
+    if r.returncode != 0:
+        err = (r.stdout or r.stderr or "rules-drift --house-rules failed").strip().splitlines()[-1]
+        return row("rule-drift", start, detected, None, False, err)
     return row("rule-drift", start, detected, detected, True, "")
 
 
