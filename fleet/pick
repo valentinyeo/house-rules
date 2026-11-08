@@ -23,7 +23,8 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
   WIP cap: the pool's pipeline (building columns on every fleet board plus new-work tickets with an open PR, one unit
      per ticket, minus incidents, open BlockedBy, waits on a person, design-pass and work outside the pool) at or over
      the live runners closes c0, d, e and f. Then only the PR queue and new-work tickets with an open PR remain.
-     Logged as "wip: N of M, new work closed".
+      Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI (11514)
+     tickets that are Urgent or that an open ticket is BlockedBy still go out, to runners that can join 11514 (LANE_CAP applies).
   c. Urgent new work on any board, then the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
   e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 4060
@@ -712,6 +713,19 @@ def held_back(t, own=False):
     return blocked(t)
 
 
+def blocks_open(t):
+    return any(is_open(k) for k in relations(t["key"])[1])
+
+
+def ci_blockers(cands):
+    """Fleet CI tickets the WIP cap must not hold: Urgent ones, then ones an open ticket waits on (one relations read per
+    ticket, so only the top BLOCK_LOOKUPS non-Urgent are checked). They unblock the pipeline the cap is waiting on."""
+    ci = [t for t in cands if t["board"] == "11514"]
+    urgent = [t for t in ci if t["prio"] == "Urgent"]
+    rest = [t for t in ci if t["prio"] != "Urgent"][:BLOCK_LOOKUPS]
+    return sorted(urgent + [t for t in rest if blocks_open(t)], key=lambda t: (t["prio"] != "Urgent", rank(t), t["created"]))
+
+
 def blocks_app(t):
     return any(PREFIX_BOARD.get(k.split("-")[0]) in ("15", "2060") for k in relations(t["key"])[1])
 
@@ -1086,6 +1100,10 @@ def choose(n, dry):
         t = attempt(sorted(finish, key=lambda t: (rank(t), t["created"])))
         if t:
             return t, "pr"
+        if not full():
+            t = attempt(ci_blockers(lane_new))
+            if t:
+                return t, "ci-lane"
         raise SystemExit(f"none: {wip}")
     if not full():
         # one relations read per ticket is slow, so only the top BLOCK_LOOKUPS non-Urgent tickets are checked
@@ -1296,6 +1314,31 @@ def wip_self_test():
             raise AssertionError("offered a ticket on a board the runner is not a member of")
         except SystemExit as e:
             assert str(e).startswith("none:"), e
+        # cap hit, Fleet CI blocker offered: Urgent and open-BlockedBy tickets go out, a plain one and a non-member do not
+        MEMBERS["11514"] = {"runner 1"}
+        full_wip = [tk("HTPR-50", "In Progress", "runner 2"), tk("HTPR-51", "AI Review", "runner 2"), tk("HTPR-52", "Bugs")]
+        ci = [tk("HYCI-2", "Backlog"), tk("HYCI-3", "Backlog"), tk("HYCI-4", "Backlog")]
+        ci[2]["prio"] = "Urgent"
+        SNAP = {"tickets": full_wip + ci, "rel": {t["key"]: [[], []] for t in full_wip + ci}, "prs": [], "incidents": [], "open": {}}
+        SNAP["rel"]["HYCI-3"] = [[], ["HTPR-52"]]
+        assert pipeline()[0] == {"HTPR-50", "HTPR-51"} and len(pipeline()[1]) == 2
+        assert [t["key"] for t in ci_blockers(ci)] == ["HYCI-4", "HYCI-3"], "Urgent first, then the one an open ticket waits on"
+        assert choose(1, True) == (ci[2], "ci-lane"), "cap hit: an Urgent Fleet CI ticket still goes out"
+        ci[2]["prio"] = "Medium"
+        assert choose(1, True) == (ci[1], "ci-lane"), "cap hit: a Fleet CI ticket that blocks an open ticket still goes out"
+        SNAP["rel"]["HYCI-3"] = [[], []]
+        try:
+            choose(1, True)
+            raise AssertionError("cap hit: a plain Fleet CI ticket started")
+        except SystemExit as e:
+            assert "new work closed" in str(e), e
+        SNAP["rel"]["HYCI-3"] = [[], ["HTPR-52"]]
+        MEMBERS["11514"] = {"runner 2"}
+        try:
+            choose(1, True)
+            raise AssertionError("cap hit: a non-member was offered a Fleet CI ticket")
+        except SystemExit as e:
+            assert "new work closed" in str(e), e
     finally:
         try_claim = real_claim
         (STATE / "stop-3").unlink()
