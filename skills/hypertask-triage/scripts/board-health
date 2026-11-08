@@ -390,6 +390,9 @@ def self_test():
     assert sp["E"][0] == [["vcc", "task", "move", "E", "Bugs"], ["vcc", "task", "unassign", "E", "--agent", "Runner 7"]]
     assert sp["C"][0][-1] == ["vcc", "task", "move", "C", "Bugs"], "nobody to unassign"
     assert sp["A"][1].startswith(NOTE) and "pull/1 closed" in sp["A"][1] and sp["B"][0][0][:3] == ["vcc", "task", "move"], "the App cannot close a PR outside hypertask-ai"
+    waits = plan_sendback([dict(rows["A"], why="it waits on an open BlockedBy ticket", waits=True)])
+    assert waits[0][1] == [["vcc", "task", "move", "A", "Bugs"], ["vcc", "task", "unassign", "A", "--agent", "Runner 9"]], \
+        "a ticket that waits on a blocker goes home like fleet/park --waits-on; its PR stays open"
     print("SELF_TEST_OK")
 
 
@@ -573,7 +576,9 @@ def plan_sendback(rows):
             continue
         link = TICKET_URL.format(b=r["board"], n=r["ticket"].rsplit("-", 1)[-1])
         cmds, why = [], r["why"]
-        if r["pr"] and "/hypertask-ai/" not in r["pr"]:
+        if r.get("waits"):  # fleet/park --waits-on: home column, unassigned, PR kept; fleet/pick skips it until the blocker is done
+            why += f" ({r['pr']} stays open)" if r["pr"] else ""
+        elif r["pr"] and "/hypertask-ai/" not in r["pr"]:
             why += f" ({r['pr']} stays open: the runner App cannot write there; the next runner adopts it)"
         elif r["pr"]:
             why += f" ({r['pr']} closed)"
@@ -629,9 +634,10 @@ def sendback_board(board, status):
     hold |= {pick.running(m) for m in range(1, pick.RUNNERS + 1)} | set(pick.claim_files())
     prs, live, now = open_pr_states(building), live_workers(), datetime.now(timezone.utc)
     rows = sendback_rows(board, tickets, prs, hold, live, now)
-    blocked = {r["ticket"] for r in rows if r["why"] and waits_on_open_ticket(r["ticket"])}
-    if blocked:  # a BlockedBy link governs the wait (the CI snag rule): its PR is red because of the blocker
-        rows = sendback_rows(board, tickets, prs, hold | blocked, live, now)
+    for r in rows:
+        # a BlockedBy link governs the wait (the CI snag rule): its PR is red because of the blocker, so the PR is kept
+        if r["why"] and waits_on_open_ticket(r["ticket"]):
+            r["why"], r["waits"] = "it waits on an open BlockedBy ticket", True
     return rows, plan_sendback(rows)
 
 
