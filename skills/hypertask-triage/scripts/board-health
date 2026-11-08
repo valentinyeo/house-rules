@@ -32,7 +32,7 @@ each. It re-enters the queue by priority. A live runner's ticket that moved in
 the last 3 hours, incidents, design-pass, tickets waiting on a person and
 merged tickets (wrong-status) stay. --only sendback limits it to this one.
 
-usage: board-health [--board 15] [--plan] [--fix [--only queue|sendback]] [--apply] [--alarm-board 4060] [--self-test]
+usage: board-health [--board 15] [--plan] [--fix [--only queue|sendback]] [--apply] [--alarm-board 11514] [--self-test]
 Exit 0 GREEN, 1 RED.
 """
 import argparse
@@ -53,9 +53,9 @@ sys.path.insert(0, str(HERE))
 import scopes  # noqa: E402
 STATE = Path.home() / ".local/state/board-health"
 ESCALATE_HOURS = 24
-LEADS = {15: "HT Product Lead", 4060: "Chief Of Staff", 11514: "Chief Of Staff", 2060: "Mini Boss CEO"}
+LEADS = {15: "HT Product Lead", 11514: "Chief Of Staff", 2060: "Mini Boss CEO"}
 CHATTER_LINE = 10
-FLOW_BOARDS = {15, 4060, 11514, 2060}
+FLOW_BOARDS = {15, 11514, 2060}
 
 # key: (what must hold, owner role, fix). Owner "lead" means the board's lead.
 INVARIANTS = {
@@ -89,7 +89,7 @@ INVARIANTS = {
              "run /runner-update and /runner-list; give each idle runner an orphan first, then the queue, or fix why it idles"),
     "status": ("no merged, closed or PR-less ticket in a pre-merge column", "lead",
                "merged: QA on board 15, Done elsewhere after the live check; closed or no PR: home column; "
-               "--fix does board 15 and 4060"),
+               "--fix does board 15 and 11514"),
     "prq": ("open PRs at most the workers, each on a ticket a live worker is building", "lead",
             "hand each orphan PR's ticket to an idle runner; close duplicates and PRs of closed tickets; "
             "red three runs: fix the runner picker's PR queue step"),
@@ -289,7 +289,7 @@ def self_test():
     assert head == "BOARD-HEALTH board 15: RED 4 of 13" and esc == ["wip"], (head, esc)
     assert any(l.startswith("ESCALATE  wip") and "HT Product Lead" in l for l in lines), lines
     rows = "HIS-OK            HTPR-1   R1  money 0 defects  https://app.hypertask.ai/detail/project-15/1  t\n" \
-           "HIS-BADLY-WRITTEN YPER4-2  R2  keys  3 defects  https://app.hypertask.ai/detail/project-4060/2  t\n"
+           "HIS-BADLY-WRITTEN HYCI-2  R2  keys  3 defects  https://app.hypertask.ai/detail/project-11514/2  t\n"
     assert pristine_on(15, rows) == (1, 1) and pristine_on(2108, rows) == (0, 0), "pristine must stay on its board"
     assert measure(flow, rows, None, board=2108)["pristine"][0] == 0, "other boards' blockers turned this one red"
     busy = {"rows": [], "summary": {**flow["summary"], "queue": 0, "ownership": {
@@ -322,16 +322,15 @@ def self_test():
     assert plan["HTPR-5"][0] == [] and "ready to close" in plan["HTPR-5"][1]
     assert "C" not in plan, "board-health must not default-tag: the brain tagger owns untagged tickets"
     assert "A" not in plan and plan["B"][0] == [["vcc", "task", "unassign", "B", "--agent", "Runner 1"]], "kept the wrong ticket"
-    assert "HTPR-6" not in {n for n, _, _ in plan_fixes(4060, None, st)}, "merged moves to QA only on board 15"
+    assert "HTPR-6" not in {n for n, _, _ in plan_fixes(11514, None, st)}, "merged moves to QA only on board 15"
     solo = {"rows": [{"ticket": "P1", "idle_h": 1}, {"ticket": "P2", "idle_h": 5}],
             "summary": {"ownership": {"doubles": {"Postbox Dev": ["P1", "P2"]}}}}
     assert plan_fixes(2060, solo, None)[0][:2] == ("P2", [["vcc", "task", "move", "P2", "Todo"],
                                                           ["vcc", "task", "unassign", "P2", "--agent", "Postbox Dev"]]), \
         "a solo dev's extra ticket goes to the queue: no pool runner adopts it from Doing"
-    live_st = {"rows": [{"ticket": "YPER4-6", "verdict": "MERGED-NOT-MOVED", "pr": "a#2", "column": "AI Review", "live": True},
+    live_st = {"rows": [{"ticket": "HYCI-6", "verdict": "MERGED-NOT-MOVED", "pr": "a#2", "column": "AI Review", "live": True},
                         {"ticket": "HYCI-7", "verdict": "NO-PR", "pr": None, "column": "AI Review", "title": "x", "labels": []}]}
-    assert plan_fixes(4060, None, live_st)[0][1] == [["vcc", "task", "move", "YPER4-6", "Done"]], "merged and live: Done"
-    assert plan_fixes(11514, None, live_st) == [("YPER4-6", [["vcc", "task", "move", "YPER4-6", "Done"]],
+    assert plan_fixes(11514, None, live_st) == [("HYCI-6", [["vcc", "task", "move", "HYCI-6", "Done"]],
                                                  f"{NOTE} moved to Done. Its PR a#2 is merged and live.")], \
         "no HOME map on 11514: sendback moves PR-less tickets there"
     pats = [scopes._pattern(p) for p in ("Runner {n}", "HT Design Builder")]
@@ -397,13 +396,13 @@ def self_test():
     print("SELF_TEST_OK")
 
 
-QUEUE_FIX_BOARDS = {15, 4060, 2060, 11514}
+QUEUE_FIX_BOARDS = {15, 2060, 11514}
 KEEP_COLUMNS = re.compile(r"^(in progress|doing|ai review|qa|agent blocked.*|valentin review)$", re.I)
 SHIPPED = re.compile(r"^(done|flag:|no flag)", re.I)
 # View leads and specialists keep their holds: they are not runners (Chief Of Staff, 2026-11-07).
 QUEUE_EXEMPT = {"postbox dev", "multiprompt android dev", "ht design builder"}
 QUEUE_NOTE = "Unassigned from {who}: runners hold one ticket until live. YPER4-1371."
-HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}, 4060: {"other": 10414}}
+HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}}
 NOTE = "board-health fix:"
 
 
@@ -474,7 +473,7 @@ def queue_rows(tickets, patterns):
 def queue_holds(board):
     """Read only: the queue rows for one whole board. A runner holds one ticket until live on any board, so
     workers come from every scope on the four fleet boards, as fleet/snapshot counts them (app runners
-    hold Backlog tickets on board 4060)."""
+    hold Backlog tickets on board 11514)."""
     live = scopes.sessions()
     patterns = [p for b in sorted(QUEUE_FIX_BOARDS) for k in scopes.for_board(b) for p in scopes.workers(scopes.get(k), live)[0]]
     return queue_rows(board_tickets(board), patterns)
@@ -504,7 +503,7 @@ def queue_counts(rows):
 # Send back abandoned work (Valentin 2026-11-07: "what do we do with abandoned tickets? we have 5 runners").
 # Closest to live stays for the orphan lane in fleet/pick: QA (merged, the live check) and a green, mergeable PR.
 # The rest of the building columns goes back to the queue, unassigned, and re-enters it by priority.
-BUILD_COLUMNS = {15: ("In Progress", "AI Review"), 2060: ("Doing", "AI Review"), 4060: ("In Progress", "AI Review"),
+BUILD_COLUMNS = {15: ("In Progress", "AI Review"), 2060: ("Doing", "AI Review"),
                  11514: ("In Progress", "AI Review")}
 SENDBACK_IDLE_H = 48
 WORKING_H = 3  # a live runner's ticket that moved within this many hours is being worked
@@ -667,7 +666,7 @@ def fleet_line():
     except (RuntimeError, OSError, ValueError) as e:
         return f"FLEET pipeline unknown: {type(e).__name__}: {e}"
     workers = live_workers()
-    return (f"FLEET pipeline {len(building)} tickets in In Progress, AI Review and QA on boards 15, 2060, 4060, 11514 "
+    return (f"FLEET pipeline {len(building)} tickets in In Progress, AI Review and QA on boards 15, 2060, 11514 "
             f"for {len(workers)} live workers{' OVER' if len(building) > len(workers) else ''}. Pool {pick.wip_line(units, pool, excluded)}")
 
 

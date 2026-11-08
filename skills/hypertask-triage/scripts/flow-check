@@ -51,14 +51,9 @@ BOARDS = {
         "blocked_cap": 5,
         "qa_cap": 15,
     },
-    4060: {
-        "in_progress": "In Progress",
-        "waits": {"AI Review": 6, "Agent Blocked": 24},
-        "blocked_cap": 5,
-    },
     11514: {
         "in_progress": "In Progress",
-        "waits": {"AI Review": 6},
+        "waits": {"AI Review": 6, "Agent Blocked": 24},
         "blocked_cap": 5,
     },
     2060: {
@@ -99,7 +94,7 @@ def ci_block(log):
 
 
 def ci_link(relations):
-    """House rule 2026-11-06: the app ticket is linked BlockedBy its Fleet CI ticket on board 11514."""
+    """House rule 2026-11-06: the app ticket is linked BlockedBy its Fleet CI & Infra ticket on board 11514."""
     for rel in relations:
         other = rel.get("otherTask") or {}
         if other.get("projectId") == 11514 and "block" in (rel.get("relationType") or "").lower() \

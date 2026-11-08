@@ -14,7 +14,7 @@ Default board: your fleet's product board (Hypertask: 15). Software Factory: its
 
 ## How often to run it
 Two layers. The script runs on a timer, the chief session works what it cannot fix.
-- Script, every hour at :05: timer `ht-board-health` runs `board-health --fix --apply` for 15 and 4060, `--apply` for 11514, and a read-only run for 2060 and each Software Factory view scope. Safe fixes happen even when no chief is awake. Output: `~/.local/state/board-health/last-<scope>.log` (`/` becomes `-`). Alarms bump at most once a day.
+- Script, every hour at :05: timer `ht-board-health` runs `board-health --fix --apply` for 15 and 11514, and a read-only run for 2060 and each Software Factory view scope. Safe fixes happen even when no chief is awake. Output: `~/.local/state/board-health/last-<scope>.log` (`/` becomes `-`). Alarms bump at most once a day.
 - Chief session, every hour at :20: read the last logs, work each red line. The script runs at :05, so the log is fresh by :20. A session cron dies with its session, so check `CronList` at every shift start and recreate it when missing: `CronCreate` cron `20 * * * *`, prompt `/hypertask-triage step 0: read ~/.local/state/board-health/last-*.log, work every red line, rerun board-health until GREEN`. Never more often: runners take about an hour per ticket.
 - Full clean-up (steps 1 to 7): once a day at 08:00 London, a second session cron `0 8 * * *`, prompt `/hypertask-triage`. The blocker check also runs alone at 07:30.
 - Right away after big changes: a runner restart or a batch of merges.
@@ -25,16 +25,16 @@ Valentin, 2026-11-06:
 
 `~/.local/share/house-rules/skills/hypertask-triage/scripts/board-health --board 15 --fix --apply`
 Run it for every scope you own. A scope is a board, or a board view one lead owns.
-- Hypertask: 15, 4060, 11514.
+- Hypertask: 15, 11514.
 - Software Factory: 2060 (Mini Boss CEO), plus views `2060/multi-bot`, `2060/postbox`, `2060/multi-bot-android`.
 - A view lead or solo dev runs `board-health --scope 2060/postbox`. It scores only that view's tickets and PRs.
 Scopes live in `scripts/scopes.json`: board, view, lead, alarm board, repos and workers.
 New lead, view, solo dev or runner pool? Add it there the same turn. Both caps read the same worker list.
 Worker kinds: a tmux pool (`ht-or-runner-` = Runner N), one exact session (solo dev `postbox` = Postbox Dev), a runner state file, or always-on (HT Design Builder).
 
-`--fix` runs the safe fixes first, then scores. Each gets an agent-lane note. Board 15 and 4060 only, except the queue fix below.
+`--fix` runs the safe fixes first, then scores. Each gets an agent-lane note. Board 15 and 11514 only, except the queue fix below.
 
-Free the queue (YPER4-1371): a runner holds one ticket until live. `board-health --board <15|2060|4060|11514> --plan --only queue` lists every ticket a worker holds in a column nobody builds in (Bugs, Features, Improvements, Backlog, Todo, UX needed, UX Sign-off, Later (parked)) and writes nothing. `--fix --only queue` unassigns them, one agent-lane note each. Agent Blocked, Valentin Review and building columns keep their holds. Workers come from all four fleet boards, so app runners holding board 4060 Backlog tickets count. Postbox Dev, Multiprompt Android Dev and HT Design Builder are exempt (view leads and specialist). Boards 2060 and 11514 run it by hand only.
+Free the queue (YPER4-1371): a runner holds one ticket until live. `board-health --board <15|2060|11514> --plan --only queue` lists every ticket a worker holds in a column nobody builds in (Bugs, Features, Improvements, Backlog, Todo, UX needed, UX Sign-off, Later (parked)) and writes nothing. `--fix --only queue` unassigns them, one agent-lane note each. Agent Blocked, Valentin Review and building columns keep their holds. Workers come from all three fleet boards, so app runners holding board 11514 Backlog tickets count. Postbox Dev, Multiprompt Android Dev and HT Design Builder are exempt (view leads and specialist). Board 2060 runs it by hand only.
 - Merged ticket before QA: moves to QA (board 15).
 - No PR in AI Review, or PR closed: back to its home column.
 - No brain tag: brain-medium.
@@ -60,7 +60,7 @@ Each line shows "Was N, now M" since the last run. `TREND` shows tickets being b
 - Work the reds in order, top first. Then rerun.
 - Your own lines (fleet chief, Chief Of Staff): fix them now.
 - A lead's or CI Boss's line: one agent-lane note on its alarm ticket, with the tickets. Never do runner work yourself.
-- Red over a day prints `ESCALATE`. `--apply` files or bumps one Urgent "Board health" alarm on 4060.
+- Red over a day prints `ESCALATE`. `--apply` files or bumps one Urgent "Board health" alarm on 11514.
 - Same line red on three runs in a row? The owner's loop is broken. Fix that loop's skill or script, not the tickets.
 - The steps below are the detail behind each line. Run one when its line is red.
 
@@ -90,7 +90,7 @@ Valentin, 2026-11-02:
 
 > rewrite /hypertask-triage so it does this next time by itself?
 
-`~/.local/share/house-rules/skills/hypertask-triage/scripts/blocker-review --boards 15,4060 --apply`
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/blocker-review --boards 15,11514 --apply`
 
 It reads his inbox tab "Blocked by you" plus every Valentin Review column.
 It also runs by itself daily at 07:30 Berlin (timer `blocker-review`, log `~/.local/state/blocker-review.log`). Run it by hand on every triage too.
@@ -112,7 +112,7 @@ So the whole ticket is checked, not only the Question:
 `PRISTINE X of Y` counts tickets that break no rule. HIS-OK needs zero breaks.
 Every other ticket gets the rewrite note: fix each flagged comment, then fix the origin.
 
-Clear = agent-lane note, his name off, ticket back to its home column (board 15: Bugs, Features or Improvements by title and label; 4060: Backlog).
+Clear = agent-lane note, his name off, ticket back to its home column (board 15: Bugs, Features or Improvements by title and label; 11514: Backlog).
 Tickets on another lead's board are listed as "left for <lead>". That lead runs this step on its turn.
 
 ## 5. Read every NOT-HIS and ANSWERED row
@@ -132,8 +132,8 @@ Several in one class? Propose one fix that ends the class. Examples: one page wi
 Only money, keys and going public need his yes. Build the rest.
 
 ## 6b. Sweep the Agent Blocked columns and cap every waiting column
-`pileup-watch --apply` runs daily after blocker-review. Over a cap it files one urgent alarm ticket on board 4060. Clear the column that day.
-The same run holds the backlog cap on Fleet CI (11514) and Fleet Infra (4060): at most 2 open tickets per live pool runner. Over it, the oldest tickets untouched 7 days are archived with a note. Incident, busy, open-PR, waiting, security, alarm and app-blocking tickets are never archived.
+`pileup-watch --apply` runs daily after blocker-review. Over a cap it files one urgent alarm ticket on board 11514. Clear the column that day.
+The same run holds the backlog cap on Fleet CI & Infra (11514): at most 2 open tickets per live pool runner. Over it, the oldest tickets untouched 7 days are archived with a note. Incident, busy, open-PR, waiting, security, alarm and app-blocking tickets are never archived.
 Valentin, 2026-11-02:
 > 99 tickets in agent blocked infrA? wtf is going ion there?
 
@@ -149,7 +149,7 @@ Valentin, 2026-11-05:
 > I see 20 tickets in progress. That's impossible. We don't have that many runners.
 
 `~/.local/share/house-rules/skills/hypertask-triage/scripts/flow-check --board 15`
-Also run it for 4060 and 11514.
+Also run it for 11514.
 
 A runner stays on one ticket until it ships. So:
 - In Progress never holds more tickets than live runners. More? It prints `IMPOSSIBLE`.
@@ -162,7 +162,7 @@ A runner stays on one ticket until it ships. So:
 It only reads. It flags; it moves nothing.
 Report every flagged row to the board's lead, as full links in your reply.
 The lead sends each ticket back to a runner or to its home column.
-Same flag on the next run? The lead's sweep is broken. File that on board 4060.
+Same flag on the next run? The lead's sweep is broken. File that on board 11514.
 
 ## 6d. Count tickets with no brain tag
 Every open ticket needs one brain tag: `brain-light`, `brain-medium`, `brain-hard` or `brain-extra-hard`.
@@ -172,12 +172,12 @@ flow-check prints `NO-BRAIN board N: X of Y open tickets have no brain tag`, spl
 Done and flag columns are skipped. The full list is in its `--json` file.
 It only counts. It tags nothing.
 Report the count per board. Send the list to the board's lead to tag.
-A board with no brain labels at all? File that once on board 4060.
+A board with no brain labels at all? File that once on board 11514.
 
 ## 6e. Flag tickets blocked by CI
 CI Boss owns CI, on the fleet CI board https://app.hypertask.ai/project?id=11514.
 CI Boss slow? Product tickets pile up behind it.
-House rule, CI snag (2026-11-06): one Fleet CI ticket per CI problem on 11514. Search first, +1 the existing one; new ticket only if none and the board is under its cap. `vcc` enforces it through `filing-gate`.
+House rule, CI snag (2026-11-06): one Fleet CI & Infra ticket per CI problem on 11514. Search first, +1 the existing one; new ticket only if none and the board is under its cap. `vcc` enforces it through `filing-gate`.
 The app ticket stays on its board, linked BlockedBy that CI ticket, and waits. App sessions never fix CI.
 Fix ships: CI Boss's `ci-unblock-waiters` posts a continue note in the app ticket's agent lane and clears the wait.
 
@@ -205,7 +205,7 @@ Valentin, 2026-11-06:
 > a bunch of tickets that are in AI review, but really the feature is already in the app ... the runner just forgot to move it
 
 `~/.local/share/house-rules/skills/hypertask-triage/scripts/wrong-status --board 15`
-Also 4060, 11514, and Software Factory 2060. board-health shows it as the `status` line.
+Also 11514 and Software Factory 2060. board-health shows it as the `status` line.
 
 It reads every GitHub PR link on each work ticket and asks GitHub for the newest PR's state.
 - `MERGED-NOT-MOVED`: PR merged, ticket still before merge. Board 15: move to QA for the live proof. Other boards: merged means released; check it live, then Done.
@@ -239,7 +239,7 @@ Same line red three runs in a row? The runner picker skips the PR queue. Fix `fl
 Valentin, 2026-11-06:
 > Every bot has currently this problem that agent chatter is just out of control ... force the chief of staff for each of the departments to run this skill and then get active fixing the house rules that caused the agent chatter on the ticket.
 
-`~/.local/share/house-rules/skills/hypertask-triage/scripts/ticket-check --board 15 --alarm-board 4060`
+`~/.local/share/house-rules/skills/hypertask-triage/scripts/ticket-check --board 15 --alarm-board 11514`
 Run it for each board your fleet writes on.
 
 It lints every new ticket and people comment from the last 24 hours, with ticket-lint.

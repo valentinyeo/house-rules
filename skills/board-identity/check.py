@@ -15,8 +15,8 @@ ROLES = {
                        "Hypertask fleet; MARK 2108; see marketing-lead/SKILL.md"),
     "HT Finance Lead": ("ht-finance-lead", {2462}, ("pecunia",),
                         "No finance runners; code requests go to HT Product Lead"),
-    "CI Boss": ("ci-boss", {15, 4060, 2060}, ("ci-boss",),
-                "CI service, both fleets; CI label on 15, 4060, 2060; pool runners via fleet/pick"),
+    "CI Boss": ("ci-boss", {15, 11514, 2060}, ("ci-boss",),
+                "CI and infra service, both fleets; owns Fleet CI & Infra 11514; CI label on 15, 2060; pool runners via fleet/pick"),
 }
 
 

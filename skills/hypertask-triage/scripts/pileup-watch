@@ -10,13 +10,13 @@ Done.
 Valentin, 2026-11-02: "this type of pile up is not acceptable".
 
 Backlog cap (Valentin, 2026-11-08: "archive everything that we dont need to keep working"): the
-self-maintenance boards Fleet CI (11514) and Fleet Infra (4060) hold at most 2 open tickets per live pool
+self-maintenance board Fleet CI & Infra (11514) holds at most 2 open tickets per live pool
 runner. Over it, the oldest tickets untouched for 7 days are archived (status Archive, reversible) with a note in
 their agent lane, until the board is back under the cap. Never archived: Incident, In Progress / AI Review / QA,
 open PR, waiting on a person, security, or a ticket an open app ticket on board 15 or 2060 is BlockedBy.
 
-usage: pileup-watch [--caps 15:QA=15,4060:Agent Blocked=5] [--alarm-board 4060]
-                    [--alarm-section 10414] [--done-section 10412] [--backlog-boards 11514,4060] [--apply]
+usage: pileup-watch [--caps 15:QA=15,11514:Agent Blocked=5] [--alarm-board 11514]
+                    [--alarm-section 32923] [--done-section 32929] [--backlog-boards 11514] [--apply]
 Without --caps it uses the Hypertask caps below. Other fleets pass their own.
 """
 import os
@@ -40,15 +40,15 @@ HT_CAPS = {
         "Flag: Only Me + QA": (10, "HT Product Lead"),
         "In Progress": (15, "HT Product Lead"),
     },
-    4060: {
-        "Agent Blocked": (5, "HT Product Lead"),
-        "AI Review": (10, "HT Product Lead"),
-        "Valentin Review": (10, "HT Product Lead"),
-        "In Progress": (15, "HT Product Lead"),
+    11514: {
+        "Agent Blocked": (5, "CI Boss"),
+        "AI Review": (10, "CI Boss"),
+        "Valentin Review": (10, "CI Boss"),
+        "In Progress": (15, "CI Boss"),
     },
 }
 STALE_DAYS = 3
-BACKLOG_BOARDS = "11514,4060"
+BACKLOG_BOARDS = "11514"
 BACKLOG_PER_RUNNER = 2
 BACKLOG_UNTOUCHED_DAYS = 7
 BACKLOG_MIN_RUNNERS = 5  # house rules: never under 5 runners
@@ -227,9 +227,9 @@ def backlog_cap(boards, apply, now):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--caps", default="")
-    p.add_argument("--alarm-board", type=int, default=4060)
-    p.add_argument("--alarm-section", default="10414")
-    p.add_argument("--done-section", default="10412")
+    p.add_argument("--alarm-board", type=int, default=11514)
+    p.add_argument("--alarm-section", default="32923")
+    p.add_argument("--done-section", default="32929")
     p.add_argument("--labels", default="Infra")
     p.add_argument("--backlog-boards", default=BACKLOG_BOARDS, help="comma list; empty turns the backlog cap off")
     p.add_argument("--apply", action="store_true")

@@ -15,9 +15,9 @@ Get your own board login. Do it yourself. Never ask Valentin: this rule already 
 | design-lead | HT Design Lead | ht-design-lead | 15 |
 | marketing-lead | HT Growth Lead | ht-growth-lead | 2108, 15 |
 | finance-lead | HT Finance Lead | ht-finance-lead | 2462 |
-| Infra lead (house rule) | Infra Lead | infra-lead | 4060, 15, 2060 (member only, owns 4060) |
-| CI Boss (house rule) | CI Boss | ci-boss | 15, 4060, 2060 |
-| Chief Of Staff | Chief Of Staff | chief-of-staff | 15, 473, 1215, 2060, 2101, 2108, 2128, 2462, 2467, 4060, 8783, 10450, 10958, 11514, 11612 |
+| Infra lead (house rule) | Infra Lead | infra-lead | 11514, 15, 2060 (member only, owns no board) |
+| CI Boss (house rule) | CI Boss | ci-boss | 11514 (owns Fleet CI & Infra), 15, 2060 |
+| Chief Of Staff | Chief Of Staff | chief-of-staff | 15, 473, 1215, 2060, 2101, 2108, 2128, 2462, 2467, 8783, 10450, 10958, 11514, 11612 |
 
 Set these for your row, in every shell call below (`h` is `ht` with a retry on "Rate limit"):
 
@@ -129,7 +129,7 @@ It checks these checkouts without changing them:
 | Design | `hypertask` | Hypertask fleet, HTPR 15; [contract](../design-lead/runners.md) |
 | Growth | `hypertask-astro` | No runners; ships itself, MARK 2108; core product via HTPR 15; [contract](../marketing-lead/SKILL.md) |
 | Finance | `pecunia` | No finance runners; code through HT Product Lead |
-| CI Boss | `ci-boss` | Owns board Fleet CI 11514; pool runners build CI tickets in the CI lane via `fleet/pick` (see house rules, Between managers) |
+| CI Boss | `ci-boss` | Owns board Fleet CI & Infra 11514; pool runners build CI tickets in the CI lane via `fleet/pick` (see house rules, Between managers) |
 
 Clean means no tracked or untracked changes.
 Fast-forwardable means local HEAD precedes the remote tip.

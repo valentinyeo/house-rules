@@ -27,7 +27,7 @@ STATES = (
     "FAULT",
 )
 WAIT_LIMIT = 30 * 60
-TICKET = re.compile(r"\b((?:HTPR|HYFA|IGSH|YPER4|HYCI)-\d+)\b")
+TICKET = re.compile(r"\b((?:HTPR|HYFA|IGSH|HYCI)-\d+)\b")
 DONE = re.compile(r"\b(?:INFRA |CI )?RUNNER DONE\b")
 HUMAN = re.compile(r"\bvalentin\b|flag approval", re.I)
 WAIT = re.compile(r"ci-blocked|checks pending|awaiting checks|\bCI pending\b|\brecheck\b", re.I)

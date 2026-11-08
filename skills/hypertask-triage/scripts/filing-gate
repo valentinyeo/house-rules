@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Cut self-maintenance tickets at the source: vcc asks this before every new ticket on Fleet CI or Fleet Infra.
+"""Cut self-maintenance tickets at the source: vcc asks this before every new ticket on Fleet CI & Infra.
 
 Valentin, 2026-11-08: "210 tickets to build 3 apps!!!!!!!!!! that is insane".
 
-On boards 11514 (Fleet CI) and 4060 (Fleet Infra):
+On board 11514 (Fleet CI & Infra):
 1. An open ticket with a near-duplicate title exists: add a +1 note to its agent lane, print its link, file nothing.
 2. The board holds its backlog cap (2 open tickets per live pool runner, the pileup-watch cap) or more:
    file nothing.
+Board 4060 (old Fleet Infra) is archived (Valentin, 8 Nov): a ticket for it is refused, file on 11514.
 A ticket labelled Incident skips both: outage filers (production-red-alert, fleet-watch) keep their own dedupe.
 Any other board, or any other command: allowed, no network call.
 A board read that fails lets the ticket through with a warning, so a rate limit never blocks an outage.
@@ -29,7 +30,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 pileup = importlib.machinery.SourceFileLoader("pileup_watch", os.path.join(HERE, "pileup-watch")).load_module()
 dupes = importlib.machinery.SourceFileLoader("board_dupes", os.path.join(HERE, "board-dupes")).load_module()
 
-BOARDS = {11514: "Fleet CI", 4060: "Fleet Infra"}
+BOARDS = {11514: "Fleet CI & Infra"}
+RETIRED = {4060: 11514}
 SAME = 0.6  # board-dupes default
 RUNNER_CACHE = os.path.expanduser("~/.local/state/filing-gate/runners.json")
 RUNNER_CACHE_SECONDS = 900
@@ -82,7 +84,7 @@ def numbers(title):
 
 
 def score(a, b):
-    """board-dupes word overlap; titles naming different numbers (board 15 vs board 4060) never match."""
+    """board-dupes word overlap; titles naming different numbers (board 15 vs board 2060) never match."""
     wa, wb = dupes.words(a), dupes.words(b)
     if not wa or not wb or numbers(a) != numbers(b):
         return 0.0
@@ -101,6 +103,9 @@ def main():
     a = p.parse_args()
     args = a.args[1:] if a.args[:1] == ["--"] else a.args
     parsed = create_args(args)
+    if parsed and parsed[0] in RETIRED:
+        print(f"REFUSE board {parsed[0]} is archived: file on board {RETIRED[parsed[0]]} (Fleet CI & Infra)")
+        return REFUSE
     if not parsed or parsed[0] not in BOARDS:
         return 0
     board, title, labels = parsed

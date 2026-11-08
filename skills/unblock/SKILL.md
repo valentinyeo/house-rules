@@ -15,14 +15,14 @@ Not in poteto mode? Stop and tell the owner lead to restart the session with it.
 Valentin, 2026-10-30: "the whole skill of /unblock should start with /pstack:poteto-mode".
 
 ## 1. List
-`python3 ~/.local/share/house-rules/skills/tickets/scripts/blocker-sweep.py 15 4060 2060`
+`python3 ~/.local/share/house-rules/skills/tickets/scripts/blocker-sweep.py 15 11514 2060`
 Add any board in the inbox Decisions split: https://app.hypertask.ai/inbox?split=Decisions
 Write the count. It is the "before" number.
 STALE lines are already decided by the sweep: clear them without a full read.
 
 ## 2. Read each one
 Ticket, marked Question, last 5 comments, bound PR state (`gh pr view`).
-Owner lead: board 15 HT Product Lead; 4060 Infra Lead; 2060 and SF boards Mini Boss CEO.
+Owner lead: board 15 HT Product Lead; 11514 CI Boss; 2060 and SF boards Mini Boss CEO.
 
 ## 3. Classify (first match wins)
 | Class | Test | Do |
@@ -31,7 +31,7 @@ Owner lead: board 15 HT Product Lead; 4060 Infra Lead; 2060 and SF boards Mini B
 | Not his | House rule "Never block Valentin on non-decisions", or a line in `learned.md` | Decide per the recommendation. Clear it. |
 | His | Money, paid calls, keys, going public, prod data deletion, needs him at his PC | Keep. Go to step 5. |
 
-Clear = agent-lane comment with the reason, then `vcc task waiting-on T --user none` (boards 15, 4060) or plain `hypertask` (2060).
+Clear = agent-lane comment with the reason, then `vcc task waiting-on T --user none` (boards 15, 11514) or plain `hypertask` (2060).
 The red border (blockerCommentId) has no CLI yet. Note it in the agent lane.
 Until https://app.hypertask.ai/detail/project-15/8200 ships, cleared tickets stay in his Decisions inbox. Only his own reply removes them. Say so in the report.
 ANSWERED with a question from him? It waits on the lead now. Point the lead at it.
@@ -59,10 +59,10 @@ Fails and you can fix the facts in under 5 minutes? Research it yourself. Give h
 Otherwise press the lead to rewrite (step 6). Never rewrite runner tickets yourself past that.
 
 ## 6. Press the lead
-One ticket per lead per run: board 4060 for HT Product Lead, 2060 for Mini Boss CEO.
+One ticket per lead per run: board 11514 for HT Product Lead, 2060 for Mini Boss CEO.
 Leads are agents under Valentin's login, so they cannot be assigned.
 Point Mini Boss at it: `session-say projects "<ticket link>" --from <you>`.
-HT Product Lead refuses session messages. It reads 4060 on its own.
+HT Product Lead refuses session messages. It reads 11514 on its own.
 Title: "Ticket quality: N blockers on Valentin badly written".
 One bullet per ticket: link, which rule broke, what good looks like.
 Ask the lead to fix the runner's skill or wrapper, not only the ticket.

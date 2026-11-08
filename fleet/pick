@@ -2,7 +2,7 @@
 """One ticket picker for every runner (YPER4-1371).
 
     fleet/pick <N> [--dry-run] [--json]    pick (and claim) one ticket for Runner N
-    fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 4060, 11514?
+    fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 11514?
     fleet/pick --wip                       read only: wip: N of M, the units counted and the ones left out
 
 Valentin 2026-11-07: one pool, Runner 1..N, each runner on the engine the pacer gives it (engine-N, else the engine file,
@@ -23,14 +23,14 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
   WIP cap: the pool's pipeline (building columns on every fleet board plus new-work tickets with an open PR, one unit
      per ticket, minus incidents, open BlockedBy, waits on a person, design-pass and work outside the pool) at or over
      the live runners closes c0, d, e and f. Then only the PR queue and new-work tickets with an open PR remain.
-      Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI (11514)
+      Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI & Infra (11514)
      tickets that are Urgent or that an open ticket is BlockedBy still go out, to runners that can join 11514 (LANE_CAP applies).
-  Kept slot (HYCI-186): while no other runner is on a checks-board (11514) or tools-board (4060) ticket, this runner takes
+  Kept slot (HYCI-186): while no other runner is on a Fleet CI & Infra (11514) ticket, this runner takes
      one before its own app ticket, before orphans and before the PR queue. The WIP cap and LANE_CAP do not hold that one
      ticket. The stderr line starts with "kept slot:". App work only when no such ticket is open.
   c. Urgent new work on any board, then the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
-  e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 4060
+  e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 11514
   f. the rest of the CI or infra lane, same cap
 One runner holds one ticket until it is live. brain-extra-hard is skipped everywhere.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
@@ -88,11 +88,10 @@ ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without 
 BOARDS = {
     "15": (("Bugs", "Improvements", "Features"), ("In Progress", "AI Review", "QA")),
     "2060": (("Todo",), ("Doing", "AI Review")),
-    "4060": (("Backlog",), ("In Progress", "AI Review")),
     "11514": (("Backlog",), ("In Progress", "AI Review")),
 }
 BOARD_ORDER = {b: i for i, b in enumerate(BOARDS)}
-PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "YPER4": "4060", "HYCI": "11514"}
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "HYCI": "11514"}
 RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 CI_LABELS = {"ci", "hypertask ci"}
 BASE_SKIP = {"brain-extra-hard"}
@@ -126,7 +125,7 @@ ENGINES = {
 }
 ENGINE = "cursor"
 RUN_START = re.compile(r"^\S+ (?:cursor|hax|claude): (.*)$")
-TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|YPER4|HYCI)-([0-9]+)\b")
+TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|HYCI)-([0-9]+)\b")
 RETIRED = re.compile(r"^(?:ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 PR_REPO = "hypertask-ai/hypertask"
 
@@ -392,9 +391,11 @@ def is_ci(t):
 
 
 def lane(t):
+    if t["board"] == "11514" and not set(t["labels"]) & CI_LABELS:
+        return "infra"
     if is_ci(t):
         return "ci"
-    return {"15": "app", "2060": "sf", "4060": "infra"}[t["board"]]
+    return {"15": "app", "2060": "sf"}[t["board"]]
 
 
 def in_lane(t):
@@ -683,7 +684,7 @@ def eligible_new(t):
         return sf_eligible(t)
     if t["board"] == "15" and not is_ci(t):
         return not labels & SKIP_APP and not any(h[1] for h in t["holders"])
-    if t["board"] == "4060":
+    if t["board"] == "11514":
         return not labels & SKIP_INFRA
     return True
 
@@ -833,7 +834,7 @@ def other_on_blocker(n):
         if m == n:
             continue
         key = active_run(m)
-        if key and key.startswith(("HYCI-", "YPER4-")):
+        if key and key.startswith("HYCI-"):
             return key
     now_s = time.time()
     try:
@@ -841,21 +842,21 @@ def other_on_blocker(n):
             if path.name.startswith(".") or now_s - path.stat().st_mtime >= FRESH_CLAIM:
                 continue
             who, key = path.read_text().split("\t")[:2]
-            if who != str(n) and key.startswith(("HYCI-", "YPER4-")):
+            if who != str(n) and key.startswith("HYCI-"):
                 return key
     except OSError:
         pass
     for key, who in virtual_claims().items():
-        if who != str(n) and key.startswith(("HYCI-", "YPER4-")):
+        if who != str(n) and key.startswith("HYCI-"):
             return key
     return None
 
 
 def slot_candidates(n, me, skip):
-    """(candidates, log line or None). Candidates are checks-board and tools-board tickets this runner may take."""
+    """(candidates, log line or None). Candidates are Fleet CI & Infra (11514) tickets this runner may take."""
     cands, missed, waiting = [], False, False
     for t in SNAP["tickets"]:
-        if t["board"] not in ("11514", "4060"):
+        if t["board"] != "11514":
             continue
         if t["waiting"] or "design-pass" in t["labels"] or set(t["labels"]) & SKIP_ALL or t["key"] in skip or repark_suppressed(t):
             continue
@@ -898,7 +899,7 @@ def take_kept_slot(n, me, cands, dry):
 
 
 def ci_blockers(cands):
-    """Fleet CI tickets the WIP cap must not hold: Urgent ones, then ones an open ticket waits on (one relations read per
+    """Fleet CI & Infra tickets the WIP cap must not hold: Urgent ones, then ones an open ticket waits on (one relations read per
     ticket, so only the top BLOCK_LOOKUPS non-Urgent are checked). They unblock the pipeline the cap is waiting on."""
     ci = [t for t in cands if t["board"] == "11514"]
     urgent = [t for t in ci if t["prio"] == "Urgent"]
@@ -1578,7 +1579,7 @@ def wip_self_test():
             raise AssertionError("offered a ticket on a board the runner is not a member of")
         except SystemExit as e:
             assert str(e).startswith("none:"), e
-        # cap hit, Fleet CI blocker offered: Urgent and open-BlockedBy tickets go out, a plain one and a non-member do not
+        # cap hit, Fleet CI & Infra blocker offered: Urgent and open-BlockedBy tickets go out, a plain one and a non-member do not
         set_members("11514", {"runner 1"})
         full_wip = [tk("HTPR-50", "In Progress", "runner 2"), tk("HTPR-51", "AI Review", "runner 2"), tk("HTPR-52", "Bugs")]
         ci = [tk("HYCI-2", "Backlog"), tk("HYCI-3", "Backlog"), tk("HYCI-4", "Backlog")]
@@ -1607,7 +1608,7 @@ def wip_self_test():
         set_members("11514", {"runner 2"})
         try:
             choose(1, True)
-            raise AssertionError("cap hit: a non-member was offered a Fleet CI ticket")
+            raise AssertionError("cap hit: a non-member was offered a Fleet CI & Infra ticket")
         except SystemExit as e:
             assert "new work closed" in str(e), e
         # every runner that is picking while the others are on app work still gets the blocker

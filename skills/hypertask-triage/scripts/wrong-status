@@ -29,7 +29,6 @@ from pathlib import Path
 # board: (columns before merge, column a merged ticket belongs in)
 BOARDS = {
     15: (["In Progress", "AI Review", "Agent Blocked (Infra)", "Valentin Review"], "QA"),
-    4060: (["In Progress", "AI Review", "Agent Blocked", "Valentin Review"], "Done"),
     11514: (["In Progress", "AI Review", "Agent Blocked", "Valentin Review"], "Done"),
     2060: (["Doing", "AI Review", "Valentin Review"], "Done"),
     8783: (["Doing"], "Done"),

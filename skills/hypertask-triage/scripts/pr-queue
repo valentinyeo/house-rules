@@ -170,11 +170,11 @@ def self_test():
                 "assignees": [{"agent": {"displayName": who}}] if who else [], "labels": [{"id": l} for l in labels]}
     prs = [pr(1, "HTPR-1 ok"), pr(2, "HTPR-2 dead"), pr(3, "HTPR-3 old", at="2026-10-01"), pr(4, "HTPR-3 new"),
            pr(5, "HTPR-5 done"), pr(6, "Bump x", author="app/dependabot"), pr(7, "Refresh copy"),
-           pr(8, "x", branch="runner2/yper4-9"), pr(9, "HTPR-9 qa"), pr(10, "HTPR-10 view"), pr(11, "HTPR-11 parked"),
+           pr(8, "x", branch="runner2/hyci-9"), pr(9, "HTPR-9 qa"), pr(10, "HTPR-10 view"), pr(11, "HTPR-11 parked"),
            pr(12, "HTPR-12 todo"), pr(13, "HTPR-13 lead")]
     tasks = {"HTPR-1": task("In Progress", "Runner 1"), "HTPR-2": task("AI Review", "Runner 7"),
              "HTPR-3": task("In Progress", "Runner 1"), "HTPR-5": task("Done", "Runner 1"),
-             "YPER4-9": task("In Progress", "Infra Runner 1", project=4060), "HTPR-9": task("QA", "Runner 1"),
+             "HYCI-9": task("In Progress", "Infra Runner 1", project=11514), "HTPR-9": task("QA", "Runner 1"),
              "HTPR-10": task("In Progress", "Postbox Dev", labels=["x"]), "HTPR-11": task("Valentin Review"),
              "HTPR-12": task("Todo", "Postbox Dev"), "HTPR-13": task("In Progress", "Poteto Advisor")}
     rows, s = judge(scope, prs, tasks, None, pats, live, always, {"o/r": True}, 2)
