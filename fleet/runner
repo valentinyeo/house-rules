@@ -99,6 +99,8 @@ launch() {
     # TokenEconomizer's own calls stay on the run's plan, never Pi's default provider (OpenRouter, paid).
     case $eng in pi-codex) export TE_PYTHON=python3 TE_PAID_MODEL=openai-codex/gpt-6-luna ;;
                  pi-opencode) export TE_PYTHON=python3 TE_PAID_MODEL=opencode-go/deepseek-v4.1-flash ;; esac
+    # te-off-N: the A/B control runner. TokenEconomizer logs cost but acts on nothing (Valentin 8 Nov: "how good it is").
+    [ -f "$STATE/te-off-${n:-0}" ] && export TE_SHADOW=1
     printf '%s' "$brief" | timeout 3h "${base[@]}"
   )
 }
