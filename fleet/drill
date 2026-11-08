@@ -423,12 +423,18 @@ def drill_dead_runner(ctx):
 
 def drill_dead_parts(ctx):
     start = time.time()
-    found = read_list(LISTS / "dead-parts")
+    scan = HERE / "dead-parts-scan.py"
+    r = subprocess.run([sys.executable, str(scan)], capture_output=True, text=True)
     detected = time.time()
-    if found is None:
-        return row("dead-parts", start, detected, None, False, "dead-parts list is missing")
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "dead-parts-scan failed").strip().splitlines()[0]
+        return row("dead-parts", start, detected, None, False, err)
+    found = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
     if found:
-        return row("dead-parts", start, detected, None, False, "dead-parts list is not empty")
+        msg = "; ".join(found[:8])
+        if len(found) > 8:
+            msg += f"; +{len(found) - 8} more"
+        return row("dead-parts", start, detected, None, False, msg)
     return row("dead-parts", start, detected, detected, True, "")
 
 

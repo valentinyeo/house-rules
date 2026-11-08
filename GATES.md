@@ -1,27 +1,31 @@
-# Gates: YPER4-1380 stopped runners on today's rules
+# Gates: YPER4-1381 old runner pools removed
 
-OWNS: systemd/fleet-runner-tick.service, systemd/fleet-runner-tick.timer, bin/install-fleet-runner-tick.sh, fleet/drill, fleet/runner, fleet/legacy/README.md, GATES.md
+OWNS: fleet/dead-parts-scan.py, fleet/drill, bin/remove-old-runner-pools.sh, fleet/legacy/README.md, skills/lead/ht.md
 
-- [ ] G1: User tick unit runs fleet/runner tick, not legacy ht-or-runner.
-  CHECK: systemctl --user cat fleet-runner-tick.service 2>/dev/null || systemctl --user cat ht-or-runner-tick.service
-  EXPECT: fleet/runner tick
+- [ ] G1: Scan lists live old timers before removal.
+  CHECK: /home/valentin/projects/worktrees/infra-runner-2-yper4-1381/fleet/dead-parts-scan.py | grep -c timer-enabled
+  EXPECT: ^[1-9]
 
-- [ ] G2: dead-runner drill passes locally.
-  CHECK: /home/valentin/projects/worktrees/infra-runner-3-yper4-1380/fleet/drill dead-runner
-  EXPECT: dead-runner drill ok
+- [ ] G2: Removal script leaves the host clean.
+  CHECK: /home/valentin/projects/worktrees/infra-runner-2-yper4-1381/bin/remove-old-runner-pools.sh
+  EXPECT: remove-old-runner-pools ok
 
-- [ ] G3: PR open with ship-check pr green.
-  CHECK: SHIP_REPO=valentinyeo/house-rules SHIP_BASE=main SHIP_CHECKOUT=/home/valentin/projects/worktrees/infra-runner-3-yper4-1380 /home/valentin/.agents/skills/ship/scripts/ship-check pr YPER4-1380
-  EXPECT: ok
+- [ ] G3: dead-parts drill passes on the live host.
+  CHECK: /home/valentin/projects/worktrees/infra-runner-2-yper4-1381/fleet/drill dead-parts
+  EXPECT: dead-parts pass
 
-- [ ] G4: Merged to main and installed on VPS.
-  CHECK: SHIP_REPO=valentinyeo/house-rules SHIP_BASE=main SHIP_CHECKOUT=/home/valentin/projects/worktrees/infra-runner-3-yper4-1380 /home/valentin/.agents/skills/ship/scripts/ship-check merged YPER4-1380
-  EXPECT: ok
-
-- [ ] G5: Live timer active and legacy bins gone.
-  CHECK: systemctl --user is-active fleet-runner-tick.timer && test ! -e /home/valentin/.local/bin/ht-or-runner
+- [ ] G4: Fleet runner tick still schedules.
+  CHECK: systemctl --user is-active fleet-runner-tick.timer
   EXPECT: active
 
-- [ ] G6: Ticket Done with ship-check done.
-  CHECK: SHIP_REPO=valentinyeo/house-rules SHIP_BASE=main SHIP_CHECKOUT=/home/valentin/projects/worktrees/infra-runner-3-yper4-1380 /home/valentin/.agents/skills/ship/scripts/ship-check done YPER4-1380
-  EXPECT: ok
+- [ ] G5: PR open and bound.
+  CHECK: SHIP_REPO=valentinyeo/house-rules SHIP_BASE=main SHIP_CHECKOUT=/home/valentin/projects/worktrees/infra-runner-2-yper4-1381 /home/valentin/.agents/skills/ship/scripts/ship-check pr YPER4-1381
+  EXPECT: pass
+
+- [ ] G6: Merged to main.
+  CHECK: SHIP_REPO=valentinyeo/house-rules SHIP_BASE=main SHIP_CHECKOUT=/home/valentin/projects/worktrees/infra-runner-2-yper4-1381 /home/valentin/.agents/skills/ship/scripts/ship-check merged YPER4-1381
+  EXPECT: pass
+
+- [ ] G7: Ticket Done.
+  CHECK: SHIP_REPO=valentinyeo/house-rules SHIP_BASE=main SHIP_CHECKOUT=/home/valentin/projects/worktrees/infra-runner-2-yper4-1381 /home/valentin/.agents/skills/ship/scripts/ship-check done YPER4-1381
+  EXPECT: pass
