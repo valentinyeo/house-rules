@@ -62,6 +62,7 @@ if not (HERE / "briefs").is_dir():
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
 STATE = Path(os.environ.get("FLEET_PICK_STATE", HOME / ".local/state/fleet-pick"))
 RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
+WATCH = Path(os.environ.get("FLEET_WATCH_STATE", HOME / ".local/state/fleet-switch"))
 SHIP_CLAIM = HOME / ".agents/skills/ship/scripts/ship-claim"
 CEO_HT = HOME / "projects/ceo/bin/ceo-ht"
 PR_CLAIMS = HOME / ".local/state/pr-drain/claims"
@@ -159,8 +160,42 @@ MEMBERS_TTL = 3600
 # a runner missing from a cached list is re-read once the list is this old: a login a board just added (or an incident board
 # it just joined) is offered within minutes, not after the hour
 MEMBERS_MISS_TTL = 300
+MEMBERS_INCIDENT_TTL = 3600
 LOGGED = set()
 DRY_RUN = "--dry-run" in sys.argv
+
+
+def access_incident(n, board, reason):
+    """Record one runner missing from one board, at most once an hour per runner and board."""
+    if DRY_RUN:
+        return
+    path = WATCH / "incidents.jsonl"
+    now = time.time()
+    try:
+        lines = path.read_text().splitlines()[-500:]
+    except OSError:
+        lines = []
+    for line in reversed(lines):
+        try:
+            hit = json.loads(line)
+        except ValueError:
+            continue
+        if (hit.get("kind") == "board-access" and hit.get("runner") == f"runner {n}"
+                and hit.get("board") == board):
+            if now - hit.get("at", 0) < MEMBERS_INCIDENT_TTL:
+                return
+            break
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps({"at": now, "kind": "board-access", "runner": f"runner {n}",
+                            "board": board, "reason": reason}) + "\n")
+
+
+def check_all_members(board, names):
+    """An hourly membership read finds every roster runner missing from the board, so an owner can add them."""
+    for n in range(1, RUNNERS + 1):
+        if f"runner {n}" not in names:
+            access_incident(n, board, "missing from board")
 
 
 def fetch_members(board):
@@ -188,6 +223,8 @@ def board_members(board, max_age=MEMBERS_TTL):
                 tmp = f"{path}.{os.getpid()}"
                 json.dump(cached, open(tmp, "w"))
                 os.replace(tmp, path)
+            if fresh is not None:
+                check_all_members(board, fresh)
     return MEMBERS[board]
 
 
@@ -196,6 +233,7 @@ def can_join(n, board):
     join it"), so the picker never offers those tickets. Membership unknown: offer them, ship-claim stays the backstop."""
     names = board_members(board)
     if names is not None and f"runner {n}" not in names and (n, board) not in LOGGED:
+        access_incident(n, board, "not a member when picked")
         names = board_members(board, MEMBERS_MISS_TTL)  # once per pick: a board may have added the runner since the read
     if names is None or f"runner {n}" in names:
         return True
@@ -1373,11 +1411,12 @@ def render(n, t, source):
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
-    global STATE, ALLOCATION, RUNNER_STATE
+    global STATE, ALLOCATION, RUNNER_STATE, WATCH
     import tempfile
     STATE = Path(tempfile.mkdtemp())
     ALLOCATION = STATE / "allocation.json"
     RUNNER_STATE = STATE
+    WATCH = STATE
     MEMBERS.update({b: None for b in BOARDS})  # membership unknown: the offline test offers every board
     t = {"key": "HTPR-1", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium"}
     SKIP[0] = Skip(set(), set())
@@ -1451,6 +1490,17 @@ def self_test():
     assert brain(hard)[1:] == ("gpt-6.1-sol", "medium"), "the per-engine allocation sets the codex model"
     set_engine("cursor")
     assert brain(hard)[1] == "grok-4.7-high", "a per-engine allocation without cursor: the built-in map, not the old shape"
+    saved_runners = RUNNERS
+    globals()["RUNNERS"] = 5
+    names = {"runner 1", "runner 2", "runner 4"}
+    check_all_members("11514", names)
+    rows = [json.loads(x) for x in (WATCH / "incidents.jsonl").read_text().splitlines()]
+    assert {(r["runner"], r["board"]) for r in rows} == {("runner 3", "11514"), ("runner 5", "11514")}, \
+        "an hourly read reports each missing runner once"
+    check_all_members("11514", names)
+    assert len(rows) == len((WATCH / "incidents.jsonl").read_text().splitlines()), \
+        "one incident an hour per runner and board"
+    globals()["RUNNERS"] = saved_runners
     wip_self_test()
     assert decide_suppress(2, False, [], []) is False
     assert decide_suppress(3, False, [], []) is True, "three parks and no blocker: only a lead comment releases it"
