@@ -648,8 +648,16 @@ def waits_on_open_ticket(key):
         return True
     for r in d.get("relations") or []:
         other = r.get("otherTask") or {}
-        if r.get("relationType") == "BlockedBy" and r.get("direction") == "outgoing" and other.get("status") != "Archive" \
-                and not other.get("sectionIsDone") and not SHIPPED.match(other.get("section") or ""):
+        if r.get("relationType") != "BlockedBy" or r.get("direction") != "outgoing" or other.get("status") == "Archive":
+            continue
+        section = other.get("section")
+        if section is None:  # relations carry no column: read the blocker itself
+            g = json.loads(run_text(["hypertask", "--json", "task", "get", other.get("ticketNumber") or ""]) or "null")
+            try:
+                section = g["tasks"][0].get("section") or ""
+            except (TypeError, KeyError, IndexError):
+                return True
+        if not SHIPPED.match(section):
             return True
     return False
 

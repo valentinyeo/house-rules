@@ -742,7 +742,9 @@ def is_open(key):
         d = ht("task", "get", key)
         try:
             raw = d["tasks"][0]
-            known[key] = raw.get("status") != "Archive" and not raw.get("sectionIsDone")
+            # task get carries no sectionIsDone any more: the column name decides
+            known[key] = raw.get("status") != "Archive" and not raw.get("sectionIsDone") \
+                and not re.match(r"(done|flag:|no flag)", raw.get("section") or "", re.I)
         except (TypeError, KeyError, IndexError):
             known[key] = True  # unreadable: assume it still blocks
         save_cache(SNAP)
