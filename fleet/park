@@ -6,6 +6,7 @@
     fleet/park <TICKET> --unstarted              nothing built, no PR: home column, unassigned
     fleet/park <TICKET> --hand-back "<left to do>"  unfinished, nothing waits on anyone (e.g. its PR fails to build): unassigns
                                                  you, column and PR stay, the orphan lane hands it to a fresh runner
+    fleet/park <TICKET> --lead --why "reason"    unknown state, or a wait on a person: home column, waiting person is the board lead, unassigned
     fleet/park <TICKET> --release                another runner owns the work (you were co-assigned, e.g. a cross-check): unassigns only you,
                                                  the ticket and its column stay as they are
     fleet/park --sweep [--apply] [--waits-on KEY=T1,T2 ...] [--valentin KEY[=COMMENT] ...]
@@ -82,6 +83,25 @@ def blockers(key):
     return out
 
 
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "YPER4": "4060", "HYCI": "11514"}
+
+
+def lead_for(key):
+    """(lead name, board id) from scopes.json. The board key with no view wins."""
+    board = PREFIX_BOARD[key.split("-", 1)[0]]
+    scopes = json.loads((Path(__file__).resolve().parents[1] / "skills/hypertask-triage/scripts/scopes.json").read_text())
+    return scopes[board]["lead"], board
+
+
+def record_event(key):
+    """One completed park. fleet/pick stops offering a ticket after three of these in six hours."""
+    state = Path(os.environ.get("FLEET_PICK_STATE", HOME / ".local/state/fleet-pick"))
+    state.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(state / "park-events", "a") as f:
+        f.write(f"{stamp} {key}\n")
+
+
 def note(key, text):
     """The agent-lane note that says why the ticket left In Progress. `activity add` takes no --json."""
     r = subprocess.run(["vcc", "activity", "add", key, text], capture_output=True, text=True, timeout=600)
@@ -113,6 +133,7 @@ def park_waits(key, waits, t=None):
     release(key, t)
     note(key, f"Parked by fleet/park: waits on {', '.join(waits)} (BlockedBy). Back in {home}, unassigned. The picker skips it until every blocker is done. "
               "Nobody needs to touch it before then.")
+    record_event(key)
     return f"{key} -> {home}, BlockedBy {', '.join(waits)}, unassigned"
 
 
@@ -126,6 +147,7 @@ def park_unstarted(key, t=None):
     release(key, t)
     note(key, f"Parked by fleet/park: nothing was built and no PR exists. Back in {home}, unassigned. Another run starts it fresh; "
               "fleet/pick rests it until the ticket changes.")
+    record_event(key)
     return f"{key} -> {home}, unassigned"
 
 
@@ -145,6 +167,7 @@ def park_hand_back(key, why, t=None):
     vcc("task", "unassign", key, "--agent", mine[0])
     note(key, f"Handed back by fleet/park: {mine[0]} could not finish it and nothing waits on anyone. Left to do: {why.strip()} "
               f"Column {t.get('section')} and the PR stay. The next free runner takes it as an orphan.")
+    record_event(key)
     return f"{key} stays in {t.get('section')}, {mine[0]} unassigned, handed to the orphan lane"
 
 
@@ -186,7 +209,31 @@ def park_valentin(key, comment=None, t=None):
     vcc("task", "waiting-on", key, "--user", str(valentin_id(t.get("projectId"))))
     vcc("task", "blocker-comment", key, "--comment-id", str(cid))
     note(key, f"Parked by fleet/park: waits on Valentin's answer to comment {cid}. In {VALENTIN_REVIEW}. The picker leaves it alone.")
+    record_event(key)
     return f"{key} -> {VALENTIN_REVIEW}, waiting on Valentin, Question comment {cid}"
+
+
+def park_lead(key, why, t=None):
+    """An unknown state, including a wait on a person. The board lead becomes the waiting person. The runner is free."""
+    t = t or get(key)
+    if (t.get("section") or "").lower() in ("done", "archive", "archived"):
+        return f"{key} already {t.get('section')}, not parked"
+    name, board = lead_for(key)
+    uid = ""
+    for m in vcc("project", "members", "--project", board).get("members") or []:
+        if (m.get("displayName") or "") == name and m.get("id"):
+            uid = str(m["id"])
+            break
+    if not uid:
+        raise RuntimeError(f"lead {name} not on board {board}")
+    home = home_section(t.get("projectId"), [l.get("name", "") for l in t.get("labels") or []], t.get("title"))
+    if t.get("section") != home:
+        vcc("task", "move", key, "--section", home)
+    vcc("task", "waiting-on", key, "--user", uid)
+    release(key, t)
+    record_event(key)
+    note(key, f"Parked by fleet/park: unknown state. {why.strip()} Waiting person is {name}. Back in {home}, runner unassigned.")
+    return f"{key} -> {home}, waiting on {name}, unassigned"
 
 
 # ---------------------------------------------------------------- one-time sweep
@@ -334,6 +381,9 @@ def self_test():
     co = {"assignees": [{"agent": {"displayName": "Infra Runner 3"}}, {"agent": {"displayName": "Runner 6"}}]}
     assert co_holders(co, "RUNNER 6") == (["Runner 6"], ["Infra Runner 3"]), "the caller leaves, the owner stays"
     assert co_holders(co, "RUNNER 7") == ([], ["Infra Runner 3", "Runner 6"]), "a runner that is not assigned releases nothing"
+    assert lead_for("YPER4-1") == ("Chief Of Staff", "4060")
+    assert lead_for("HTPR-1") == ("HT Product Lead", "15")
+    assert lead_for("HYCI-1")[0] == "Chief Of Staff" and lead_for("IGSH-1")[0] == "Chief Of Staff"
     print("fleet/park self-test ok")
 
 
@@ -366,7 +416,7 @@ def main():
         return sweep(apply, forced)
     key = a[0]
     if not TICKET.match(key) or len(a) < 2:
-        sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\"")
+        sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\" | --lead --why TEXT")
     try:
         if a[1] == "--waits-on" and len(a) > 2:
             print(park_waits(key, [x for x in a[2].split(",") if x]))
@@ -379,8 +429,11 @@ def main():
             print(park_release(key))
         elif a[1] == "--hand-back" and len(a) > 2:
             print(park_hand_back(key, " ".join(a[2:])))
+        elif a[1] == "--lead":
+            why = a[a.index("--why") + 1] if "--why" in a else "unknown state"
+            print(park_lead(key, why))
         else:
-            sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\"")
+            sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\" | --lead --why TEXT")
     except RuntimeError as e:
         sys.exit(f"fleet/park: {e}")
 

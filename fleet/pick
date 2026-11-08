@@ -715,9 +715,96 @@ def blocked(t):
 CHECKED = [0]
 
 
+PARK_WINDOW = 6 * 3600
+PARK_LIMIT = 3
+
+
+def decide_suppress(n_recent, lead_after_third, blocker_keys, open_keys):
+    """True when a ticket parked PARK_LIMIT times in the window stays off the offer list.
+    A lead comment after the third park releases it. So does every BlockedBy link closing.
+    No BlockedBy link at all: only the lead comment releases it."""
+    if n_recent < PARK_LIMIT:
+        return False
+    if lead_after_third:
+        return False
+    if blocker_keys and not open_keys:
+        return False
+    return True
+
+
+def park_event_times(key):
+    out = []
+    try:
+        for line in open(STATE / "park-events"):
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == key:
+                when = stamp_time(parts[0])
+                if when:
+                    out.append(when)
+    except OSError:
+        pass
+    return out
+
+
+def board_lead(board):
+    try:
+        scopes = json.load(open(HERE.parent / "skills/hypertask-triage/scripts/scopes.json"))
+        return scopes[str(board)]["lead"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def lead_comment_at(t):
+    """When the board lead last wrote on t, or None. Used only after the third park."""
+    lead = board_lead(t.get("board"))
+    if not lead:
+        return None
+    best = None
+
+    def consider(name, stamp):
+        nonlocal best
+        if name != lead:
+            return
+        when = stamp_time(stamp or "")
+        if when and (best is None or when > best):
+            best = when
+
+    try:
+        for a in (ht("task", "agent-log", t["key"]).get("activities") or []):
+            consider(a.get("agentName") or "", a.get("createdAt"))
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        pass
+    try:
+        for c in (ht("comment", "list", t["key"]).get("comments") or []):
+            who = ((c.get("creator") or {}).get("displayName")
+                   or ((c.get("agent") or {}).get("displayName")) or "")
+            consider(who, c.get("createdAt"))
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        pass
+    return best
+
+
+def repark_suppressed(t):
+    """Same ticket parked 3 times in 6 h is not offered until its BlockedBy closes or its lead comments."""
+    if INCIDENT_LABEL in (t.get("labels") or []):
+        return False
+    now = dt.datetime.now(dt.timezone.utc)
+    recent = [w for w in park_event_times(t["key"]) if (now - w).total_seconds() < PARK_WINDOW]
+    if len(recent) < PARK_LIMIT:
+        return False
+    third = sorted(recent)[PARK_LIMIT - 1]
+    lead_at = lead_comment_at(t)
+    blockers = relations(t["key"])[0]
+    open_keys = [b for b in blockers if is_open(b)]
+    return decide_suppress(len(recent), bool(lead_at and lead_at > third), blockers, open_keys)
+
+
 def held_back(t, own=False):
     """Waits on someone, so no runner takes it: Valentin Review, a marked Question to Valentin (not for the runner's own
-    ticket), or an open BlockedBy link. The relation reads are capped per pick; out of reads, nothing unchecked is taken."""
+    ticket), an open BlockedBy link, or a ticket parked three times in six hours. The relation reads are capped per
+    pick; out of reads, nothing unchecked is taken."""
+    if repark_suppressed(t):
+        return True
     if not own and (t["section"] == "Valentin Review" or t["waiting"]):
         return True
     if t["key"] not in SNAP["rel"]:
@@ -768,7 +855,7 @@ def slot_candidates(n, me, skip):
     for t in SNAP["tickets"]:
         if t["board"] not in ("11514", "4060"):
             continue
-        if t["waiting"] or "design-pass" in t["labels"] or set(t["labels"]) & SKIP_ALL or t["key"] in skip:
+        if t["waiting"] or "design-pass" in t["labels"] or set(t["labels"]) & SKIP_ALL or t["key"] in skip or repark_suppressed(t):
             continue
         new_col = t["section"] in BOARDS[t["board"]][0]
         building_col = t["section"] in BOARDS[t["board"]][1]
@@ -1351,6 +1438,11 @@ def self_test():
     set_engine("cursor")
     assert brain(hard)[1] == "grok-4.7-high", "a per-engine allocation without cursor: the built-in map, not the old shape"
     wip_self_test()
+    assert decide_suppress(2, False, [], []) is False
+    assert decide_suppress(3, False, [], []) is True, "three parks and no blocker: only a lead comment releases it"
+    assert decide_suppress(3, True, [], []) is False
+    assert decide_suppress(3, False, ["HYCI-1"], []) is False, "BlockedBy closed: offered again"
+    assert decide_suppress(3, False, ["HYCI-1"], ["HYCI-1"]) is True
     print("fleet/pick self-test ok")
 
 
