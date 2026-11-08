@@ -177,7 +177,7 @@ A board with no brain labels at all? File that once on board 4060.
 ## 6e. Flag tickets blocked by CI
 CI Boss owns CI, on the fleet CI board https://app.hypertask.ai/project?id=11514.
 CI Boss slow? Product tickets pile up behind it.
-House rule, CI snag (2026-11-06): one Fleet CI ticket per CI problem on 11514. Search first; same problem gets a +1 and a link.
+House rule, CI snag (2026-11-06): one Fleet CI ticket per CI problem on 11514. Search first, +1 the existing one; new ticket only if none and the board is under its cap. `vcc` enforces it through `filing-gate`.
 The app ticket stays on its board, linked BlockedBy that CI ticket, and waits. App sessions never fix CI.
 Fix ships: CI Boss's `ci-unblock-waiters` posts a continue note in the app ticket's agent lane and clears the wait.
 
@@ -190,7 +190,7 @@ flow-check prints, per blocked ticket:
 Then `CI-BLOCKED board N: X tickets wait on CI`.
 
 Act on it:
-- `CI-NO-TICKET`: file one Urgent ticket on 11514, labels CI and Hypertask CI. Or +1 the open one for the same problem. Link the app ticket BlockedBy it: `vcc task link <app ticket> <CI ticket> --type BlockedBy`.
+- `CI-NO-TICKET`: search 11514 first and +1 the open ticket for the same problem. New Urgent ticket (labels CI and Hypertask CI) only if none and the board is under its cap; `filing-gate` refuses the rest. Link the app ticket BlockedBy it: `vcc task link <app ticket> <CI ticket> --type BlockedBy`.
 - `CI-NO-LINK`: add that BlockedBy link.
 - `CI-DONE`: the wait did not clear. Tell CI Boss its `ci-unblock-waiters` missed it, and the board lead which runner resumes.
 - `CI-SLOW`: add a line in that CI ticket's agent lane. List the waiting tickets and hours.
