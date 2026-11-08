@@ -5,25 +5,23 @@ Valentin, 2026-11-08: "210 tickets to build 3 apps!!!!!!!!!! that is insane".
 
 On board 11514 (Fleet CI & Infra):
 1. An open ticket with a near-duplicate title exists: add a +1 note to its agent lane, print its link, file nothing.
-2. The board holds its backlog cap (2 open tickets per live pool runner, the pileup-watch cap) or more:
-   file nothing.
+No cap on filing (Valentin, 8 Nov: "A cap doesn't really make sense for CI and infra"): a new problem is
+filed, then reviewed; pileup-watch archives what goes stale.
 Board 4060 (old Fleet Infra) is archived (Valentin, 8 Nov): a ticket for it is refused, file on 11514.
 A ticket labelled Incident skips both: outage filers (production-red-alert, fleet-watch) keep their own dedupe.
 Any other board, or any other command: allowed, no network call.
 A board read that fails lets the ticket through with a warning, so a rate limit never blocks an outage.
 
 usage: filing-gate [--dry-run] [--who NAME] -- <vcc arguments>
-exit 0 file it, 5 refused (over cap), 6 not filed (duplicate, +1 added). FILING_GATE_DRY_RUN=1 = --dry-run:
+exit 0 file it, 5 refused (archived board), 6 not filed (duplicate, +1 added). FILING_GATE_DRY_RUN=1 = --dry-run:
 print the decision, write nothing.
 """
 import argparse
 import importlib.machinery
-import json
 import os
 import re
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -33,8 +31,6 @@ dupes = importlib.machinery.SourceFileLoader("board_dupes", os.path.join(HERE, "
 BOARDS = {11514: "Fleet CI & Infra"}
 RETIRED = {4060: 11514}
 SAME = 0.6  # board-dupes default
-RUNNER_CACHE = os.path.expanduser("~/.local/state/filing-gate/runners.json")
-RUNNER_CACHE_SECONDS = 900
 URL = "https://app.hypertask.ai/detail/project-{board}/{number}"
 REFUSE, DUPLICATE = 5, 6
 
@@ -64,19 +60,6 @@ def create_args(argv):
         return None
     labels = {l.strip().lower() for v in flags.get("labels", []) for l in v.split(",") if l.strip()}
     return board, flags.get("title", [""])[-1], labels
-
-
-def live_runners():
-    try:
-        cached = json.load(open(RUNNER_CACHE))
-        if time.time() - cached["at"] < RUNNER_CACHE_SECONDS:
-            return cached["runners"]
-    except (OSError, ValueError, KeyError):
-        pass
-    runners = pileup.live_runner_count()
-    os.makedirs(os.path.dirname(RUNNER_CACHE), exist_ok=True)
-    json.dump({"at": time.time(), "runners": runners}, open(RUNNER_CACHE, "w"))
-    return runners
 
 
 def numbers(title):
@@ -136,23 +119,9 @@ def main():
               "\"<what you saw>\". Link your app ticket BlockedBy it if it blocks you.", file=sys.stderr)
         return DUPLICATE
 
-    counted = [t for t in tickets if "incident" not in {l["name"].lower() for l in t.get("labels", [])}]
-    runners = live_runners()
-    cap = pileup.BACKLOG_PER_RUNNER * runners
-    if len(counted) < cap:
-        if a.dry_run:
-            print(f"ALLOW {name} open {len(counted)}/{cap}")
-        return 0
-    close = sorted(((score(title, t.get("title") or ""), t) for t in counted), key=lambda x: -x[0])[:3]
-    hint = "".join(f"\n  {t['ticketNumber']} \"{t.get('title')}\" {link(board, t)}" for s, t in close if s > 0)
     if a.dry_run:
-        print(f"REFUSE {name} open {len(counted)}/{cap}")
-    print(f"vcc: not filed. {name} is full: {len(counted)} open tickets, cap {cap} (2 per live runner, "
-          f"{runners} runners). Valentin, 2026-11-08: \"210 tickets to build 3 apps!!!!!!!!!! that is insane\".\n"
-          "Do this instead: search the board and +1 the open ticket for the same problem with "
-          "vcc activity add <ticket> \"<what you saw>\", or wait until the board drops under its cap." + (f"\nClosest open tickets:{hint}" if hint else ""),
-          file=sys.stderr)
-    return REFUSE
+        print(f"ALLOW {name}: no open duplicate")
+    return 0
 
 
 if __name__ == "__main__":
