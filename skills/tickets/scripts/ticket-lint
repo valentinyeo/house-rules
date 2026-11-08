@@ -20,6 +20,9 @@ ONCE = re.compile(r"\bonce\b", re.I)
 FACT_ASK = re.compile(r"\b(can|could|would|will) you\b[^.?]{0,30}\b(share|send|tell|check|confirm|look|find|give|provide|paste|read|screenshot)\b"
                       r"|\bwhat (version|build|number)\b|\bwhich (version|build)\b", re.I)
 ZERO_COST = re.compile(r"[£$€]\s?0(\.0+)?\b(?!\.\d*[1-9])|\b(existing|own|current) (claude |codex )?subscription\b|\bsubscription only\b|\bno extra cost\b", re.I)
+# Valentin 2026-11-08: "if i give a direct order why would that not be a YES already". His order is the yes.
+REASK = re.compile(r"\byou (already |just )?(asked|ordered|told|requested|said)\b[^?]{0,100}\b(ok|okay|confirm|go ahead|proceed|approve|still want|sure)\b"
+                   r"|\bas you (asked|ordered|requested)\b|\b(confirm|approve)\b[^.?]{0,20}\b(your|the) (order|request)\b", re.I)
 SECRET_ASK = re.compile(r"\b(paste|post|send|share)\b[^.?]{0,40}\b(key|token|secret|password)\b[^.?]{0,30}\b(here|in (this|the) (ticket|comment|chat))\b"
                         r"|\b(paste|post|send)\b[^.?]{0,10}\b(key|it|them)\b[^.?]{0,6}\bhere\b", re.I)
 CODE = [
@@ -82,6 +85,8 @@ def question_rules(text):
         bad.append("asks him for a fact, not a decision: look it up yourself (logs, updater, his PC through agent tools)")
     if ZERO_COST.search(ours):
         bad.append("costs nothing extra (subscription or 0): not money, not his call. Decide and act yourself")
+    if REASK.search(ours):
+        bad.append("asks him to confirm his own order: his direct order is the yes. Act on it, drop the Question")
     if SECRET_ASK.search(ours):
         bad.append("asks him to paste a key into the ticket: keys go only in 1Password, name the item instead")
     return bad
