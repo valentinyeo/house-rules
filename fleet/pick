@@ -907,8 +907,21 @@ def pr_ticket(p):
     return m[0] if m else None
 
 
+def pr_orphan_rank(p):
+    """A green open PR whose ticket is an orphan in a building column: drain it when the WIP cap blocks new starts."""
+    tk = pr_ticket(p)
+    if not tk or p["draft"] or p["red"]:
+        return None
+    t = by_key(tk)
+    if not t or t["section"] not in BOARDS[t["board"]][1] or not orphan(t):
+        return None
+    if set(t["labels"]) & (SKIP_ALL | {"design-pass"}) or not orphan_ok(t) or held_back(t):
+        return None
+    return (3, p["updated"], p["number"])
+
+
 def pr_candidates(n, taken):
-    """pr-drain-pick rules: draft PRs and red PRs idle for 6 hours, unowned or with a stale claim."""
+    """pr-drain-pick rules: draft PRs, red PRs idle for 6 hours, and green PRs on orphan building tickets."""
     open_prs()
     now = dt.datetime.now(dt.timezone.utc)
     frozen = FREEZE.exists()
@@ -924,7 +937,9 @@ def pr_candidates(n, taken):
         elif p["red"] and idle > dt.timedelta(hours=6):
             key = (2, p["updated"], p["number"])
         else:
-            continue
+            key = pr_orphan_rank(p)
+            if key is None:
+                continue
         if idle < dt.timedelta(hours=2) and not frozen:
             continue
         m = TICKET.search(p["title"])
@@ -1498,6 +1513,10 @@ def wip_self_test():
         assert choose(1, True) == (ci[2], "kept-slot"), "busy pool: the free runner still takes the blocker"
         (STATE / "runner-2.log").unlink()
         RUNNING.clear()
+        SNAP["tickets"] = [tk("HTPR-50", "AI Review")]
+        SNAP["prs"] = [pr(100001, "HTPR-50")]
+        SNAP["rel"] = {"HTPR-50": [[], []]}
+        assert pr_orphan_rank(SNAP["prs"][0]) is not None, "a green PR on an orphan building ticket is a PR-queue candidate"
     finally:
         try_claim = real_claim
         log = real_log
