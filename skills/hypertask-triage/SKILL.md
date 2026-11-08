@@ -133,6 +133,7 @@ Only money, keys and going public need his yes. Build the rest.
 
 ## 6b. Sweep the Agent Blocked columns and cap every waiting column
 `pileup-watch --apply` runs daily after blocker-review. Over a cap it files one urgent alarm ticket on board 4060. Clear the column that day.
+The same run holds the backlog cap on Fleet CI (11514) and Fleet Infra (4060): at most 2 open tickets per live pool runner. Over it, the oldest tickets untouched 7 days are archived with a note. Incident, busy, open-PR, waiting, security, alarm and app-blocking tickets are never archived.
 Valentin, 2026-11-02:
 > 99 tickets in agent blocked infrA? wtf is going ion there?
 

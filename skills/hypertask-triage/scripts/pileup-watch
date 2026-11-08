@@ -9,10 +9,18 @@ Done.
 
 Valentin, 2026-11-02: "this type of pile up is not acceptable".
 
+Backlog cap (Valentin, 2026-11-08: "archive everything that we dont need to keep working"): the
+self-maintenance boards Fleet CI (11514) and Fleet Infra (4060) hold at most 2 open tickets per live pool
+runner. Over it, the oldest tickets untouched for 7 days are archived (status Archive, reversible) with a note in
+their agent lane, until the board is back under the cap. Never archived: Incident, In Progress / AI Review / QA,
+open PR, waiting on a person, security, or a ticket an open app ticket on board 15 or 2060 is BlockedBy.
+
 usage: pileup-watch [--caps 15:QA=15,4060:Agent Blocked=5] [--alarm-board 4060]
-                    [--alarm-section 10414] [--done-section 10412] [--apply]
+                    [--alarm-section 10414] [--done-section 10412] [--backlog-boards 11514,4060] [--apply]
 Without --caps it uses the Hypertask caps below. Other fleets pass their own.
 """
+import os
+import re
 import argparse
 import json
 import subprocess
@@ -40,6 +48,15 @@ HT_CAPS = {
     },
 }
 STALE_DAYS = 3
+BACKLOG_BOARDS = "11514,4060"
+BACKLOG_PER_RUNNER = 2
+BACKLOG_UNTOUCHED_DAYS = 7
+BACKLOG_MIN_RUNNERS = 5  # house rules: never under 5 runners
+BUSY_SECTIONS = {"In Progress", "AI Review", "QA", "Done"}
+APP_BOARDS = {15, 2060}
+BACKLOG_NOTE = ("Archived by the backlog cap: board over {cap} open tickets (2 per live runner), untouched {days} days. "
+                "Valentin, 2026-11-08: archive what we do not need to keep working. Reopen if it happens again.")
+PICK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "fleet", "pick")
 TITLE = "Pile-up: {column} on board {board}"
 
 
@@ -73,7 +90,7 @@ def age_days(t, now):
 
 
 def column_tickets(board, column):
-    where = ["--label", column[6:]] if column.startswith("label:") else ["--section", column]
+    where = [] if column is None else ["--label", column[6:]] if column.startswith("label:") else ["--section", column]
     tickets, offset = [], 0
     while True:
         page = ht("task", "list", "--project", str(board), *where, "--status", "Normal",
@@ -86,7 +103,9 @@ def column_tickets(board, column):
 
 def open_alarm(alarm_board, done_section, title):
     found = ht("task", "search", title, "--project", str(alarm_board)).get("tasks", [])
-    return next((t for t in found if t.get("title") == title and t.get("section") not in ("Done", "Archive")), None)
+    # Archive is a status, not a section: an archived alarm keeps its old section.
+    return next((t for t in found if t.get("title") == title and t.get("section") not in ("Done", "Archive")
+                 and t.get("status", "Normal") == "Normal"), None)
 
 
 def description(board, column, count, cap, stale, owner):
@@ -124,6 +143,79 @@ def oldest(stale, board, n=10):
     return ", ".join(f"https://app.hypertask.ai/detail/project-{board}/{t['uniqueIndex']} ({d}d)" for d, t in stale[:n])
 
 
+def live_runner_count():
+    """Live pool runners, read from the same place the WIP cap reads them (fleet/pick --wip)."""
+    try:
+        out = subprocess.run([PICK, "--wip"], capture_output=True, text=True, timeout=300).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        out = ""
+    m = re.search(r"^workers:(.*)$", out, re.M)
+    n = len(re.findall(r"Runner \d+", m[1])) if m else 0
+    return max(n, BACKLOG_MIN_RUNNERS)
+
+
+def last_touch(t):
+    st = t.get("staleness") or {}
+    stamps = [st.get("lastCommentAt"), st.get("sectionChangedAt"), t.get("createdAt")]
+    return max(datetime.fromisoformat(x.replace("Z", "+00:00")) for x in stamps if x)
+
+
+def keep_reason(t):
+    """Why the backlog cap must not archive t, or None."""
+    labels = {l["name"].lower() for l in t.get("labels", [])}
+    if "incident" in labels:
+        return "incident"
+    if t.get("section") in BUSY_SECTIONS:
+        return "busy"
+    if any(p.get("lifecycle") == "open" for p in t.get("pullRequests", [])):
+        return "open PR"
+    if t.get("waitingOnUserId"):
+        return "waiting on a person"
+    if any("security" in l or "secret" in l for l in labels) or "[security]" in t.get("title", "").lower():
+        return "security"
+    if t.get("title", "").startswith(("Pile-up:", "Board health:")):
+        return "alarm, closed by its own watcher"
+    for r in ht("task", "relations", t["ticketNumber"]).get("relations", []):
+        o = r.get("otherTask") or {}
+        if r.get("relationType") == "BlockedBy" and r.get("direction") == "incoming" and o.get("projectId") in APP_BOARDS:
+            g = (ht("task", "get", str(o["uniqueIndex"]), "--project", str(o["projectId"]),
+                    "--fields", "section,status").get("tasks") or [{}])[0]
+            if g.get("status") == "Normal" and g.get("section") != "Done":
+                return f"blocks {o.get('ticketNumber')}"
+    return None
+
+
+def backlog_cap(boards, apply, now):
+    runners = live_runner_count()
+    cap = BACKLOG_PER_RUNNER * runners
+    failed = 0
+    for board in boards:
+        tickets = [t for t in column_tickets(board, None) if t.get("section") != "Done"
+                   and "incident" not in {l["name"].lower() for l in t.get("labels", [])}]
+        over = len(tickets) - cap
+        print(f"{'BACKLOG' if over > 0 else 'ok':7} board {board:5} open {len(tickets)}/{cap} (2 x {runners} runners)")
+        if over <= 0:
+            continue
+        for t in sorted(tickets, key=lambda t: t.get("createdAt") or ""):
+            if over <= 0:
+                break
+            full = (ht("task", "get", t["ticketNumber"]).get("tasks") or [{}])[0]
+            if not full or (now - last_touch(full)).days < BACKLOG_UNTOUCHED_DAYS or keep_reason(full):
+                continue
+            over -= 1
+            print(f"    archive {t['ticketNumber']} ({(now - last_touch(full)).days}d) {t['title'][:60]}")
+            if not apply:
+                continue
+            r = vcc("task", "update", t["ticketNumber"], "--status", "Archive", "--project", str(board))
+            if r.returncode == 0:
+                r = vcc("activity", "add", t["ticketNumber"],
+                        BACKLOG_NOTE.format(cap=cap, days=BACKLOG_UNTOUCHED_DAYS))
+            failed += r.returncode != 0
+        if over > 0:
+            print(f"    {over} over cap with nothing safe to archive: the board lead clears it")
+    return failed
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--caps", default="")
@@ -131,6 +223,7 @@ def main():
     p.add_argument("--alarm-section", default="10414")
     p.add_argument("--done-section", default="10412")
     p.add_argument("--labels", default="Infra")
+    p.add_argument("--backlog-boards", default=BACKLOG_BOARDS, help="comma list; empty turns the backlog cap off")
     p.add_argument("--apply", action="store_true")
     a = p.parse_args()
     caps = parse_caps(a.caps) if a.caps else HT_CAPS
@@ -170,6 +263,9 @@ def main():
                     r = vcc("task", "update", alarm["ticketNumber"], "--status", "Archive")
                 failed += r.returncode != 0
                 print(f"    alarm {alarm['ticketNumber']} {'close FAILED: ' + (r.stderr or r.stdout).strip()[:200] if r.returncode else 'closed'}")
+    boards = [int(b) for b in a.backlog_boards.split(",") if b.strip()]
+    if boards:
+        failed += backlog_cap(boards, a.apply, now)
     print(f"SUMMARY {over} column(s) over cap")
     return 1 if failed else 0
 
