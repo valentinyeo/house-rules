@@ -247,8 +247,8 @@
    "role_skill": "/setup-runner",
    "login": "MP Runner {n}",
    "board": "2060",
-   "status": "live",
-   "notes": "Was Mini Boss's; joins the shared pool."
+   "status": "closed",
+   "notes": "Retired 2026-11-08: the shared pool replaced it. Runner page no longer lists it."
   },
   {
    "name": "multibot-runner-{x}",
