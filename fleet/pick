@@ -1220,18 +1220,29 @@ def choose(n, dry):
     held = other_on_blocker(n)
     if held:
         log(f"kept slot: held on {held}")
-    else:
-        cands, empty = slot_candidates(n, me, skip)
-        if not cands:
+    cands, empty = slot_candidates(n, me, skip)
+    if not cands:
+        if empty:
             log(empty)
-        else:
+    else:
+        if held:
+            cands = [t for t in cands if t["key"] != held]
+            if cands and held.startswith("HYCI-"):
+                units, workers, _ = pipeline()
+                if len(units) >= len(workers) and all(t["board"] == "11514" for t in cands):
+                    log("kept slot: another runner is on checks work at the cap")
+                    cands = []
+        if cands:
             got = take_kept_slot(n, me, cands, dry)
             if got:
                 return got
             own = any(me in names(t) and t["section"] in BOARDS[t["board"]][1] for t in SNAP["tickets"])
-            if not own:
+            if not own and not held:
                 raise SystemExit(f"none: kept slot waiting on {cands[0]['key']}")
-            log("kept slot: blocker open but this runner is held on its own ticket")
+            if own:
+                log("kept slot: blocker open but this runner is held on its own ticket")
+            elif held:
+                log("kept slot: another runner holds a blocker; none left for this runner")
 
     # a. own ticket
     # a merged ticket waiting for its live check is its merging runner's; a design-pass one needs another runner's QA
