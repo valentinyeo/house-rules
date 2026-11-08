@@ -963,6 +963,11 @@ def choose(n, dry):
                     key=lambda t: (BOARD_ORDER[t["board"]], rank(t))):
         if t["key"] not in skip and not held_back(t, own=True):
             return t, "own"
+    # a'. my own ticket rests or waits but still sits in a building column: park it first (one job per REST_MAX), so the
+    # one-runner-one-ticket hold clears even while the WIP cap closes every lane that would have tried a claim
+    for t in building:
+        if me in names(t) and t["section"] != "QA" and not set(t["labels"]) & SKIP_ALL and parkable(t):
+            return t, "park"
     qa_mine = [t for t in building if me in names(t) and t["section"] == "QA"]
     if qa_mine:
         theirs = sorted((t for t in building if t["section"] == "QA" and t["key"] not in skip and not set(t["labels"]) & SKIP_ALL
@@ -1226,6 +1231,12 @@ def wip_self_test():
         assert source == "board" and t["key"] in ("HTPR-25", "HTPR-26"), "open WIP: new work starts again"
         SNAP["tickets"].append(tk("HTPR-32", "QA", "runner 2"))
         assert choose(2, True)[1] == "own", "a merged ticket waiting for its live check goes back to its runner"
+        SNAP["tickets"] = [x for x in SNAP["tickets"] if x["key"] != "HTPR-32"] + [tk("HTPR-40", "In Progress", "runner 2")]
+        SNAP["rel"]["HTPR-40"] = [[], []]
+        (STATE / "runner-1.idle").write_text(f"{iso(0.5)} HTPR-40\n")
+        t, source = choose(2, True)
+        assert (t["key"], source) == ("HTPR-40", "park"), "an own ticket that rests is parked before anything else"
+        (STATE / "runner-1.idle").unlink()
     finally:
         try_claim = real_claim
         (STATE / "stop-3").unlink()
