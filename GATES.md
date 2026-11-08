@@ -1,17 +1,13 @@
-# YPER4-1382
+# YPER4-1386 gates
 
-house-rules-retired-pools:
-  CHECK: python3 /home/valentin/projects/worktrees/runner-2-yper4-1382/bin/rules-drift --house-rules
-  EXPECT: clean
+## pick-gate
+CHECK: `python3 fleet/tool-gate.py --self-test`
+EXPECT: `fleet/tool-gate self-test ok`
 
-rules-drift-self-check:
-  CHECK: python3 /home/valentin/projects/worktrees/runner-2-yper4-1382/bin/rules-drift --self-check
-  EXPECT: PASS
+## broken-picker-drill
+CHECK: `python3 fleet/drill broken-picker`
+EXPECT: `broken-picker pass`
 
-rules-drift-unit:
-  CHECK: cd /home/valentin/projects/worktrees/runner-2-yper4-1382 && python3 -m unittest tests.test_rules_drift -v
-  EXPECT: OK
-
-fleet-drill-rule-drift:
-  CHECK: /home/valentin/projects/worktrees/runner-2-yper4-1382/fleet/drill rule-drift
-  EXPECT: pass
+## ci-workflow
+CHECK: `grep -q tool-gate fleet/../.github/workflows/pick.yml`
+EXPECT: `tool-gate`

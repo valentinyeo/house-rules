@@ -17,6 +17,7 @@ the release line is down.
 Output: one JSON line per drill appended to ~/.local/state/fleet-drill/results.jsonl
 with failure, injected_at, detected_at, fix_started_at, minutes, pass.
 """
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -219,6 +220,14 @@ def compiles(path, dest):
     return r.returncode == 0
 
 
+def file_sha(path):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def drill_missing_check(ctx):
     start = time.time()
     (ctx.watch_state / "missing-check.json").write_text(json.dumps({"status": "drill-review", "age_min": 31, "reported": False}))
@@ -237,17 +246,32 @@ def drill_missing_check(ctx):
 
 def drill_broken_picker(ctx):
     start = time.time()
+    env = ctx.env()
+    gate = HERE / "tool-gate.py"
+    seed = subprocess.run([sys.executable, str(gate), "pick"], env=env, capture_output=True, text=True)
+    if seed.returncode != 0:
+        det = time.time()
+        err = (seed.stderr or seed.stdout or "tool-gate seed failed").strip().splitlines()[-1]
+        return row("broken-picker", start, det, None, False, err)
     bad = ctx.root / "pick-bad.py"
     bad.write_text(PICK.read_text() + "\n(\n")
     good = compiles(PICK, ctx.root / "pick-good.pyc")
     broken = compiles(bad, ctx.root / "pick-bad.pyc")
-    detected = time.time()
     if not good:
-        return row("broken-picker", start, detected, None, False, "current picker does not compile")
+        return row("broken-picker", start, time.time(), None, False, "current picker does not compile")
     if broken:
-        return row("broken-picker", start, detected, None, False, "injected syntax error still compiled")
-    lkg = ctx.runner_state / "pick-lkg.sha"
-    if not lkg.exists():
+        return row("broken-picker", start, time.time(), None, False, "injected syntax error still compiled")
+    env_bad = dict(env)
+    env_bad["FLEET_PICK_SOURCE"] = str(bad)
+    roll = subprocess.run([sys.executable, str(gate), "pick"], env=env_bad, capture_output=True, text=True)
+    detected = time.time()
+    if roll.returncode != 0:
+        return row("broken-picker", start, detected, None, False, "tool-gate did not serve lkg on bad pick")
+    lkg = Path(roll.stdout.strip())
+    if not lkg.is_file() or file_sha(lkg) == file_sha(bad):
+        return row("broken-picker", start, detected, None, False, "rollback path was not the last good copy")
+    lkg_sha = ctx.runner_state / "pick-lkg.sha"
+    if not lkg_sha.exists():
         return row("broken-picker", start, detected, None, False, "no last-known-good picker sha")
     return row("broken-picker", start, detected, detected, True, "")
 
