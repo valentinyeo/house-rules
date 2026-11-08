@@ -330,8 +330,14 @@ def live_runner(name):
 
 
 def legacy_alive(name):
+    """A legacy MP runner still runs an agent. A bare shell does not count: Valentin's PC terminal tabs reattach with
+    `tmux new-session -A -s mp-runner-N` and recreate the retired sessions empty (2026-11-08)."""
     m = re.fullmatch(r"mp runner (\d+)", name)
-    return bool(m) and subprocess.run(["tmux", "has-session", "-t", f"mp-runner-{m[1]}"], capture_output=True).returncode == 0
+    if not m:
+        return False
+    r = subprocess.run(["tmux", "list-panes", "-t", f"mp-runner-{m[1]}", "-F", "#{pane_current_command}"],
+                       capture_output=True, text=True)
+    return r.returncode == 0 and any(c not in ("bash", "sh", "zsh", "-bash") for c in r.stdout.split())
 
 
 def retired(name):
@@ -958,7 +964,7 @@ def pool_skip(workers):
     return BASE_SKIP | {f"brain-{b}" for b in ("light", "medium", "hard") if b not in can}
 
 
-def pipeline_reason(t, skip_brains, pr):
+def pipeline_reason(t, skip_brains, pr, rest=frozenset()):
     """Why t is not a unit of the pool's pipeline, or None when it is. A unit is work some lane that stays open under the
     cap can take (own, orphan, cross-qa, PR queue, finish), so a closed cap can always drain."""
     labels = set(t["labels"])
@@ -968,6 +974,10 @@ def pipeline_reason(t, skip_brains, pr):
         return "brain"
     if t["waiting"] or t["section"] == "Valentin Review":
         return "waits on a person"
+    # a runner ended IDLE on it and nothing changed since: every lane skips it (Skip), so counting it would close new work
+    # with nobody able to drain it (2026-11-08: 8 of 11 units resting held 3 runners idle)
+    if t["key"] in rest:
+        return "resting"
     if any(not re.fullmatch(r"runner \d+", h) and not retired(h) for h in names(t)):
         return "outside the pool"
     held = any(live_runner(h) for h in names(t))
@@ -992,12 +1002,13 @@ def pipeline():
     skip_brains = pool_skip(workers)
     with_pr = {pr_ticket(p) for p in open_prs()} - {None}
     units, excluded, seen = set(), {}, set()
+    rest = resting(1, True)  # read only; runner 1's view already holds every runner's IDLE rests
     for t in SNAP["tickets"]:
         building = t["section"] in BOARDS[t["board"]][1]
         if (not building and t["key"] not in with_pr) or t["key"] in seen:
             continue
         seen.add(t["key"])
-        why = pipeline_reason(t, skip_brains, t["key"] in with_pr)
+        why = pipeline_reason(t, skip_brains, t["key"] in with_pr, rest)
         if why:
             excluded.setdefault(why, []).append(t["key"])
         else:
@@ -1281,6 +1292,10 @@ def wip_self_test():
     assert excluded == {"design-pass": ["HTPR-22"], "incident": ["HTPR-23"], "outside the pool": ["HTPR-24"],
                         "blocked": ["HTPR-27"]}, excluded
     assert wip_line(units, workers, excluded).startswith("wip: 4 of 2, new work closed"), wip_line(units, workers, excluded)
+    (STATE / "runner-1.idle").write_text(f"{iso(1)} HTPR-29\n")
+    units, workers, excluded = pipeline()
+    assert "HTPR-29" not in units and excluded.get("resting") == ["HTPR-29"], "a resting ticket no lane takes is no unit"
+    (STATE / "runner-1.idle").unlink()
 
     claimed = []
     real_claim = try_claim
