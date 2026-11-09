@@ -1,52 +1,100 @@
 #!/usr/bin/env python3
-"""Roster check: live agent sessions with no row in fleet/roster.json. Read only.
+"""Roster check: every live agent session on this VPS must be accounted for (HYCI-214).
 
-Prints NOT-IN-ROSTER per tmux session that runs an agent (claude, hax, codex, cursor) but has no row.
-Pool rows match by pattern ({n} digits, {x} one letter). Exit 1 when any session is missing.
-Multibot chats are not tmux sessions; they join once `mp-layout list` exists.
+    roster-check [--record] [--log] | --self-test
+
+Live sessions: tmux panes that run an agent (claude, hax, codex, cursor-agent) and Multibot hosted chats
+(fleet/roster.py). Each is matched to a fleet/roster.json row (pinned tmux, name pattern, or Multibot name), else to
+its own announcement (fleet/roster-announce). Prints one line per session that is not accounted for:
+  NOT-IN-ROSTER <tmux> ...  no row and never announced
+  UNKNOWN <tmux> ...        announced, but never said its kind and board
+--record writes an unknown announcement for each NOT-IN-ROSTER session, so the hook-less harnesses (Codex, hax) are
+recorded too, never silently dropped. --log appends to ~/.local/state/fleet-switch/log.txt for Chief Of Staff when the
+flagged set changes. Exit 1 when any session is flagged. Read only on boards.
 """
 import json
-import re
-import subprocess
+import os
 import sys
+import time
 from pathlib import Path
 
-ROSTER = json.loads((Path(__file__).resolve().parent / "roster.json").read_text())
-AGENT = re.compile(r"(^|/)(claude|hax|codex|cursor-agent)( |$)")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import roster  # noqa: E402
+
+WATCH = Path(os.environ.get("FLEET_WATCH_STATE", Path.home() / ".local/state/fleet-switch"))
+LAST = WATCH / "roster-check.json"
 
 
-def pattern(name):
-    return re.compile("^" + re.escape(name).replace(r"\{n\}", r"\d+").replace(r"\{x\}", "[a-z]") + "$")
+def verdicts(sessions, static, announced):
+    """[(tag, session, note)] for sessions not accounted for. Pure."""
+    by_key = {roster.key_of(a): a for a in announced}
+    out = []
+    for s in sessions:
+        if roster.row_for(static, s["tmux"], s.get("name")):
+            continue
+        a = by_key.get(roster.key_of(s))
+        if a and a.get("kind") not in (None, "unknown"):
+            continue
+        note = " ".join(f"{k}={v}" for k, v in (("name", s.get("name")), ("harness", s.get("harness")),
+                                                  ("cwd", (a or {}).get("cwd"))) if v)
+        out.append(("UNKNOWN" if a else "NOT-IN-ROSTER", s, note))
+    return out
+
+
+def announced_sessions(announced, live_tmux):
+    """Announced unknowns whose tmux is alive but not seen as an agent session (e.g. idle shells), as sessions."""
+    return [dict(tmux=a["tmux"], name=a.get("multibot"), harness=a.get("harness"))
+            for a in announced if a.get("tmux") in live_tmux and a.get("kind") in (None, "unknown")]
 
 
 def main():
-    pats = [pattern(r["name"]) for r in ROSTER["rows"]]
-    ps = subprocess.run(["ps", "-eo", "pid=,ppid=,args="], capture_output=True, text=True).stdout.splitlines()
-    kids, args = {}, {}
-    for line in ps:
-        parts = line.split(None, 2)
-        if len(parts) == 3:
-            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
-            args[int(parts[0])] = parts[2]
+    static, announced = roster.static_rows(), roster.announced()
+    sessions = roster.live_sessions()
+    seen = {s["tmux"] for s in sessions}
+    alive = roster._mp_send().tmux_names() or set()
+    sessions += [s for s in announced_sessions(announced, alive) if s["tmux"] not in seen]
+    flagged = verdicts(sessions, static, announced)
+    if "--record" in sys.argv:
+        for tag, s, _ in flagged:
+            if tag == "NOT-IN-ROSTER":
+                roster.write_announce(dict(tmux=s["tmux"], multibot=s.get("name"), sid=s.get("sid"),
+                                           harness=s.get("harness"), kind="unknown", seen=roster.now_iso(),
+                                           source="roster-check"))
+    for tag, s, note in flagged:
+        print(f"{tag} {s['tmux']} {note}".rstrip())
+    print(f"ROSTER-CHECK: {len(flagged)} of {len(sessions)} live agent sessions not accounted for.")
+    if "--log" in sys.argv:
+        names = sorted(s["tmux"] + (f" ({s['name']})" if s.get("name") else "") for _, s, _ in flagged)
+        try:
+            last = json.loads(LAST.read_text())
+        except (OSError, ValueError):
+            last = []
+        if names != last:
+            WATCH.mkdir(parents=True, exist_ok=True)
+            line = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + " roster-check: "
+            line += (f"{len(names)} live sessions not in the roster, Chief Of Staff: add a row or have them run "
+                     f"fleet/roster-announce: " + ", ".join(names)) if names else "every live session is in the roster"
+            with open(WATCH / "log.txt", "a") as f:
+                f.write(line + "\n")
+            LAST.write_text(json.dumps(names))
+    sys.exit(1 if flagged else 0)
 
-    def runs_agent(pid):
-        stack = [pid]
-        while stack:
-            p = stack.pop()
-            if AGENT.search(args.get(p, "")):
-                return True
-            stack += kids.get(p, [])
-        return False
 
-    panes = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
-                           capture_output=True, text=True).stdout.split("\n")
-    missing = sorted({s for s, pid in (l.split() for l in panes if l.strip())
-                      if runs_agent(int(pid)) and not any(p.match(s) for p in pats)})
-    for s in missing:
-        print(f"NOT-IN-ROSTER {s}")
-    print(f"ROSTER-CHECK: {len(missing)} live agent sessions without a row.")
-    sys.exit(1 if missing else 0)
+def self_test():
+    static = [{"name": "postbox"}, {"name": "ht-or-runner-{n}"},
+              {"name": "Matt Live Stream", "multibot": "Matt Live Stream", "tmux": "live-1d21840"}]
+    s = lambda t, name=None: {"tmux": t, "name": name, "harness": "claude"}
+    live = [s("postbox"), s("ht-or-runner-3"), s("live-1d21840"), s("live-9", "Design Pass Runner"), s("live-a"),
+            s("live-b"), s("codex-x")]
+    ann = [{"tmux": "live-a", "kind": "unknown", "cwd": "/p"}, {"tmux": "live-b", "kind": "solo-dev", "board": "9"}]
+    got = {(tag, x["tmux"]) for tag, x, _ in verdicts(live, static, ann)}
+    assert got == {("NOT-IN-ROSTER", "live-9"), ("UNKNOWN", "live-a"), ("NOT-IN-ROSTER", "codex-x")}, got
+    assert verdicts([s("live-x", "matt live stream")], static, []) == [], "a Multibot name must match its row"
+    alive = {"live-a", "live-z"}
+    extra = announced_sessions(ann + [{"tmux": "live-gone", "kind": "unknown"}], alive)
+    assert [x["tmux"] for x in extra] == ["live-a"], "only announced unknowns with a live tmux are flagged"
+    print("roster-check self-test ok")
 
 
 if __name__ == "__main__":
-    main()
+    self_test() if "--self-test" in sys.argv else main()

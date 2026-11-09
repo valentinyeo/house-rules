@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""roster-announce: a session tells the roster who it is (HYCI-214).
+
+    roster-announce --hook                       SessionStart hook: record this session, never fails, prints hook JSON
+    roster-announce --kind solo-dev --board 12322 --client Matt --harness claude [--view ID] [--app APP] [--name N]
+                    [--take "In Progress,Backlog"] [--dry-run]
+    roster-announce --self-test
+
+Writes one file per session under ~/.local/state/roster/announce/ (fleet/roster.py). Idempotent: the same session
+always rewrites the same file, newest fields win. A session that matches a row in fleet/roster.json is recorded under
+that row. Any other session is kind "unknown" until it announces its kind and board; fleet/roster-check flags it for
+Chief Of Staff. The hook tells an unknown Claude session how to announce itself.
+"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import roster  # noqa: E402
+
+ME = str(Path(__file__).resolve())
+
+
+def own_tmux(env):
+    tab = env.get("MULTIPROMPT_TAB")
+    if tab:
+        return tab
+    pane = env.get("TMUX_PANE")
+    if not pane:
+        return None
+    r = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{session_name}"],
+                       capture_output=True, text=True, timeout=5)
+    return r.stdout.strip() or None
+
+
+def published_name(tmux):
+    try:
+        names = json.loads((Path.home() / ".local/state/multiprompt/chat-names.json").read_text())
+        return (names.get(tmux) or {}).get("name")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def entry_for(ident, given, static, prev):
+    """The announce record for one session. Pure: ident is what the session observed about itself, given is what it
+    declared, static the roster rows, prev its earlier record."""
+    row = roster.row_for(static, ident.get("tmux"), ident.get("multibot"))
+    e = dict(ident)
+    if row:
+        e.update(row=row["name"], kind=row["kind"], name=row["name"])
+        return e
+    declared = {k: v for k, v in given.items() if v is not None}
+    e.update(declared)
+    e["name"] = declared.get("name") or prev.get("name") or ident.get("multibot") or ident.get("tmux") or ident.get("sid")
+    e["kind"] = declared.get("kind") or prev.get("kind") or "unknown"
+    return e
+
+
+def hint(e):
+    if e.get("kind") != "unknown":
+        return None
+    return (f"Roster: this session ({e.get('tmux') or e.get('sid')}) has no row in fleet/roster.json, so Chief Of "
+            f"Staff cannot account for it. Announce yourself once: {ME} --kind solo-dev|lead|outside "
+            f"--board <board id> [--view <view id>] [--app <app> | --client <client>] --harness claude. "
+            f"House rule 2026-11-09.")
+
+
+def take_arg(text):
+    if not text:
+        return None
+    names = [s.strip() for s in text.split(",") if s.strip()]
+    return {n: (1 if i == len(names) - 1 else 0) for i, n in enumerate(names)}
+
+
+def parse(argv):
+    opts, flags, i = {}, set(), 0
+    keys = {"--" + k for k in ("name", "kind", "board", "view", "app", "client", "harness", "take")}
+    while i < len(argv):
+        a = argv[i]
+        if a in keys and i + 1 < len(argv):
+            opts[a[2:]] = argv[i + 1]
+            i += 2
+        else:
+            flags.add(a)
+            i += 1
+    return opts, flags
+
+
+def ident_now(env, stdin_json):
+    tmux = own_tmux(env)
+    return {k: v for k, v in dict(tmux=tmux, multibot=published_name(tmux) if tmux else None,
+                                  sid=stdin_json.get("session_id") or env.get("CLAUDE_SESSION_ID"),
+                                  cwd=stdin_json.get("cwd") or os.getcwd(), seen=roster.now_iso()).items() if v}
+
+
+def previous(ident):
+    for a in roster.announced():
+        if roster.key_of(a) == roster.key_of(ident):
+            return a
+    return {}
+
+
+def hook():
+    try:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+        data = json.loads(raw) if raw.strip() else {}
+        ident = ident_now(os.environ, data)
+        if not ident.get("tmux") and not ident.get("sid"):
+            print("{}")
+            return
+        ident.setdefault("harness", "claude")
+        e = roster.write_announce(entry_for(ident, {}, roster.static_rows(), previous(ident)))
+        h = hint(e)
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": h}}) if h else "{}")
+    except Exception as err:  # a hook must never break a session start
+        print("{}")
+        print(f"roster-announce: {err}", file=sys.stderr)
+
+
+def announce(argv):
+    opts, flags = parse(argv)
+    ident = ident_now(os.environ, {})
+    given = dict(opts, take=take_arg(opts.get("take")))
+    e = entry_for(ident, given, roster.static_rows(), previous(ident))
+    if "--dry-run" not in flags:
+        e = roster.write_announce(e)
+    print(json.dumps(e, sort_keys=True))
+    if e.get("row"):
+        print(f"roster-announce: matches roster row {e['row']}; change that row by PR to fleet/roster.json", file=sys.stderr)
+
+
+def self_test():
+    static = [{"name": "postbox", "kind": "solo-dev"}, {"name": "ht-or-runner-{n}", "kind": "runner-pool"},
+              {"name": "Matt Live Stream", "multibot": "Matt Live Stream", "tmux": "live-1d21840", "kind": "solo-dev"}]
+    e = entry_for({"tmux": "live-1d21840", "sid": "s"}, {}, static, {})
+    assert e["row"] == "Matt Live Stream" and e["kind"] == "solo-dev", "pinned tmux must map to its row"
+    assert entry_for({"tmux": "ht-or-runner-7"}, {}, static, {})["row"] == "ht-or-runner-{n}", "pool pattern must match"
+    assert entry_for({"tmux": "live-x", "multibot": "matt live stream"}, {}, static, {})["row"] == "Matt Live Stream"
+    u = entry_for({"tmux": "live-new", "sid": "s2"}, {}, static, {})
+    assert u["kind"] == "unknown" and u["name"] == "live-new" and "row" not in u, "unmatched session is unknown"
+    assert hint(u) and "--board" in hint(u), "unknown session must be told how to announce"
+    d = entry_for({"tmux": "live-new"}, {"kind": "solo-dev", "board": "999", "client": "Acme", "take": None}, static, {})
+    assert d["kind"] == "solo-dev" and d["board"] == "999" and d["client"] == "Acme" and hint(d) is None
+    assert entry_for({"tmux": "live-new"}, {}, static, d)["kind"] == "solo-dev", "a later hook must keep the declared kind"
+    assert take_arg("In Progress, Backlog") == {"In Progress": 0, "Backlog": 1}
+    import tempfile
+    roster.ANNOUNCE = Path(tempfile.mkdtemp())
+    roster.write_announce({"tmux": "live-a", "kind": "unknown", "seen": "1"})
+    roster.write_announce({"tmux": "live-a", "kind": "solo-dev", "seen": "2"})
+    got = roster.announced()
+    assert len(got) == 1 and got[0]["kind"] == "solo-dev" and got[0]["seen"] == "2", "upsert must be idempotent"
+    print("roster-announce self-test ok")
+
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        self_test()
+    elif "--hook" in sys.argv:
+        hook()
+    else:
+        announce(sys.argv[1:])
