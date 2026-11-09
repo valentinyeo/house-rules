@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""solo-wake: keep every solo dev draining its board view (HYCI-211).
+"""solo-wake: keep every solo dev draining its board view or whole board (HYCI-211, HYCI-214).
 
-For each roster row of kind solo-dev: find its live session, read its view, and when the session sits idle while the
-view still holds a ticket it may take, send one short wake prompt naming that ticket. Never wakes a busy session.
-At most one wake per session per 30 minutes. A missing session is logged for Chief Of Staff.
+For each solo-dev row (fleet/roster.json plus sessions that announced themselves with fleet/roster-announce): find its
+live session, read its scope, and when the session sits idle while the scope still holds a ticket it may take, send
+one short wake prompt naming that ticket. Never wakes a busy session. At most one wake per session per 30 minutes.
+A missing session is logged for Chief Of Staff.
+
+Scope per row: "view" as a scopes.json key or a raw Hypertask view id on "board"; no view means the whole board
+(client solo devs own their board). "take" maps section to 0 (own work in flight) or 1 (queue); default TAKE.
+A row without a login owns its whole board, so unassigned in-flight tickets count as its own.
 
 Sessions come in two shapes:
-- Multibot live chats (roster "tmux" is a live-* id): busy or idle from the agent host; the wake goes through mp_send,
-  which also restarts an agent the host idle-stopped (agent-host HOST_IDLE_SECONDS).
+- Multibot live chats (roster "tmux" is a live-* id): busy, idle or stopped from the agent host (roster.hosted_chats);
+  the wake goes through mp_send, whose dispatch restarts an agent the host idle-stopped (agent-host HOST_IDLE_SECONDS).
 - Plain tmux Claude sessions (roster "name" is the tmux session): busy or idle from session-list; the wake goes
   through session-say.
 
 Usage: solo-wake [--dry-run] | --self-test
 Log: ~/.local/state/fleet-switch/log.txt. State: ~/.local/state/fleet-switch/solo-wake.json.
 """
-import importlib.util
 import json
 import os
 import subprocess
@@ -37,6 +41,8 @@ TAKE = {"Doing": 0, "AI Review": 0, "Todo": 1}  # own work in flight first, then
 DRY_RUN = "--dry-run" in sys.argv
 
 sys.path.insert(0, str(HERE.parent / "skills/hypertask-triage/scripts"))
+sys.path.insert(0, str(HERE))
+import roster  # noqa: E402
 import scopes  # noqa: E402
 
 
@@ -84,26 +90,26 @@ def open_blocker(key):
     return None
 
 
-def candidates(tickets, login):
-    """View tickets the solo dev may take, best first. Pure: the BlockedBy read happens later, one ticket at a time."""
-    me = login.lower()
+def candidates(tickets, login, take=TAKE):
+    """Scope tickets the solo dev may take, best first. Pure: the BlockedBy read happens later, one ticket at a time."""
+    me = (login or "").lower()
     out = []
     for t in tickets:
-        if t.get("sectionIsDone") or t.get("section") not in TAKE:
+        if t.get("sectionIsDone") or t.get("section") not in take:
             continue
         if t.get("waitingOnUserId") or t.get("blockerCommentId"):
             continue
         names = {(a.get("displayName") or "").lower() for a in t.get("assignees") or []}
         if names - {me}:
             continue  # someone else holds it, or shares it: theirs, not ours
-        if t["section"] != "Todo" and me not in names:
-            continue  # in flight but unassigned: another session's leftover, board-health sends it home
+        if take[t["section"]] == 0 and login and me not in names:
+            continue  # in flight but unassigned on a shared board: another session's leftover, board-health sends it home
         out.append(t)
-    return sorted(out, key=lambda t: (TAKE[t["section"]], PRIORITY.get(t.get("priority"), 4), t.get("createdAt") or ""))
+    return sorted(out, key=lambda t: (take[t["section"]], PRIORITY.get(t.get("priority"), 4), t.get("createdAt") or ""))
 
 
-def next_ticket(tickets, login, blocked=open_blocker):
-    for t in candidates(tickets, login):
+def next_ticket(tickets, login, blocked=open_blocker, take=TAKE):
+    for t in candidates(tickets, login, take):
         if not blocked(t["ticketNumber"]):
             return t
     return None
@@ -120,13 +126,6 @@ def transcript_age(sid=None, cwd=None, now=None):
     else:
         files = []
     return min((now - f.stat().st_mtime for f in files), default=None)
-
-
-def live_chats():
-    spec = importlib.util.spec_from_file_location("mp_send", MP_SEND)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return {c["tmux"]: c for c in mod.live_chats()}
 
 
 def tmux_states():
@@ -161,19 +160,31 @@ def decide(row, session, ticket, last_wake, now):
     """One verdict per solo dev: ("wake", why) or ("skip", why). Pure."""
     if session is None:
         return "skip", "session not found; Chief Of Staff: restart it or fix its roster row"
-    if session["state"] != "idle":
+    if session["state"] not in ("idle", "stopped"):
         return "skip", f"busy ({session['state']})"
     if session["age"] is not None and session["age"] < QUIET:
         return "skip", f"idle only {int(session['age'] // 60)} min"
     if last_wake and now - last_wake < COOLDOWN:
         return "skip", f"woken {int((now - last_wake) // 60)} min ago"
     if ticket is None:
-        return "skip", "no open ticket it may take in its view"
+        return "skip", "no open ticket it may take"
     return "wake", ticket["ticketNumber"]
 
 
-def message(ticket):
-    return (f"Continue draining your view per /solo-dev: next {ticket['url']} "
+def scope_of(row):
+    """{"board", "view"?, "where"} for a row, or None when it names no usable scope. Pure."""
+    view, board = row.get("view"), str(row.get("board") or "")
+    if view and view in scopes.SCOPES:
+        return dict(scopes.get(view), where=f"view {view}")
+    if not board.isdigit():
+        return None
+    if view:
+        return {"board": int(board), "view": view, "where": f"board {board} view {row.get('view_name') or view}"}
+    return {"board": int(board), "where": f"board {board}"}
+
+
+def message(ticket, scope="view"):
+    return (f"Continue draining your {scope} per /solo-dev: next {ticket['url']} "
             f"({ticket['ticketNumber']}, {ticket['section']}). Already mid-ticket on a job? Finish that first, then this.")
 
 
@@ -195,21 +206,20 @@ def load_state():
 
 
 def main():
-    roster = json.loads((HERE / "roster.json").read_text())
-    rows = [r for r in roster["rows"] if r.get("kind") == "solo-dev"]
-    chats, panes, state, now = live_chats(), tmux_states(), load_state(), time.time()
+    rows = [r for r in roster.rows() if r.get("kind") == "solo-dev"]
+    chats, panes, state, now = roster.hosted_chats(), tmux_states(), load_state(), time.time()
     boards = {}
     for row in rows:
-        who = row["name"]
-        if not row.get("view") or row["view"] not in scopes.SCOPES or not row.get("login"):
-            log(f"{who}: skip, no view scope or login in roster/scopes.json")
+        scope = scope_of(row)
+        who = f"{row['name']} ({scope['where']})" if scope else row["name"]
+        if scope is None or (scope.get("view") and not row.get("login")):
+            log(f"{who}: skip, no board, or a view without a login, in its roster row")
             continue
         session = session_of(row, chats, panes)
-        verdict, why = decide(row, session, {"ticketNumber": "?"}, state.get(who), now)
+        verdict, why = decide(row, session, {"ticketNumber": "?"}, state.get(row["name"]), now)
         if verdict == "skip":
             log(f"{who}: skip, {why}")
             continue
-        scope = scopes.get(row["view"])
         if scope["board"] not in boards:
             boards[scope["board"]] = board_tickets(scope["board"])
         tickets = boards[scope["board"]]
@@ -217,17 +227,18 @@ def main():
             log(f"{who}: skip, board {scope['board']} unreadable")
             continue
         labels = scopes.view_labels(scope, ht)
-        ticket = next_ticket([t for t in tickets if scopes.in_view(t, labels)], row["login"])
-        verdict, why = decide(row, session, ticket, state.get(who), now)
+        ticket = next_ticket([t for t in tickets if scopes.in_view(t, labels)], row.get("login"),
+                             take=row.get("take") or TAKE)
+        verdict, why = decide(row, session, ticket, state.get(row["name"]), now)
         if verdict == "skip":
             log(f"{who}: skip, {why}")
             continue
         if DRY_RUN:
             log(f"{who}: would wake {session['key']} with {why}")
             continue
-        ok, detail = send(session, message(ticket))
+        ok, detail = send(session, message(ticket, "view" if scope.get("view") else "board"))
         if ok:
-            state[who] = now
+            state[row["name"]] = now
             STATE.write_text(json.dumps(state))
         log(f"{who}: {'woke' if ok else 'wake failed for'} {session['key']} with {why} via {session['via']} ({detail})")
 
@@ -263,6 +274,18 @@ def self_test():
     assert session_of({"name": "postbox"}, {}, {"postbox": {"harness": "bash", "state": "?", "cwd": "/"}}) is None, \
         "a shell where Claude died is a dead session"
     assert "1897" in message(tk("IGSH-1897", "Todo")) and "/solo-dev" in message(tk("X", "Todo"))
+    assert "your board" in message(tk("X", "Todo"), "board")
+    client = {"In Progress": 0, "Backlog": 1}
+    board = [tk("M1", "Backlog", prio="Urgent"), tk("M2", "In Progress", prio="Low"), tk("M3", "Waiting on Matt"),
+             tk("M4", "Valentin Review"), tk("M5", "In Progress", "Valentin Yeo")]
+    assert [t["ticketNumber"] for t in candidates(board, None, client)] == ["M2", "M1"], \
+        "no-login client board: unassigned in-flight is its own, waiting and review columns never, others' never"
+    assert candidates(board, None) == [], "a client board must not fall back to the 2060 columns"
+    assert decide({}, dict(idle, state="stopped"), t, None, now) == ("wake", "B"), "an idle-stopped chat must be woken"
+    assert scope_of({"board": "12322", "view": None}) == {"board": 12322, "where": "board 12322"}, "no view: whole board"
+    assert scope_of({"board": "15", "view": "e6753c48", "view_name": "Design pass"})["view"] == "e6753c48"
+    assert scope_of({"board": "2060", "view": "2060/postbox"})["where"] == "view 2060/postbox"
+    assert scope_of({"board": None, "view": None}) is None, "no board, no scope"
     print("solo-wake self-test ok")
 
 
