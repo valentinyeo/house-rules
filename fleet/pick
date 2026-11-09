@@ -12,8 +12,8 @@ built-in ENGINES map, which is the house-rules brain map. A brain the runner's e
 ticket held by a runner whose engine skips its brain counts as an orphan, so a runner that can do it adopts it. This
 replaces ht-or-runner-pick,
 ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/). Order:
-  0. a live incident (YPER4-1375): an open board 15 ticket labelled incident that no live runner works. Any Cursor runner
-     takes it first, whatever it holds (the house rule names grok-4.7 high; other engines skip step 0). Lane cap, app freeze, rests, queue brake and holds do not apply (ship-claim runs with
+  0. a live incident (YPER4-1375): an open board 15 ticket labelled incident that no live runner works. Any runner
+     takes it first, whatever it holds or its engine: the run is Cursor grok-4.7 high (house rule), even on a Codex slot. Lane cap, app freeze, rests, queue brake and holds do not apply (ship-claim runs with
      SHIP_CLAIM_INCIDENT=1). Model grok-4.7-high, brief briefs/incident.txt in front of the app brief. A runner assigned to
      an incident it is not running right now (log) is handed it again; an incident another runner is running is left alone.
   a. my own ticket in a building column on any board, QA included (the merging runner does the live check; a design-pass
@@ -125,6 +125,9 @@ ENGINES = {
                    park=("sonnet", "medium"), incident=None),
 }
 ENGINE = "cursor"
+# House rules, live incident lane: any runner takes it on grok-4.7 high, whatever its engine. The pacer can rest Cursor
+# to 0 runners; an incident still runs there (HYCI-208 sat unheld for hours while every slot ran on Codex).
+INCIDENT_ENGINE = "cursor"
 RUN_START = re.compile(r"^\S+ (?:cursor|hax|claude): (.*)$")
 TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|HYCI)-([0-9]+)\b")
 RETIRED = re.compile(r"^(?:ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
@@ -1293,11 +1296,9 @@ def incident_step(n, dry):
     """Step 0. The open incident that no other runner works, oldest and most urgent first. Lane cap, app freeze,
     rests and the skip sets of the other steps do not apply; only brain-extra-hard and design-pass tickets (which
     ship-claim refuses) and tickets that wait on a person are left out."""
-    if not ENGINES[ENGINE]["incident"]:
-        return None
     me = f"runner {n}"
     cands = [t for t in SNAP.get("incidents") or []
-             if t["board"] in INCIDENT_BOARDS and can_join(n, t["board"]) and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & (SKIP_ALL | {"design-pass"})]
+             if t["board"] in INCIDENT_BOARDS and can_join(n, t["board"]) and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & (BASE_SKIP | {"design-pass"})]
     for t in sorted(cands, key=lambda t: (rank(t), t["created"])):
         if incident_runner(t["key"], n):
             continue
@@ -1573,10 +1574,11 @@ def render(n, t, source):
     if source == "incident":
         brief_file = HERE / "briefs" / ("release-stop.txt" if t["board"] == "11514" else "incident.txt")
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
-        label, model, effort = ("brain-hard", *paced_models().get("incident", ENGINES[ENGINE]["incident"]))
+        label, model, effort = ("brain-hard", *ENGINES[INCIDENT_ENGINE]["incident"])
     return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
             "title": t["title"], "url": url(t), "repo": repo_for(t), "brief_file": str(brief_file), "brief": brief,
-            "brain": label, "engine": ENGINE, "model": model, "effort": effort, "labels": t["labels"]}
+            "brain": label, "engine": INCIDENT_ENGINE if source == "incident" else ENGINE, "model": model, "effort": effort,
+            "labels": t["labels"]}
 
 
 def trace_self_test():
@@ -1665,15 +1667,22 @@ def self_test():
     assert brain({**t, "labels": ["brain-light"]})[1:] == ("deepseek-v4.1-flash", "low")
     assert render(5, t, "park")["model"] == "deepseek-v4.1-flash" and render(5, t, "board")["engine"] == "opencode"
     SNAP_BACKUP = globals().get("SNAP")
-    globals()["SNAP"] = {"incidents": [{**t, "labels": []}]}
-    assert incident_step(5, True) is None, "OpenCode never takes an incident"
+    inc_t = {**t, "labels": ["incident"], "waiting": False, "created": "2026-11-01T00:00:00Z", "holders": [("runner 5", True)]}
+    saved_join = can_join
+    globals()["can_join"] = lambda n, board: True
+    globals()["SNAP"] = {"incidents": [inc_t]}
+    hit = incident_step(5, True)
+    assert hit and hit[1] == "incident", "an OpenCode slot takes an incident"
+    inc = render(5, hit[0], "incident")
+    assert (inc["engine"], inc["model"], inc["effort"]) == ("cursor", "grok-4.7-high", "high"), "incidents run on Cursor grok high"
     globals()["SNAP"] = SNAP_BACKUP
     set_engine("claude")
     assert "brain-hard" not in SKIP_ALL and "brain-extra-hard" in SKIP_ALL
     assert brain(hard)[1:] == ("claude-opus-5-5", "medium") and brain(t)[1:] == ("sonnet", "medium")
-    globals()["SNAP"] = {"incidents": [{**t, "labels": []}]}
-    assert incident_step(5, True) is None, "Claude never takes an incident"
+    globals()["SNAP"] = {"incidents": [inc_t]}
+    assert incident_step(5, True)[1] == "incident", "a Claude slot takes an incident"
     globals()["SNAP"] = SNAP_BACKUP
+    globals()["can_join"] = saved_join
     set_engine("codex")
     assert "brain-hard" not in SKIP_ALL and brain(hard)[1:] == ("gpt-6.1-sol", "high")
     assert brain({**t, "labels": ["brain-light"]})[1:] == ("gpt-6.1-terra", "medium")
