@@ -382,16 +382,16 @@ def self_test():
     assert rows["A"]["why"] == "its PR is red" and rows["B"]["why"] == "its PR has merge conflicts"
     assert rows["C"]["why"].startswith("its PR sat untouched 75h"), rows["C"]
     assert rows["E"]["why"] == "In Progress with no open PR" and rows["L"]["why"] == "AI Review with no open PR"
-    assert rows["E"]["home"] == "Bugs" and home_column(2060, [], "x") == "Todo" and home_column(11514, [], "x") == "Backlog"
+    assert rows["E"]["home"] == "Backlog" and home_column(2060, [], "x") == "Todo" and home_column(11514, [], "x") == "Backlog"
     sp = {t: (c, note) for t, c, note in plan_sendback(list(rows.values()))}
     assert "D" not in sp and len(sp) == 5
     assert sp["A"][0][0][:4] == ["gh", "pr", "close", "https://github.com/hypertask-ai/h/pull/1"] and "project-15/A" in sp["A"][0][0][-1]
-    assert sp["A"][0][1:] == [["vcc", "task", "move", "A", "Bugs"], ["vcc", "task", "unassign", "A", "--agent", "Runner 9"]]
-    assert sp["E"][0] == [["vcc", "task", "move", "E", "Bugs"], ["vcc", "task", "unassign", "E", "--agent", "Runner 7"]]
-    assert sp["C"][0][-1] == ["vcc", "task", "move", "C", "Bugs"], "nobody to unassign"
+    assert sp["A"][0][1:] == [["vcc", "task", "move", "A", "Backlog"], ["vcc", "task", "unassign", "A", "--agent", "Runner 9"]]
+    assert sp["E"][0] == [["vcc", "task", "move", "E", "Backlog"], ["vcc", "task", "unassign", "E", "--agent", "Runner 7"]]
+    assert sp["C"][0][-1] == ["vcc", "task", "move", "C", "Backlog"], "nobody to unassign"
     assert sp["A"][1].startswith(NOTE) and "pull/1 closed" in sp["A"][1] and sp["B"][0][0][:3] == ["vcc", "task", "move"], "the App cannot close a PR outside hypertask-ai"
     waits = plan_sendback([dict(rows["A"], why="it waits on an open BlockedBy ticket", waits=True)])
-    assert waits[0][1] == [["vcc", "task", "move", "A", "Bugs"], ["vcc", "task", "unassign", "A", "--agent", "Runner 9"]], \
+    assert waits[0][1] == [["vcc", "task", "move", "A", "Backlog"], ["vcc", "task", "unassign", "A", "--agent", "Runner 9"]], \
         "a ticket that waits on a blocker goes home like fleet/park --waits-on; its PR stays open"
     print("SELF_TEST_OK")
 
@@ -513,14 +513,8 @@ TICKET_URL = "https://app.hypertask.ai/detail/project-{b}/{n}"
 
 
 def home_column(board, labels, title):
-    """fleet/park's home_section: Bugs, Features or Improvements on board 15, else the board's intake column."""
-    if board != 15:
-        return {2060: "Todo"}.get(board, "Backlog")
-    text = [label.lower() for label in labels] + [(title or "").lower()[:24]]
-    for word, section in (("bug", "Bugs"), ("feature", "Features"), ("improve", "Improvements")):
-        if any(word in t for t in text):
-            return section
-    return "Bugs"
+    """fleet/park's home_section: the board's intake column (board 15: Backlog)."""
+    return {2060: "Todo"}.get(board, "Backlog")
 
 
 def hours_since(stamp, now):

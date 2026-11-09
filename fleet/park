@@ -50,14 +50,8 @@ def vcc(*args, check=True):
 
 
 def home_section(board, labels, title):
-    """Where a ticket that is not being built lives: Bugs, Features or Improvements on board 15, else the board's intake column."""
-    if str(board) != "15":
-        return HOME_COLUMN.get(str(board), "Backlog")
-    text = [l.lower() for l in labels] + [(title or "").lower()[:24]]
-    for word, section in (("bug", "Bugs"), ("feature", "Features"), ("improve", "Improvements")):
-        if any(word in t for t in text):
-            return section
-    return "Bugs"
+    """Where a ticket that is not being built lives: the board's intake column (board 15: Backlog)."""
+    return HOME_COLUMN.get(str(board), "Backlog")
 
 
 def get(key):
@@ -365,11 +359,7 @@ def sweep(apply, forced):
 # ---------------------------------------------------------------- main
 
 def self_test():
-    assert home_section(15, ["AI Cost", "Bug", "brain-hard"], "Own AI keys") == "Bugs"
-    assert home_section(15, ["FEATURE 💎", "AI Cost"], "Cap the remaining") == "Features"
-    assert home_section(15, ["IMPROVEMENT ⚒️", "INBOX"], "Rethink") == "Improvements"
-    assert home_section(15, ["brain-medium"], "[FEATURE] Sign in an agent") == "Features"
-    assert home_section(15, [], "something") == "Bugs"
+    assert home_section(15, ["AI Cost", "Bug", "brain-hard"], "Own AI keys") == "Backlog"
     assert home_section(2060, [], "x") == "Todo" and home_section(11514, [], "x") == "Backlog"
     t = {"ticketNumber": "HTPR-1", "pullRequests": [], "waitingOnUserId": None, "blockerCommentId": None}
     assert classify(t, ["HTPR-2"], {}) == ("waits", ["HTPR-2"])
