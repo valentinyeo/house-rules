@@ -68,6 +68,8 @@ pi_down() {
   mark=$(pi_down_mark "$1")
   [ -f "$mark" ] || return 1
   if [ -e "$PI_AUTH" ] && [ "$PI_AUTH" -nt "$mark" ]; then rm -f "$mark"; return 1; fi
+  # A refresh token OpenAI rejected never heals on its own; only a new Pi login (newer auth.json) clears that mark.
+  grep -qE 'invalid_refresh_token|invalid_grant|OAuth refresh failed' "$mark" && return 0
   if [ $(( $(date +%s) - $(stat -c %Y "$mark") )) -ge "$HARNESS_DOWN_TTL" ]; then rm -f "$mark"; return 1; fi
   return 0
 }
@@ -190,6 +192,8 @@ case "${1:-}" in
     printf 'OAuth refresh failed for openai-codex: token refresh failed (401): "code": "invalid_refresh_token"\n' > "$tmp/run.log"
     pi_mark_auth_failure pi-codex "$tmp/run.log" && echo "mark: pi-codex down on $(grep -o invalid_refresh_token "$(pi_down_mark codex)")"
     expect 'a mark moves the slot to hax' "$(harness 1 codex)" codex
+    touch -d '7 hours ago' "$(pi_down_mark codex)"
+    expect 'a rejected refresh token stays down past six hours' "$(harness 1 codex)" codex
     echo pi > "$STATE/harness-3"; printf '401 Unauthorized\n' > "$tmp/open.log"; pi_mark_auth_failure pi-opencode "$tmp/open.log"
     expect 'a down opencode login falls back the same way' "$(harness 3 opencode)" opencode
     touch "$PI_AUTH"
