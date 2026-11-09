@@ -87,7 +87,7 @@ ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without 
 
 # board -> (new-work columns, building columns)
 BOARDS = {
-    "15": (("Bugs", "Improvements", "Features"), ("In Progress", "AI Review", "QA")),
+    "15": (("Backlog", "Bugs", "Improvements", "Features"), ("In Progress", "AI Review", "QA")),
     "2060": (("Todo",), ("Doing", "AI Review")),
     "11514": (("Backlog",), ("In Progress", "AI Review")),
 }
