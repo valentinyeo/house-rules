@@ -102,13 +102,27 @@ def previous(ident):
     return {}
 
 
+def headless(pid=None, depth=4):
+    """True when an ancestor is a print-mode agent run (claude -p / --print): scripts and timers, not sessions."""
+    pid = pid or os.getppid()
+    for _ in range(depth):
+        try:
+            args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            pid = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return False
+        if b"-p" in args or b"--print" in args:
+            return True
+    return False
+
+
 def hook():
     try:
         raw = sys.stdin.read() if not sys.stdin.isatty() else ""
         data = json.loads(raw) if raw.strip() else {}
         ident = ident_now(os.environ, data)
-        if not ident.get("tmux") and not ident.get("sid"):
-            print("{}")
+        if not os.environ.get("MULTIPROMPT_TAB") and (not ident.get("tmux") or headless()):
+            print("{}")  # a session is a Multibot tab or an interactive tmux agent; other print-mode runs are script steps
             return
         ident.setdefault("harness", "claude")
         e = roster.write_announce(entry_for(ident, {}, roster.static_rows(), previous(ident)))
@@ -151,6 +165,7 @@ def self_test():
     roster.write_announce({"tmux": "live-a", "kind": "solo-dev", "seen": "2"})
     got = roster.announced()
     assert len(got) == 1 and got[0]["kind"] == "solo-dev" and got[0]["seen"] == "2", "upsert must be idempotent"
+    assert headless(pid=1, depth=1) is False, "init is not a print-mode run"
     print("roster-announce self-test ok")
 
 
