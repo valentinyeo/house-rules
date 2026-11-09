@@ -12,5 +12,6 @@ jobs:
       - run: python3 fleet/runner-state.py --self-test
       - run: python3 fleet/park --self-test
       - run: python3 fleet/tool-gate.py --self-test
+      - run: python3 fleet/solo-wake --self-test
       - run: fleet/runner harness-selftest
       - run: python3 -m unittest tests.test_rules_drift -v

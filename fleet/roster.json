@@ -98,6 +98,7 @@
   {
    "name": "Multi Bot Opus Runner",
    "multibot": "Multi Bot Opus Runner",
+   "tmux": "live-308b1fc",
    "kind": "solo-dev",
    "role_skill": "/solo-dev",
    "login": "Multi Bot Opus Lead",
