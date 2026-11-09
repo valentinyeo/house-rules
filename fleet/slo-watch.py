@@ -132,15 +132,17 @@ def watch_missing_drill_review():
 
 
 def required_contexts():
-    rules = gh_out(["api", "repos/hypertask-ai/hypertask/rules/branches/production", "--jq", ".required_status_checks"])
+    """Required check names on production. The rules endpoint returns a list of rules; the names sit in the
+    required_status_checks rule's parameters."""
+    rules = gh_out(["api", "repos/hypertask-ai/hypertask/rules/branches/production"])
     if rules.returncode != 0:
         return None
     try:
         body = json.loads(rules.stdout)
     except ValueError:
         return None
-    ctx = body.get("checks") or []
-    return [c.get("context") or c for c in ctx if isinstance(c, dict)] or list(ctx)
+    return [c["context"] for r in body if isinstance(r, dict) and r.get("type") == "required_status_checks"
+            for c in (r.get("parameters") or {}).get("required_status_checks") or [] if c.get("context")]
 
 
 def watch_missing_check():
