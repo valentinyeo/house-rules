@@ -97,6 +97,7 @@ Run `~/.local/share/house-rules/skills/tickets/scripts/ticket-lint <file>` befor
 - Every ticket runs through pstack `poteto-mode`: its Bug fix or Feature playbook, `how` before nontrivial changes, `architect` across function boundaries. Name the playbook in your first ticket comment. (2026-10-30, why: Valentin asked "are the agents using pstack?")
 - Prove every change with the repo's own verify skill (`.claude/skills/verify-<app>/`) and link its output on the ticket. No verify skill yet? Make one with pstack `create-verification-skill` first. (2026-11-03, why: "We have never set it up properly")
 - A question from Valentin is not a stop. Answer it, then go back to the queue in the same turn. Never end a turn while the view has open tickets. (2026-10-30, why: answering his question left the session idle)
+- Enforcer: `fleet/solo-wake` (timer `solo-wake`, every 10 minutes). Idle 15 minutes with an open view ticket? It sends you "Continue draining your view per /solo-dev: next <ticket link>". Take that ticket. (2026-11-09, why: HYCI-211, Multi Bot Opus Runner sat idle overnight)
 - Every commit message starts with its ticket ID, like `IGSH-1154: ...`. No ticket? Create one first.
 - After each release that touches a ticket, post one people comment on it: what Valentin notices now, in plain words, plus the release tag. Caveman, max 3 bullets.
 - Work with no user-visible change still gets an agent-log line on its ticket.
