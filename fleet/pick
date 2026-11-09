@@ -17,16 +17,18 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      SHIP_CLAIM_INCIDENT=1). Model grok-4.7-high, brief briefs/incident.txt in front of the app brief. A runner assigned to
      an incident it is not running right now (log) is handed it again; an incident another runner is running is left alone.
   a. my own ticket in a building column on any board, QA included (the merging runner does the live check; a design-pass
-     QA ticket waits for another runner's cross-qa)
+     QA ticket waits for another runner's cross-qa). A runner keeps one ticket: the one it runs now, else the one it
+     picked last; it gets that one back first and never takes one another runner keeps.
   b. an orphan in a building column, QA included (nobody holds it, or only a retired login, or a runner the pacer
-     stopped that runs nothing now; a stopped runner keeps the ticket it is running until that run ends)
+     stopped that runs nothing now, or a runner that keeps another ticket: its leftover; a stopped runner keeps the
+     ticket it is running until that run ends). Adopting one unassigns the runners that held it in name only.
   WIP cap: the pool's pipeline (building columns on every fleet board plus new-work tickets with an open PR, one unit
      per ticket, minus incidents, open BlockedBy, waits on a person, design-pass and work outside the pool) at or over
      the live runners closes c0, d, e and f. Then only the PR queue and new-work tickets with an open PR remain.
       Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI & Infra (11514)
      tickets that are Urgent or that an open ticket is BlockedBy still go out, to runners that can join 11514 (LANE_CAP applies).
-  Kept slot (HYCI-186): while no other runner is on a Fleet CI & Infra (11514) ticket, this runner takes
-     one before its own app ticket, before orphans and before the PR queue. The WIP cap and LANE_CAP do not hold that one
+  Kept slot (HYCI-186): while no other runner is on a Fleet CI & Infra (11514) ticket, a runner with no own ticket to
+     go on (a) takes one before orphans and before the PR queue. The WIP cap and LANE_CAP do not hold that one
      ticket. The stderr line starts with "kept slot:". App work only when no such ticket is open.
   c. Urgent new work on any board, then the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
@@ -412,9 +414,45 @@ def cannot_do(name, t):
     return bool(e) and brain_tag(t) not in ENGINES[e]["brains"]
 
 
+KEPT = {}
+
+
+def kept(n):
+    """The one building ticket Runner n keeps (one runner, one ticket, until it is live): the one it runs now, else the one
+    it picked last, else its first own ticket in pick order. Incidents never count: a runner leaves its ticket for one and
+    comes back to it. Any other building ticket it holds is a leftover: no runner works it, so it is an orphan."""
+    if n not in KEPT:
+        me = f"runner {n}"
+        mine = [t for t in (SNAP or {}).get("tickets", []) if t["section"] in BOARDS[t["board"]][1] and me in names(t)
+                and INCIDENT_LABEL not in t["labels"]]
+        keys = {t["key"] for t in mine}
+        last = last_run(n)
+        KEPT[n] = next((k for k in (running(n), last and last[0]) if k in keys), None) or \
+            (min(mine, key=lambda t: (BOARD_ORDER[t["board"]], rank(t), t["key"]))["key"] if mine else None)
+    return KEPT[n]
+
+
+def leftover(name, t):
+    """A live pool runner holds t but keeps another ticket: it holds t in name only."""
+    m = re.fullmatch(r"runner (\d+)", name)
+    return bool(m) and INCIDENT_LABEL not in t["labels"] and kept(int(m[1])) not in (None, t["key"])
+
+
+def on(name, t):
+    """Live Runner N runs t now or keeps it."""
+    m = re.fullmatch(r"runner (\d+)", name)
+    return bool(m) and live_runner(name) and t["key"] in (running(int(m[1])), kept(int(m[1])))
+
+
+def works(name, t):
+    """This holder works t: not a retired login, not a runner whose engine skips its brain, not a runner's leftover."""
+    return not retired(name) and not cannot_do(name, t) and not leftover(name, t)
+
+
 def orphan(t):
-    """Nobody holds it, or only retired logins or runners whose engine skips its brain: any runner may adopt it."""
-    return all(retired(n) or cannot_do(n, t) for n in names(t))
+    """Nobody works it: no holder, or only retired logins, runners whose engine skips its brain, or runners that keep
+    another ticket. Any runner may adopt it."""
+    return not any(works(n, t) for n in names(t))
 
 
 def set_engine(engine):
@@ -491,6 +529,22 @@ def claim_files():
                 n, key = p.read_text().split("\t")[:2]
                 out[key] = n
     except OSError:
+        pass
+    return out
+
+
+def stale_claims():
+    """Claim files past FRESH_CLAIM whose runner neither runs nor keeps that ticket: it moved on, so the claim holds
+    nobody back (2026-11-09: Runner 2's HYCI-205 claim kept the ticket from the idle Pi runners after Runner 2 let it go)."""
+    out, now, virtual = set(), time.time(), virtual_claims()
+    try:
+        for p in STATE.joinpath("claims").iterdir():
+            if p.name.startswith(".") or p.name in virtual or now - p.stat().st_mtime < FRESH_CLAIM:
+                continue
+            who, key = p.read_text().split("\t")[:2]
+            if not on(f"runner {who}", {"key": key}):
+                out.add(key)
+    except (OSError, ValueError):
         pass
     return out
 
@@ -708,8 +762,10 @@ class Skip:
 def lane_count(taken):
     """Runners that hold CI or infra work: by board assignment, plus claims the board does not show yet."""
     held = [t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][1] and in_lane(t)]
-    runners = {n for t in held for n in names(t) if live_runner(n)}
-    shown = {t["key"] for t in held if any(live_runner(n) for n in names(t))}
+    # a runner takes a seat only for the ticket it runs now or keeps: a leftover's adopter replaces its holder, and an
+    # incident's past assignees are not on it (2026-11-09: HYCI-210 had four assignees and filled the lane alone)
+    runners = {n for t in held for n in names(t) if on(n, t)}
+    shown = {t["key"] for t in held if any(on(n, t) for n in names(t))}
     return len(runners) + len({k for k in taken if k not in shown and by_key(k) and in_lane(by_key(k))})
 
 
@@ -1002,9 +1058,11 @@ def slot_candidates(n, me, skip):
         if not can_join(n, t["board"]):
             missed = True
             continue
-        if any(live_runner(h) and h != me for h in names(t)):
+        if any(h != me and live_runner(h) and works(h, t) for h in names(t)):
             waiting = True
             continue
+        if building_col and orphan(t) and me not in names(t) and held_back(t):
+            continue  # an orphan is adopted, not claimed through ship-claim, so its BlockedBy link is read here
         if new_col and eligible_new(t) and free_for(t, me):
             cands.append(t)
         elif building_col and (me in names(t) or (orphan(t) and orphan_ok(t))):
@@ -1119,6 +1177,12 @@ def try_claim(n, t, source, dry):
             ceo(n, "task", "move", t["key"], "--section", "Doing")
         if ok:
             record_claim(n, t["key"], False)
+            # the assignee is the owner: a pool runner that holds it in name only steps off, so it never comes back to it
+            for h in names(t):
+                if h != f"runner {n}" and re.fullmatch(r"runner \d+", h) and not works(h, t):
+                    rc, out = ceo(n, "task", "unassign", t["key"], "--agent", h.title())
+                    if rc != 0:
+                        log(f"adopt {t['key']}: could not unassign {h.title()}: {out.strip().splitlines()[-1:] or 'no output'}")
         else:
             note(t["key"], "adopt refused")
         return ok
@@ -1341,8 +1405,8 @@ def pipeline_reason(t, skip_brains, pr, rest=frozenset()):
         return "resting"
     if any(not re.fullmatch(r"runner \d+", h) and not retired(h) for h in names(t)):
         return "outside the pool"
-    held = any(live_runner(h) for h in names(t))
-    # an unheld ticket's link is read within the pick's relation budget, as the orphan lane does: a blocked orphan no lane takes
+    held = any(live_runner(h) and works(h, t) for h in names(t))
+    # an unheld ticket's link (a runner's leftover included) is read within the pick's relation budget, as the orphan lane does: a blocked orphan no lane takes
     if (t["key"] in SNAP["rel"] or (not held and CHECKED[0] < BLOCK_LOOKUPS * 2)) and held_back(t, own=True):
         return "blocked"
     if t["section"] in BOARDS[t["board"]][1]:
@@ -1388,14 +1452,31 @@ def choose(n, dry):
     if hit:
         return hit
     me = f"runner {n}"
+    KEPT.clear()
     taken = {**claim_files(), **virtual_claims()}
-    others = {k for k, who in taken.items() if who != str(n)}
+    stale = stale_claims()
+    others = {k for k, who in taken.items() if who != str(n) and k not in stale}
     mine_claim = [k for k, who in taken.items() if who == str(n)]
     skip = Skip(others, resting(n, dry))
     SKIP[0] = skip
     building = [t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][1]]
 
-    # kept slot: one runner on a checks or tools ticket before its own app work (HYCI-186)
+    def mine(t):
+        return me in names(t) and (kept(n) == t["key"] or not any(h != me and live_runner(h) and works(h, t) for h in names(t)))
+
+    own = sorted((t for t in building if mine(t) and not set(t["labels"]) & SKIP_ALL
+                  and not (t["section"] == "QA" and "design-pass" in t["labels"])),
+                 key=lambda t: (t["key"] != kept(n), BOARD_ORDER[t["board"]], rank(t)))
+
+    # a. own ticket, the one this runner keeps first, before the kept slot: a runner on a second ticket left the first
+    # counted in WIP with nobody on it (2026-11-09: Runner 4 held HTPR-8154 and HYCI-160, Runner 5 HTPR-7766 and HYCI-180,
+    # while Runners 6 and 7 sat idle). A merged ticket waiting for its live check is its merging runner's; a design-pass
+    # one needs another runner's QA.
+    for t in own:
+        if t["key"] not in skip and not held_back(t, own=True):
+            return t, "own"
+
+    # kept slot: a runner with no own ticket to go on takes one checks or tools ticket before app work (HYCI-186)
     held = other_on_blocker(n)
     if held:
         log(f"kept slot: held on {held}")
@@ -1415,27 +1496,20 @@ def choose(n, dry):
             got = take_kept_slot(n, me, cands, dry)
             if got:
                 return got
-            own = any(me in names(t) and t["section"] in BOARDS[t["board"]][1] for t in SNAP["tickets"])
-            if not own and not held:
+            own_held = any(mine(t) for t in building)
+            if not own_held and not held:
                 raise SystemExit(f"none: kept slot waiting on {cands[0]['key']}")
-            if own:
+            if own_held:
                 log("kept slot: blocker open but this runner is held on its own ticket")
             elif held:
                 log("kept slot: another runner holds a blocker; none left for this runner")
 
-    # a. own ticket
-    # a merged ticket waiting for its live check is its merging runner's; a design-pass one needs another runner's QA
-    for t in sorted((t for t in building if me in names(t) and not set(t["labels"]) & SKIP_ALL
-                     and not (t["section"] == "QA" and "design-pass" in t["labels"])),
-                    key=lambda t: (BOARD_ORDER[t["board"]], rank(t))):
-        if t["key"] not in skip and not held_back(t, own=True):
-            return t, "own"
     # a'. my own ticket rests or waits but still sits in a building column: park it first (one job per REST_MAX), so the
     # one-runner-one-ticket hold clears even while the WIP cap closes every lane that would have tried a claim
     for t in building:
-        if me in names(t) and t["section"] != "QA" and not set(t["labels"]) & SKIP_ALL and parkable(t):
+        if mine(t) and t["section"] != "QA" and not set(t["labels"]) & SKIP_ALL and parkable(t):
             return t, "park"
-    qa_mine = [t for t in building if me in names(t) and t["section"] == "QA"]
+    qa_mine = [t for t in building if mine(t) and t["section"] == "QA"]
     if qa_mine:
         theirs = sorted((t for t in building if t["section"] == "QA" and t["key"] not in skip and not set(t["labels"]) & SKIP_ALL
                          and any(live_runner(h) and h != me for h in names(t)) and "design-pass" not in t["labels"]),
@@ -1523,7 +1597,7 @@ def choose(n, dry):
             TRACE["prs"].append({"pr": p["number"], "ticket": key, "result": DEAD.get(key, "ticket unreadable")})
             continue
         if (t["key"] in skip or set(t["labels"]) & (SKIP_ALL | {"design-pass"}) or not can_join(n, t["board"])
-                or any(live_runner(h) and h != me for h in names(t))):
+                or any(h != me and live_runner(h) and works(h, t) for h in names(t))):
             continue
         if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
             TRACE["prs"].append({"pr": p["number"], "ticket": key, "result": TRACE["why"].get(key, "lane full or app freeze")})
@@ -1720,14 +1794,17 @@ def wip_self_test():
     iso = lambda h: (now - dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
     held = {"key": "HTPR-1", "board": "15", "section": "In Progress", "labels": [], "holders": [("runner 12", True)]}
     RUNNING.clear()
+    KEPT.clear()
     (STATE / "stop-12").write_text("pacer\n")
     (STATE / "runner-12.log").write_text(f"{iso(0.5)} cursor: HTPR-1 composer-2.5 medium\n")
     assert not orphan(held), "a stopped runner keeps the ticket it is running: the stop lands between tickets"
     RUNNING.clear()
+    KEPT.clear()
     with open(STATE / "runner-12.log", "a") as f:
         f.write(f"{iso(0.1)} end\n")
     assert orphan(held), "a stopped runner that runs nothing holds its tickets in name only"
     RUNNING.clear()
+    KEPT.clear()
     (STATE / "stop-12").unlink()
     (STATE / "runner-12.log").unlink()
 
@@ -1847,6 +1924,7 @@ def wip_self_test():
         assert choose(1, True) == (ci[0], "kept-slot"), "cap hit: the kept slot still takes a plain checks ticket"
         (STATE / "runner-2.log").write_text(f"{iso(0.05)} cursor: HYCI-2 composer-2.5 medium\n")
         RUNNING.clear()
+        KEPT.clear()
         slot_logs.clear()
         try:
             choose(1, True)
@@ -1856,6 +1934,7 @@ def wip_self_test():
         assert any(s.startswith("kept slot: held on HYCI-2") for s in slot_logs), slot_logs
         (STATE / "runner-2.log").unlink()
         RUNNING.clear()
+        KEPT.clear()
         SNAP["rel"]["HYCI-3"] = [[], ["HTPR-52"]]
         set_members("11514", {"runner 2"})
         try:
@@ -1867,14 +1946,46 @@ def wip_self_test():
         set_members("11514", {"runner 1", "runner 2"})
         (STATE / "runner-2.log").write_text(f"{iso(0.05)} cursor: HTPR-50 composer-2.5 medium\n")
         RUNNING.clear()
+        KEPT.clear()
         ci[2]["prio"] = "Urgent"
         assert choose(1, True) == (ci[2], "kept-slot"), "busy pool: the free runner still takes the blocker"
         (STATE / "runner-2.log").unlink()
         RUNNING.clear()
+        KEPT.clear()
         SNAP["tickets"] = [tk("HTPR-50", "AI Review")]
         SNAP["prs"] = [pr(100001, "HTPR-50")]
         SNAP["rel"] = {"HTPR-50": [[], []]}
         assert pr_orphan_rank(SNAP["prs"][0]) is not None, "a green PR on an orphan building ticket is a PR-queue candidate"
+        # 2026-11-09: Runner 4 held HTPR-8154 (QA) and HYCI-160 (In Progress) from the kept slot; HYCI-160 sat counted in
+        # WIP with nobody on it while the Pi runners idled at the cap
+        set_members("11514", {"runner 1", "runner 2"})
+        two = [tk("HTPR-60", "QA", "runner 2"), tk("HYCI-60", "In Progress", "runner 2"), tk("HYCI-61", "Backlog")]
+        SNAP = {"tickets": two, "rel": {t["key"]: [[], []] for t in two}, "prs": [], "incidents": [], "open": {}}
+        (STATE / "runner-2.log").write_text(f"{iso(0.2)} pick: HTPR-60 codex gpt-6.1-sol medium (own)\n"
+                                            f"{iso(0.2)} hax: HTPR-60 gpt-6.1-sol\n{iso(0.1)} end\n")
+        (STATE / "runner-2.result").write_text("WAIT_CHECK\n")
+        RUNNING.clear()
+        KEPT.clear()
+        assert kept(2) == "HTPR-60", "a runner keeps the ticket it picked last"
+        assert orphan(two[1]) and not orphan(two[0]), "a runner's second building ticket is a leftover: an orphan"
+        assert lane_count(set()) == 0, "a leftover takes no CI lane seat"
+        assert choose(2, True) == (two[0], "own"), "a runner goes back to its own ticket before the kept slot"
+        assert choose(1, True)[0] is two[1], "a free runner adopts another runner's leftover before new work"
+        (STATE / "runner-2.log").write_text(f"{iso(0.05)} hax: HYCI-60 gpt-6.1-sol\n")
+        RUNNING.clear()
+        KEPT.clear()
+        assert kept(2) == "HYCI-60" and orphan(two[0]), "the ticket a runner runs now is the one it keeps"
+        (STATE / "claims").mkdir(exist_ok=True)
+        for key in ("HTPR-60", "HYCI-60"):
+            (STATE / "claims" / key).write_text(f"2\t{key}\t{iso(1)}")
+            os.utime(STATE / "claims" / key, (time.time() - 3600,) * 2)
+        assert stale_claims() == {"HTPR-60"}, "an old claim holds only while its runner runs or keeps the ticket"
+        for key in ("HTPR-60", "HYCI-60"):
+            (STATE / "claims" / key).unlink()
+        (STATE / "runner-2.log").unlink()
+        (STATE / "runner-2.result").unlink()
+        RUNNING.clear()
+        KEPT.clear()
     finally:
         try_claim = real_claim
         log = real_log
