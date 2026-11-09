@@ -1879,13 +1879,18 @@ def wip_self_test():
         SNAP["tickets"] = [x for x in tickets if x["key"] not in ("HTPR-20", "HTPR-23", "HTPR-29")]
         t, source = choose(2, True)
         assert (t["key"], source) == ("HTPR-25", "pr"), (t["key"], source, "closed: a new-work ticket with an open PR is finished, not started")
-        SNAP["tickets"].append(tk("HTPR-31", "In Progress", "runner 1"))
+        # Runner 1's second ticket is a leftover: Runner 2 adopts it, unless Runner 2's engine skips its brain
+        SNAP["tickets"].append(tk("HTPR-31", "In Progress", "runner 1", labels=["brain-hard"]))
+        SNAP["rel"]["HTPR-31"] = [[], []]
         SNAP["prs"] = [pr(999991, "HTPR-21")]
+        assert choose(2, True) == (SNAP["tickets"][-1], "orphan"), "a free runner adopts another runner's second ticket"
+        set_engine("opencode")
         try:
             choose(2, True)
             raise AssertionError("closed WIP started new work")
         except SystemExit as e:
             assert "wip: 2 of 2, new work closed" in str(e), e
+        set_engine("cursor")
         SNAP["tickets"] = [x for x in SNAP["tickets"] if x["key"] != "HTPR-31"]
         t, source = choose(2, True)
         assert source == "board" and t["key"] in ("HTPR-25", "HTPR-26"), "open WIP: new work starts again"
@@ -1910,7 +1915,10 @@ def wip_self_test():
             assert str(e).startswith("none:"), e
         # cap hit, Fleet CI & Infra blocker offered: Urgent and open-BlockedBy tickets go out, a plain one and a non-member do not
         set_members("11514", {"runner 1"})
-        full_wip = [tk("HTPR-50", "In Progress", "runner 2"), tk("HTPR-51", "AI Review", "runner 2"), tk("HTPR-52", "Bugs")]
+        # Runner 1 runs on OpenCode here, so Runner 2's leftover HTPR-51 (brain-hard) is no orphan it can drain
+        set_engine("opencode")
+        full_wip = [tk("HTPR-50", "In Progress", "runner 2"), tk("HTPR-51", "AI Review", "runner 2", labels=["brain-hard"]),
+                    tk("HTPR-52", "Bugs")]
         ci = [tk("HYCI-2", "Backlog"), tk("HYCI-3", "Backlog"), tk("HYCI-4", "Backlog")]
         ci[2]["prio"] = "Urgent"
         SNAP = {"tickets": full_wip + ci, "rel": {t["key"]: [[], []] for t in full_wip + ci}, "prs": [], "incidents": [], "open": {}}
@@ -1956,6 +1964,7 @@ def wip_self_test():
         SNAP["prs"] = [pr(100001, "HTPR-50")]
         SNAP["rel"] = {"HTPR-50": [[], []]}
         assert pr_orphan_rank(SNAP["prs"][0]) is not None, "a green PR on an orphan building ticket is a PR-queue candidate"
+        set_engine("cursor")
         # 2026-11-09: Runner 4 held HTPR-8154 (QA) and HYCI-160 (In Progress) from the kept slot; HYCI-160 sat counted in
         # WIP with nobody on it while the Pi runners idled at the cap
         set_members("11514", {"runner 1", "runner 2"})
@@ -1987,6 +1996,7 @@ def wip_self_test():
         RUNNING.clear()
         KEPT.clear()
     finally:
+        set_engine("cursor")
         try_claim = real_claim
         log = real_log
         (STATE / "stop-3").unlink()
