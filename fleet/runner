@@ -57,7 +57,27 @@ known_engine() { case $1 in cursor|codex|opencode|claude|pi-codex|pi-opencode) r
 # harness-N holding "pi" runs this runner's codex and opencode picks in Pi with TokenEconomizer instead of hax.
 # Same plan, same model; the pacer and picker never see it.
 PI_BIN=${PI_BIN:-$HOME/.npm-global/bin/pi}
-harness() { [ "$(cat "$STATE/harness-$1" 2>/dev/null)" = pi ] && case $2 in codex|opencode) echo "pi-$2"; return ;; esac; echo "$2"; }
+PI_AUTH=${PI_AUTH:-$HOME/.pi/agent/auth.json}
+# A Pi login that cannot refresh kills a pick in about four seconds and the slot then sleeps 15 minutes. One dead token
+# emptied three slots for 10.5 hours (HYCI-209, 136 faults, 401 invalid_refresh_token). A failed pick leaves a mark and
+# that engine runs on the plain launcher (hax, same plan) until the login file changes or the mark ages out.
+HARNESS_DOWN_TTL=${HARNESS_DOWN_TTL:-21600}
+pi_down_mark() { echo "$STATE/harness-down-pi-${1:-codex}"; }
+pi_down() {
+  local mark
+  mark=$(pi_down_mark "$1")
+  [ -f "$mark" ] || return 1
+  if [ -e "$PI_AUTH" ] && [ "$PI_AUTH" -nt "$mark" ]; then rm -f "$mark"; return 1; fi
+  if [ $(( $(date +%s) - $(stat -c %Y "$mark") )) -ge "$HARNESS_DOWN_TTL" ]; then rm -f "$mark"; return 1; fi
+  return 0
+}
+# Marks the engine down when a fast pick failed on the Pi login, so the next pick takes the plain launcher.
+pi_mark_auth_failure() {
+  local eng=${1#pi-} why
+  why=$(grep -a -m1 -oE 'invalid_refresh_token|invalid_grant|OAuth refresh failed[^"]*|401 Unauthorized' "$2" 2>/dev/null) || return 1
+  printf '%s %s\n' "$(date -u +%FT%TZ)" "$why" > "$(pi_down_mark "$eng")"
+}
+harness() { local want=$2; [ "$(cat "$STATE/harness-$1" 2>/dev/null)" = pi ] || { echo "$want"; return; }; case $want in codex|opencode) pi_down "$want" && echo "$want" || echo "pi-$want" ;; *) echo "$want" ;; esac; }
 
 # One stack-key read per runner process, kept in this shell only (house rule: keys once per job, never in a loop).
 opencode_key() {
@@ -157,6 +177,31 @@ run_brief() {
 
 case "${1:-}" in
   check) python3 "$PICK_GATE" pick >/dev/null && "$(python3 "$PICK_GATE" pick)" --check-access ;;
+  harness-selftest)
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    STATE=$tmp; PI_AUTH=$tmp/auth.json; export PI_AUTH HARNESS_DOWN_TTL=21600
+    bad=0
+    expect() { [ "$2" = "$3" ] || { echo "harness self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    printf '{"openai-codex":{"expires":1}}\n' > "$PI_AUTH"; touch -d '10 hours ago' "$PI_AUTH"
+    echo pi > "$STATE/harness-1"
+    expect 'no mark runs codex picks in Pi' "$(harness 1 codex)" pi-codex
+    expect 'a slot without the override keeps its engine' "$(harness 2 codex)" codex
+    expect 'a non-pi engine is untouched' "$(harness 1 cursor)" cursor
+    printf 'OAuth refresh failed for openai-codex: token refresh failed (401): "code": "invalid_refresh_token"\n' > "$tmp/run.log"
+    pi_mark_auth_failure pi-codex "$tmp/run.log" && echo "mark: pi-codex down on $(grep -o invalid_refresh_token "$(pi_down_mark codex)")"
+    expect 'a mark moves the slot to hax' "$(harness 1 codex)" codex
+    echo pi > "$STATE/harness-3"; printf '401 Unauthorized\n' > "$tmp/open.log"; pi_mark_auth_failure pi-opencode "$tmp/open.log"
+    expect 'a down opencode login falls back the same way' "$(harness 3 opencode)" opencode
+    touch "$PI_AUTH"
+    expect 'a newer login puts the slot back on Pi' "$(harness 1 codex)" pi-codex
+    grep -q . "$(pi_down_mark codex)" 2>/dev/null && { echo 'harness self-test FAILED: newer login left the mark' >&2; bad=1; } || echo 'mark cleared by a newer login'
+    printf '401 Unauthorized\n' > "$tmp/run2.log"; pi_mark_auth_failure pi-codex "$tmp/run2.log"
+    touch -d '7 hours ago' "$(pi_down_mark codex)"
+    expect 'a mark older than six hours retries Pi' "$(harness 1 codex)" pi-codex
+    printf 'tests failed\n' > "$tmp/run3.log"
+    pi_mark_auth_failure pi-codex "$tmp/run3.log" && { echo 'harness self-test FAILED: a normal failure marked the engine down' >&2; bad=1; } || echo 'mark: a normal failure leaves Pi alone'
+    [ "$bad" = 0 ] && echo 'fleet/runner harness self-test ok'
+    exit "$bad" ;;
   top-up)
     exec 9>"$STATE/.keeper.lock"; flock -n 9 || exit 0
     [ -f "$STATE/PAUSED" ] && exit 0
@@ -231,7 +276,11 @@ case "${1:-}" in
       fi
       IFS=$'\t' read -r pick_ticket pick_engine pick_model pick_effort pick_source pick_repo < <(jq -r '[.ticket,(.engine // "cursor"),.model,.effort,.source,.repo] | @tsv' <<< "$pick")
       [ -d "$pick_repo" ] || pick_repo=$HOME/projects/hypertask
+      harness_base=$pick_engine
       pick_engine=$(harness "$n" "$pick_engine"); pick=$(jq -c --arg e "$pick_engine" '.engine = $e' <<< "$pick")
+      if [ "$(cat "$STATE/harness-$n" 2>/dev/null)" = pi ] && [ "$pick_engine" = "$harness_base" ] && [ -f "$(pi_down_mark "$harness_base")" ]; then
+        echo "$(date -u +%FT%TZ) harness: pi-$harness_base login is down, this pick runs on hax $harness_base" >> "$rlog"
+      fi
       echo "$(date -u +%FT%TZ) pick: $pick_ticket $pick_engine $pick_model $pick_effort ($pick_source)" >> "$rlog"
       if ! known_engine "$pick_engine" || { [ "$pick_engine" = opencode ] && ! opencode_key; }; then
         echo "$(date -u +%FT%TZ) gate: engine $pick_engine cannot start (unknown engine or no OpenCode Go key)" >> "$rlog"; sleep 900; continue
@@ -253,6 +302,11 @@ case "${1:-}" in
       # An unknown state is a fault. flag approval is not a state. A crash or a run under two minutes with no final line
       # is FAIL, so a bad launch does not park the ticket.
       elapsed=$(( $(date +%s) - started_at ))
+      case $pick_engine in pi-codex|pi-opencode)
+        if [ "$rc" -ne 0 ] && [ "$elapsed" -lt 120 ] && pi_mark_auth_failure "$pick_engine" "$runlog"; then
+          echo "$(date -u +%FT%TZ) harness: pi-${pick_engine#pi-} login failed on ${pick_ticket}; its next picks run on hax ${pick_engine#pi-} until the login file changes" >> "$rlog"
+        fi ;;
+      esac
       stop=""; [ -f "$STATE/stop-$n" ] && stop=$(head -1 "$STATE/stop-$n" || true)
       waitf="$STATE/wait-check-$pick_ticket"
       waited=0; [ -f "$waitf" ] && waited=$(( $(date +%s) - $(stat -c %Y "$waitf") ))
