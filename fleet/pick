@@ -32,7 +32,7 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
   e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 11514
   f. the rest of the CI or infra lane, same cap
-One runner holds one ticket until it is live. brain-extra-hard is skipped everywhere.
+One runner holds one ticket until it is live. brain-extra-hard runs only on the claude engine (Opus high); every other engine skips it.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
 a ticket with a BlockedBy link is governed by that link instead.
@@ -95,8 +95,9 @@ BOARD_ORDER = {b: i for i, b in enumerate(BOARDS)}
 PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "HYCI": "11514"}
 RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 CI_LABELS = {"ci", "hypertask ci"}
-BASE_SKIP = {"brain-extra-hard"}
-SKIP_ALL = set(BASE_SKIP)  # plus the brains the runner's engine skips (set_engine)
+BASE_SKIP = set()
+BRAINS = ("light", "medium", "hard", "extra-hard")
+SKIP_ALL = {"brain-extra-hard"}  # cursor default; set_engine recomputes it per engine
 SKIP_APP = {"design-pass"}
 SKIP_INFRA = {"agent feedback"}
 # a solo dev keeps a ticket by holding it (assignee), not by label; android needs the shared phone, so it stays with its solo dev
@@ -121,7 +122,7 @@ ENGINES = {
     "opencode": dict(plan="opencode", brains={"light": ("deepseek-v4.1-flash", "low"), "medium": ("deepseek-v4.1-flash", "high")},
                      park=("deepseek-v4.1-flash", "low"), incident=None),
     "claude": dict(plan="claude", brains={"light": ("sonnet", "medium"), "medium": ("sonnet", "medium"),
-                                          "hard": ("claude-opus-5-5", "medium")},
+                                          "hard": ("claude-opus-5-5", "medium"), "extra-hard": ("claude-opus-5-5", "high")},
                    park=("sonnet", "medium"), incident=None),
 }
 ENGINE = "cursor"
@@ -402,7 +403,7 @@ def runner_engine(n):
 
 
 def brain_tag(t):
-    return next((b for b in ("hard", "medium", "light") if f"brain-{b}" in t["labels"]), "medium")
+    return next((b for b in ("extra-hard", "hard", "medium", "light") if f"brain-{b}" in t["labels"]), "medium")
 
 
 def cannot_do(name, t):
@@ -420,7 +421,7 @@ def orphan(t):
 def set_engine(engine):
     global ENGINE, SKIP_ALL
     ENGINE = engine
-    SKIP_ALL = BASE_SKIP | {f"brain-{b}" for b in ("light", "medium", "hard") if b not in ENGINES[engine]["brains"]}
+    SKIP_ALL = BASE_SKIP | {f"brain-{b}" for b in BRAINS if b not in ENGINES[engine]["brains"]}
 
 
 def free_for(t, me):
@@ -1298,7 +1299,7 @@ def incident_step(n, dry):
     ship-claim refuses) and tickets that wait on a person are left out."""
     me = f"runner {n}"
     cands = [t for t in SNAP.get("incidents") or []
-             if t["board"] in INCIDENT_BOARDS and can_join(n, t["board"]) and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & (BASE_SKIP | {"design-pass"})]
+             if t["board"] in INCIDENT_BOARDS and can_join(n, t["board"]) and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & {"brain-extra-hard", "design-pass"}]
     for t in sorted(cands, key=lambda t: (rank(t), t["created"])):
         if incident_runner(t["key"], n):
             continue
@@ -1322,7 +1323,7 @@ def live_workers():
 def pool_skip(workers):
     """Brains no live runner's engine can do: nobody in the pool can finish those, so they are not the pool's pipeline."""
     can = {b for m in workers for b in ENGINES.get(runner_engine(m) or "", {}).get("brains", {})}
-    return BASE_SKIP | {f"brain-{b}" for b in ("light", "medium", "hard") if b not in can}
+    return BASE_SKIP | {f"brain-{b}" for b in BRAINS if b not in can}
 
 
 def pipeline_reason(t, skip_brains, pr, rest=frozenset()):
@@ -1677,8 +1678,9 @@ def self_test():
     assert (inc["engine"], inc["model"], inc["effort"]) == ("cursor", "grok-4.7-high", "high"), "incidents run on Cursor grok high"
     globals()["SNAP"] = SNAP_BACKUP
     set_engine("claude")
-    assert "brain-hard" not in SKIP_ALL and "brain-extra-hard" in SKIP_ALL
+    assert "brain-hard" not in SKIP_ALL and "brain-extra-hard" not in SKIP_ALL
     assert brain(hard)[1:] == ("claude-opus-5-5", "medium") and brain(t)[1:] == ("sonnet", "medium")
+    assert brain({**t, "labels": ["brain-extra-hard"]})[1:] == ("claude-opus-5-5", "high"), "extra-hard runs on Opus high"
     globals()["SNAP"] = {"incidents": [inc_t]}
     assert incident_step(5, True)[1] == "incident", "a Claude slot takes an incident"
     globals()["SNAP"] = SNAP_BACKUP
