@@ -116,7 +116,7 @@ SF_HOLD = HOME / ".local/state/multibot/hold.txt"
 # engine -> plan, (model, effort) per brain tag, park run, incident run. A brain missing here is skipped on that engine.
 # House rules "Every runner, any harness, takes its brain per ticket from the brain tag". Park reads one ticket (light).
 ENGINES = {
-    "cursor": dict(plan="grok", brains={"light": ("composer-2.5", "medium"), "medium": ("composer-2.5", "medium"),
+    "cursor": dict(plan="grok", brains={"medium": ("grok-4.7-medium", "medium"),
                                         "hard": ("grok-4.7-high", "high")},
                    park=("grok-4.7-medium", "medium"), incident=("grok-4.7-high", "high")),
     "codex": dict(plan="codex", brains={"light": ("gpt-6.1-terra", "medium"), "medium": ("gpt-6.1-sol", "medium"),
