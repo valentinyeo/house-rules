@@ -16,7 +16,8 @@ view labels, column and assignee.
   DUPLICATE     an older open PR for the same ticket
   NO-TICKET     no ticket key in title or branch
   BOT           dependabot or renovate: CI Boss's, not counted against workers
-Read only. Owner of every line: the scope's lead. Same line red three runs: fix the picker.
+Read only. board-health --fix --apply closes the safe ones (see plan_pr_closes there).
+Owner of every other line: the scope's lead. Same line red three runs: fix the picker.
 
 Usage: pr-queue --scope 15 [--json out.json] | --self-test
 """
@@ -49,7 +50,7 @@ def ht(*args):
 
 def open_prs(repo):
     r = subprocess.run(["gh", "pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json",
-                        "number,isDraft,title,headRefName,author,createdAt,url"], capture_output=True, text=True)
+                        "number,isDraft,title,headRefName,author,createdAt,updatedAt,url"], capture_output=True, text=True)
     try:
         return [dict(p, repo=repo) for p in json.loads(r.stdout)]
     except ValueError:
@@ -76,6 +77,8 @@ def verdict(task, patterns, live, always):
     if not task:
         return "TICKET-CLOSED", "ticket not found"
     section = task.get("section") or ""
+    if task.get("status") == "Archive":
+        return "TICKET-CLOSED", f"archived (column {section or '-'})"
     if task.get("status") not in (None, "Normal") or CLOSED.match(section):
         return "TICKET-CLOSED", section or task.get("status")
     if section.lower() == "qa":
@@ -111,21 +114,26 @@ def judge(scope, prs, tasks, labels, patterns, live, always, first_scope_for_rep
         if task and (task.get("projectId") != scope["board"] or not scopes.in_view(task, labels)):
             continue
         v, who = verdict(task, patterns, live, always)
-        rows.append(dict(pr, ticket=key, verdict=v, who=who))
+        rows.append(dict(pr, ticket=key, verdict=v, who=who, ticket_status=task and task.get("status"),
+                         ticket_section=task and task.get("section")))
     newest = {}
     for r in rows:
         if r["ticket"] and r["verdict"] not in ("BOT",):
-            k = r["ticket"]
+            k = (r["repo"], r["ticket"])
             if k not in newest or r["createdAt"] > newest[k]["createdAt"]:
                 newest[k] = r
     for r in rows:
-        if r["ticket"] and r["verdict"] != "BOT" and newest[r["ticket"]] is not r:
-            r["verdict"], r["who"] = "DUPLICATE", f"newer PR #{newest[r['ticket']]['number']}"
+        n = r["ticket"] and newest.get((r["repo"], r["ticket"]))
+        if n and r["verdict"] != "BOT" and n is not r:
+            r["verdict"], r["who"], r["newer"] = "DUPLICATE", f"newer PR #{n['number']}", n["url"]
     counted = [r for r in rows if r["verdict"] != "BOT"]
     summary = {"scope": scope["key"], "lead": scope["lead"], "open": len(counted), "workers": cap,
                "over": len(counted) > cap, "bots": sum(r["verdict"] == "BOT" for r in rows),
                "bad": [{"pr": r["url"], "number": r["number"], "ticket": r["ticket"], "verdict": r["verdict"],
-                        "who": r["who"], "title": r["title"][:70]} for r in counted if r["verdict"] != "OK"]}
+                        "who": r["who"], "title": r["title"][:70], "updated": r.get("updatedAt"),
+                        "author": (r.get("author") or {}).get("login"), "newer": r.get("newer"),
+                        "ticket_status": r.get("ticket_status"), "ticket_section": r.get("ticket_section")}
+                       for r in counted if r["verdict"] != "OK"]}
     return rows, summary
 
 
@@ -171,19 +179,23 @@ def self_test():
     prs = [pr(1, "HTPR-1 ok"), pr(2, "HTPR-2 dead"), pr(3, "HTPR-3 old", at="2026-10-01"), pr(4, "HTPR-3 new"),
            pr(5, "HTPR-5 done"), pr(6, "Bump x", author="app/dependabot"), pr(7, "Refresh copy"),
            pr(8, "x", branch="runner2/hyci-9"), pr(9, "HTPR-9 qa"), pr(10, "HTPR-10 view"), pr(11, "HTPR-11 parked"),
-           pr(12, "HTPR-12 todo"), pr(13, "HTPR-13 lead")]
+           pr(12, "HTPR-12 todo"), pr(13, "HTPR-13 lead"), pr(14, "HTPR-14 archived")]
     tasks = {"HTPR-1": task("In Progress", "Runner 1"), "HTPR-2": task("AI Review", "Runner 7"),
              "HTPR-3": task("In Progress", "Runner 1"), "HTPR-5": task("Done", "Runner 1"),
              "HYCI-9": task("In Progress", "Infra Runner 1", project=11514), "HTPR-9": task("QA", "Runner 1"),
              "HTPR-10": task("In Progress", "Postbox Dev", labels=["x"]), "HTPR-11": task("Valentin Review"),
-             "HTPR-12": task("Todo", "Postbox Dev"), "HTPR-13": task("In Progress", "Poteto Advisor")}
+             "HTPR-12": task("Todo", "Postbox Dev"), "HTPR-13": task("In Progress", "Poteto Advisor"),
+             "HTPR-14": task("Backlog", status="Archive")}
     rows, s = judge(scope, prs, tasks, None, pats, live, always, {"o/r": True}, 2)
     got = {r["number"]: r["verdict"] for r in rows}
     want = {1: "OK", 2: "ORPHAN", 3: "DUPLICATE", 4: "OK", 5: "TICKET-CLOSED", 6: "BOT", 7: "NO-TICKET",
             9: "STALE-TICKET", 10: "OK", 11: "PARKED",
-            12: "WRONG-COLUMN", 13: "NOT-A-WORKER"}
+            12: "WRONG-COLUMN", 13: "NOT-A-WORKER", 14: "TICKET-CLOSED"}
     assert got == want, got
-    assert s["open"] == 11 and s["workers"] == 2 and s["over"] and s["bots"] == 1, s
+    bad = {b["number"]: b for b in s["bad"]}
+    assert bad[14]["who"] == "archived (column Backlog)" and bad[14]["ticket_status"] == "Archive", bad[14]
+    assert bad[3]["newer"] == "https://github.com/o/r/pull/4" and bad[7]["ticket_status"] is None, bad[3]
+    assert s["open"] == 12 and s["workers"] == 2 and s["over"] and s["bots"] == 1, s
     _, s2 = judge(scope, prs, tasks, {"y"}, pats, live, always, {"o/r": False}, 2)
     assert s2["open"] == 0, "view label filter and shared repo: other scope's PRs must not count"
     _, live_x, _ = scopes.workers({"workers": [{"tmux": "postbox", "agent": "Postbox Dev"},

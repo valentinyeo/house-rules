@@ -232,7 +232,12 @@ The ticket's real board and view decide the scope, never the PR author or branch
 - `PARKED`: the ticket waits in Agent Blocked, Valentin Review or UX. Clear the wait.
 - `NO-TICKET`: no ticket key. File or link one.
 - `BOT`: dependabot. CI Boss's, not counted against workers.
-It only reads. Closing PRs stays with the lead, as its own GitHub identity.
+pr-queue only reads. `board-health --fix --apply` (the hourly timer, board 15) closes the safe ones as the runner App, each with a comment:
+- `DUPLICATE`: the older PR, naming the newer one.
+- `TICKET-CLOSED`: only when the ticket is archived or in Done. A ticket that pr-queue cannot read stays.
+- `NO-TICKET` and `ORPHAN`: only when GitHub shows no update for 48 hours.
+- Never a bot PR. Every other line stays with the lead.
+`board-health --board 15 --plan --only prs` prints the closes and writes nothing.
 Same line red three runs in a row? The runner picker skips the PR queue. Fix `fleet/pick` in house-rules.
 
 ## 6f. Keep tickets clean: count chatter and fix its origin
