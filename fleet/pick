@@ -409,9 +409,15 @@ def brain_tag(t):
     return next((b for b in ("extra-hard", "hard", "medium", "light") if f"brain-{b}" in t["labels"]), "medium")
 
 
+# DeepSeek medium runs, 7 to 10 Nov: FEATURE or IMPROVEMENT tickets timed out on 9 of 26 (35%), others on 0 of 25 (HYCI-243).
+OPENCODE_SKIP_LABELS = {"feature", "improvement", "design-pass"}
+
+
 def engine_skips(e, t):
-    """Engine e does not take t: it skips t's brain (opencode and brain-hard), or t timed out on OpenCode in the last 24h."""
-    return brain_tag(t) not in ENGINES[e]["brains"] or (e == "opencode" and opencode_timed_out(t["key"]))
+    """Engine e does not take t: it skips t's brain (opencode and brain-hard), t timed out on OpenCode in the last 24h,
+    or t is a feature or improvement, which OpenCode keeps timing out on whatever its brain tag says."""
+    return brain_tag(t) not in ENGINES[e]["brains"] or (e == "opencode" and (
+        opencode_timed_out(t["key"]) or bool(OPENCODE_SKIP_LABELS & set(t["labels"]))))
 
 
 def timed_out_here(t):
@@ -1794,6 +1800,8 @@ def self_test():
     assert "ENGINE" not in job["brief"] and job["brief_file"].endswith("briefs/park-job.txt")
     assert "PARK RUN" not in render(5, t, "board")["brief"]
     hard = {**t, "labels": ["brain-hard"]}
+    assert engine_skips("opencode", {**t, "labels": ["brain-medium", "feature"]}), "OpenCode skips medium features"
+    assert not engine_skips("cursor", {**t, "labels": ["brain-medium", "feature"]}), "Cursor still takes medium features"
     assert brain(hard)[1:] == ("grok-4.7-high", "high"), "no allocation: the built-in map"
     m = {"light": {"id": "composer-2.5", "effort": "medium"}, "medium": {"id": "composer-2.5", "effort": "medium"},
          "hard": {"id": "grok-4.7-medium", "effort": "medium"}, "park": {"id": "composer-2.5", "effort": "low"}}
