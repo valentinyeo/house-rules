@@ -771,6 +771,7 @@ def main():
                 apply_fixes(plan)
                 if a.board == 15 and not a.only:
                     print(run_text([str(HERE / "flag-columns"), "--apply"]).strip().splitlines()[-1:])
+                    print(run_text([str(HERE / "flag-links"), "--apply"]).strip().splitlines()[:1])
             else:
                 if a.only != "queue":
                     show_sendback(a.board, *back)
