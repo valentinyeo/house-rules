@@ -133,6 +133,13 @@ launch() {
                   --no-session-persistence --output-format text --disallowedTools Agent Task) ;;
     *) echo "unknown engine: $eng" >&2; return 2 ;;
   esac
+  # The reply cap needs the harness's own progress file, so a Pi run gets a session dir of its own. Set before the dry run
+  # prints, so launch-check shows the real command.
+  local beat=""
+  case $eng in pi-codex|pi-opencode)
+    beat=$(pi_session_dir); base+=(--session-dir "$beat")
+    [ "${LAUNCH_DRY:-}" = 1 ] || { find "$STATE/pi-session-${n:-0}" -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf {} + 2>/dev/null; mkdir -p "$beat"; } ;;
+  esac
   if [ "${LAUNCH_DRY:-}" = 1 ]; then
     printf 'cd %q &&' "$repo"
     case $eng in codex|opencode) printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1' ;; claude) printf ' (ANTHROPIC_* unset: subscription login)' ;; esac
@@ -142,12 +149,6 @@ launch() {
     return 0
   fi
   [ "$eng" = opencode ] && [ -z "${OC_KEY:-}" ] && { echo "no OpenCode Go key loaded" >&2; return 1; }
-  # The reply cap needs the harness's own progress file, so a Pi run gets a session dir of its own.
-  local beat=""
-  case $eng in pi-codex|pi-opencode)
-    find "$STATE/pi-session-${n:-0}" -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf {} + 2>/dev/null
-    beat=$(pi_session_dir); mkdir -p "$beat"; base+=(--session-dir "$beat") ;;
-  esac
   local attempt=0 rc=0 apid
   while :; do
     attempt=$((attempt+1))
