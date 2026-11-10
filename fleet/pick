@@ -22,7 +22,10 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      stopped that runs nothing now; a stopped runner keeps the ticket it is running until that run ends)
   WIP cap: the pool's pipeline (building columns on every fleet board plus new-work tickets with an open PR, one unit
      per ticket, minus incidents, open BlockedBy, waits on a person, design-pass and work outside the pool) at or over
-     the live runners closes c0, d, e and f. Then only the PR queue and new-work tickets with an open PR remain.
+     the live runners closes c0, d, e and f. A ticket nobody holds counts only when a free runner can take it: not in a
+     run, not already holding a unit, able to do its brain, and a checks slot free when the ticket is checks work.
+     A full checks lane, or a brain only a busy runner can do, does not fill the cap (HYCI-232). Then only the PR queue
+     and new-work tickets with an open PR remain.
       Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI & Infra (11514)
      tickets that are Urgent or that an open ticket is BlockedBy still go out, to runners that can join 11514 (LANE_CAP applies).
   Kept slot (HYCI-186): while no other runner is on a Fleet CI & Infra (11514) ticket, this runner takes
@@ -1357,13 +1360,36 @@ def pipeline_reason(t, skip_brains, pr, rest=frozenset()):
     return "no lane"
 
 
+def may_join(n, board):
+    """Same answer as can_join, without the membership incident. The cap check asks every runner."""
+    names = board_members(board)
+    return names is None or f"runner {n}" in names
+
+
+def worker_can_adopt(m, t):
+    """Could free runner m take t on a lane that stays open: its brain, its boards, and a checks slot when t is checks work."""
+    brains = ENGINES.get(runner_engine(m) or "", {}).get("brains", {})
+    if brain_tag(t) not in brains:
+        return False
+    if not may_join(m, t["board"]):
+        return False
+    if in_lane(t) and lane_count(set()) >= LANE_CAP:
+        return False
+    if FREEZE.exists() and not in_lane(t):
+        return False
+    return True
+
+
 def pipeline():
     """(units, workers, excluded {reason: [keys]}): tickets in a building column on any fleet board plus tickets in a
-    new-work column with an open PR, one unit per ticket key, against live pool runners."""
+    new-work column with an open PR, one unit per ticket key, against live pool runners. An unheld ticket is a unit
+    only when some runner who is not in a run and not already holding a unit can take it. Otherwise it is
+    "no free taker" and does not close new work."""
     workers = live_workers()
     skip_brains = pool_skip(workers)
     with_pr = {pr_ticket(p) for p in open_prs()} - {None}
     units, excluded, seen = set(), {}, set()
+    loose, busy = [], set()
     rest = resting(1, True)  # read only; runner 1's view already holds every runner's IDLE rests
     for t in SNAP["tickets"]:
         building = t["section"] in BOARDS[t["board"]][1]
@@ -1373,8 +1399,25 @@ def pipeline():
         why = pipeline_reason(t, skip_brains, t["key"] in with_pr, rest)
         if why:
             excluded.setdefault(why, []).append(t["key"])
-        else:
+            continue
+        holders = []
+        for h in names(t):
+            found = re.fullmatch(r"runner (\d+)", h)
+            if found and live_runner(h):
+                holders.append(int(found[1]))
+        if holders:
             units.add(t["key"])
+            busy.update(holders)
+        else:
+            loose.append(t)
+    for m in workers:
+        if active_run(m):
+            busy.add(m)
+    for t in loose:
+        if any(worker_can_adopt(m, t) for m in workers if m not in busy):
+            units.add(t["key"])
+        else:
+            excluded.setdefault("no free taker", []).append(t["key"])
     return units, workers, excluded
 
 
@@ -1717,7 +1760,7 @@ def self_test():
 def wip_self_test():
     """The stop lands between tickets, the short rest, and the WIP cap: closed means only own, orphan, PR queue and
     finish work, and every counted unit is something an open lane can take."""
-    global RUNNERS, FREEZE, SNAP, try_claim
+    global RUNNERS, FREEZE, SNAP, try_claim, LANE_CAP
     now = dt.datetime.now(dt.timezone.utc)
     iso = lambda h: (now - dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
     held = {"key": "HTPR-1", "board": "15", "section": "In Progress", "labels": [], "holders": [("runner 12", True)]}
@@ -1768,6 +1811,30 @@ def wip_self_test():
     units, workers, excluded = pipeline()
     assert "HTPR-29" not in units and excluded.get("resting") == ["HTPR-29"], "a resting ticket no lane takes is no unit"
     (STATE / "runner-1.idle").unlink()
+    # HYCI-232: a leftover only a busy runner can do, and a checks ticket past the lane cap, do not close new work
+    saved_cap = LANE_CAP
+    try:
+        extra = tk("HTPR-41", "QA", labels=["brain-extra-hard"])
+        (STATE / "engine-1").write_text("claude\n")
+        SNAP["tickets"] = list(tickets) + [extra]
+        SNAP["rel"]["HTPR-41"] = [[], []]
+        units, workers, excluded = pipeline()
+        assert "HTPR-41" not in units and excluded.get("no free taker") == ["HTPR-41"], (units, excluded)
+        LANE_CAP = 1
+        ci_held = tk("HYCI-60", "In Progress", "runner 1")
+        ci_loose = tk("HYCI-61", "In Progress")
+        SNAP["tickets"] = [ci_held, ci_loose]
+        SNAP["rel"] = {"HYCI-60": [[], []], "HYCI-61": [[], []]}
+        SNAP["prs"] = []
+        units, workers, excluded = pipeline()
+        assert units == {"HYCI-60"} and excluded.get("no free taker") == ["HYCI-61"], (units, excluded)
+    finally:
+        LANE_CAP = saved_cap
+        (STATE / "engine-1").unlink(missing_ok=True)
+        SNAP["tickets"] = list(tickets)
+        SNAP["rel"] = {t["key"]: [[], []] for t in tickets}
+        SNAP["rel"]["HTPR-27"] = [["HYCI-1"], []]
+        SNAP["prs"] = [pr(999991, "HTPR-21"), pr(999992, "HTPR-25"), pr(999993, "HTPR-21")]
 
     claimed = []
     real_claim = try_claim
