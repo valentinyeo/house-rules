@@ -1740,7 +1740,9 @@ def choose(n, dry):
 # Runners share one checkout. A repo-root GATES.md from runner 3's HTPR-8046 cross-QA made runner 9 treat new work
 # (HYCI-224, HYCI-245) as cross-QA and hand it back unbuilt, 10 Nov.
 GATES_LINE = ("\nYour ticket is $key. Your unlazy gates file is .unlazy/$key/GATES.md in the repo. A GATES.md at the repo root "
-              "or under another ticket's folder belongs to another runner's ticket: ignore it, never adopt its scope.")
+              "or under another ticket's folder belongs to another runner's ticket: ignore it, never adopt its scope. If "
+              ".unlazy/$key/GATES.md already exists from an earlier run, take the scope from the ticket's current "
+              "description, not from that file: rewrite its Scope line when they differ.")
 
 
 def render(n, t, source):
