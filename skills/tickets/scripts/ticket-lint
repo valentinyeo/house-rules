@@ -13,7 +13,9 @@ import sys
 MAX_WORDS = 12  # hard cap; skill target stays 8. Approved model tickets run 9 to 10.
 URL = re.compile(r"https?://\S+|<https?://[^>]+>")
 QUOTE = re.compile(r"\"[^\"]+\"|“[^”]+”")  # Valentin's own words stay verbatim
-ROBOT =re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|Claim|Released|Gate|Gates|Resume|Session|tmux|Worktree|Ledger)\s*:", re.I)
+ROBOT =re.compile(r"(^|[\s.])(Next|Helpers|Branch/PR|Branch|PR|Outputs|Claimed|Claim|Released|Resume|Session|tmux|Worktree|Ledger)\s*:", re.I)
+# A gate word is only a status label when it opens the line; a heading may end in it.
+BARE_GATE = re.compile(r"^\s*(Gate|Gates)\s*:", re.I)
 MONEY = re.compile(r"\b(money|cost|costs|pay|pays|paid|paying|payment|spend|spending|price|pricing|billing|charge|charges|budget|invoice|subscription|dollars?|usd|gbp|euros?|pounds?)\b|[£$€]", re.I)
 AMOUNT = re.compile(r"[£$€]\s?\d|\b\d+(\.\d+)?\s?(k\b|dollars?|usd|gbp|pounds?|euros?|cents?|a month|a year|per month|per year)|\b(free|no cost|no charge|nothing to pay|at no cost|zero cost)\b", re.I)
 ONCE = re.compile(r"\bonce\b", re.I)
@@ -114,7 +116,7 @@ def lint(text, old=""):
     for line in lines_of(text):
         if line in seen:
             continue
-        if ROBOT.search(line):
+        if ROBOT.search(line) or BARE_GATE.search(line):
             bad.append(f"robot status line, use the agent lane: {line[:80]}")
             continue
         noref = URL.sub(" ", line)
