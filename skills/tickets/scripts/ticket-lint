@@ -101,9 +101,16 @@ def shape_rules(text):
     return [f"ticket shape misses: {', '.join(missing)} (each its own heading)"] if missing else []
 
 
+QA_PASS = re.compile(r"\bQA[ -]?PASS", re.I)
+SHOT = re.compile(r"screencast2\.com/|\.(png|jpe?g|webp|gif|mp4|webm)\b|/attachments?/", re.I)
+
+
 def lint(text, old=""):
     seen = set(lines_of(old))
     bad = question_rules(text)
+    # Valentin 2026-11-10: "i need a screenshot of what the session does its just writes oh it passed but i can't see the improvement"
+    if QA_PASS.search(plain(text)) and not SHOT.search(text):
+        bad.append("QA PASS needs a screenshot or video link of the live app showing the change (upload it with sc2-upload)")
     for line in lines_of(text):
         if line in seen:
             continue
