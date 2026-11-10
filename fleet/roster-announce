@@ -50,9 +50,14 @@ def entry_for(ident, given, static, prev):
     e = dict(ident)
     if row:
         e.update(row=row["name"], kind=row["kind"], name=row["name"])
+        roles = given.get("roles") or ",".join(row.get("roles") or [])
+        if roles:
+            e["roles"] = [r.strip() for r in roles.split(",") if r.strip()]
         return e
     declared = {k: v for k, v in given.items() if v is not None}
     e.update(declared)
+    if isinstance(e.get("roles"), str):
+        e["roles"] = [r.strip() for r in e["roles"].split(",") if r.strip()]
     e["name"] = declared.get("name") or prev.get("name") or ident.get("multibot") or ident.get("tmux") or ident.get("sid")
     e["kind"] = declared.get("kind") or prev.get("kind") or "unknown"
     return e
@@ -76,7 +81,7 @@ def take_arg(text):
 
 def parse(argv):
     opts, flags, i = {}, set(), 0
-    keys = {"--" + k for k in ("name", "kind", "board", "view", "app", "client", "harness", "take")}
+    keys = {"--" + k for k in ("name", "kind", "roles", "board", "view", "app", "client", "harness", "take")}
     while i < len(argv):
         a = argv[i]
         if a in keys and i + 1 < len(argv):

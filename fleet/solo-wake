@@ -206,7 +206,7 @@ def load_state():
 
 
 def main():
-    rows = [r for r in roster.rows() if r.get("kind") == "solo-dev"]
+    rows = [r for r in roster.rows() if r.get("kind") == "solo-dev" or "solo-dev" in (r.get("roles") or [])]
     chats, panes, state, now = roster.hosted_chats(), tmux_states(), load_state(), time.time()
     boards = {}
     for row in rows:
