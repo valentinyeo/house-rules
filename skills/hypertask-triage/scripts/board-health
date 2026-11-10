@@ -400,7 +400,20 @@ QUEUE_FIX_BOARDS = {15, 2060, 11514}
 KEEP_COLUMNS = re.compile(r"^(in progress|doing|ai review|qa|agent blocked.*|valentin review)$", re.I)
 SHIPPED = re.compile(r"^(done|flag:|no flag)", re.I)
 # View leads and specialists keep their holds: they are not runners (Chief Of Staff, 2026-11-07).
-QUEUE_EXEMPT = {"postbox dev", "multiprompt android dev", "ht design builder"}
+OWNER_KINDS = {"chief", "lead", "solo-dev", "view-lead", "specialist"}
+
+
+def roster_owners():
+    """Board logins of sessions that own their tickets (leads, experts, solo devs): never queue-sendback work."""
+    try:
+        d = json.load(open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../../fleet/roster.json")))
+    except (OSError, ValueError):
+        return set()
+    rows = d["rows"] if isinstance(d, dict) else d
+    return {r["login"].lower() for r in rows if r.get("login") and r.get("kind") in OWNER_KINDS}
+
+
+QUEUE_EXEMPT = {"postbox dev", "multiprompt android dev", "ht design builder"} | roster_owners()
 QUEUE_NOTE = "Unassigned from {who}: runners hold one ticket until live. YPER4-1371."
 HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}}
 NOTE = "board-health fix:"
