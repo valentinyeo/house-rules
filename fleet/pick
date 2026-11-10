@@ -1235,15 +1235,48 @@ def try_claim(n, t, source, dry):
     return False
 
 
+PRS_CACHE = STATE / "open-prs.json"
+PRS_FRESH_S, PRS_STALE_S = 120, 900
+
+
+def open_prs_rest(tok, why):
+    """GraphQL refused (its limit is separate from REST's): list PRs over REST. No check states there, so none read red."""
+    r = subprocess.run(["gh", "api", "--paginate", f"repos/{PR_REPO}/pulls?base=production&state=open&per_page=100"],
+                       capture_output=True, text=True, env=dict(os.environ, GH_TOKEN=tok), timeout=300)
+    if r.returncode != 0:
+        raise RuntimeError(f"GitHub PR list failed: {why}; REST too: {(r.stderr or '').strip()[:80]}")
+    prs = json.loads(r.stdout.replace("][", ","))
+    log(f"open PRs: GraphQL failed ({why[:60]}); read {len(prs)} over REST, check states unknown")
+    return [{"number": p["number"], "title": p["title"], "draft": p["draft"], "branch": p["head"]["ref"],
+             "updated": p["updated_at"], "red": False} for p in prs]
+
+
 def open_prs():
-    """Every open PR to production on hypertask-ai/hypertask, read once per pick."""
+    """Every open PR to production on hypertask-ai/hypertask, read once per pick. One GitHub read serves every
+    runner's pick for PRS_FRESH_S; on a failed read (the App's GraphQL limit ran out on 2026-11-10 and every pick
+    stopped) a copy up to PRS_STALE_S old stands in."""
     if SNAP["prs"] is None:
+        try:
+            cached = json.loads(PRS_CACHE.read_text())
+            age = time.time() - cached["at"]
+        except (OSError, ValueError, KeyError, TypeError):
+            cached, age = None, None
+        if cached and age < PRS_FRESH_S:
+            SNAP["prs"] = cached["prs"]
+            return SNAP["prs"]
         tok = subprocess.run(["gh-app-token"], capture_output=True, text=True).stdout.strip()
         if not tok:
             raise RuntimeError("empty GitHub App token")
         r = subprocess.run(["gh", "pr", "list", "--repo", PR_REPO, "--base", "production", "--state", "open", "--limit", "1000",
                             "--json", "number,title,isDraft,headRefName,updatedAt,statusCheckRollup"],
                            capture_output=True, text=True, env=dict(os.environ, GH_TOKEN=tok), timeout=300)
+        if r.returncode != 0 and cached and age < PRS_STALE_S:
+            log(f"open PRs: GitHub read failed ({(r.stderr or '').strip()[:80]}); using a copy {int(age)}s old")
+            SNAP["prs"] = cached["prs"]
+            return SNAP["prs"]
+        if r.returncode != 0:
+            SNAP["prs"] = open_prs_rest(tok, (r.stderr or "").strip()[:120])
+            return SNAP["prs"]
         prs = json.loads(r.stdout)
         if not isinstance(prs, list) or len(prs) >= 1000:
             raise RuntimeError("incomplete PR list")
@@ -1251,6 +1284,9 @@ def open_prs():
                         "updated": p["updatedAt"],
                         "red": any(c.get("conclusion") in ("FAILURE", "TIMED_OUT") or c.get("state") in ("FAILURE", "ERROR")
                                    for c in p.get("statusCheckRollup") or [])} for p in prs]
+        tmp = PRS_CACHE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"at": time.time(), "prs": SNAP["prs"]}))
+        tmp.replace(PRS_CACHE)
         save_cache(SNAP)
     return SNAP["prs"]
 
