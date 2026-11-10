@@ -19,6 +19,7 @@ Reads only. The board lead moves the tickets.
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -87,15 +88,48 @@ def pr_links(t):
     return seen
 
 
+STATE_CACHE = Path.home() / ".local/state/board-health/pr-state.json"
+CLOSED_TTL_S = 3600          # a closed PR can be reopened; a merged one never changes
+STATE_KEEP_S = 30 * 86400
+STATES = {}
+
+
+def settled(hit, now):
+    """A cached MERGED state is final. A cached CLOSED state holds for an hour."""
+    return bool(hit) and (hit.get("state") == "MERGED" or (hit.get("state") == "CLOSED" and now - hit.get("at", 0) < CLOSED_TTL_S))
+
+
+def load_states(now):
+    try:
+        raw = json.loads(STATE_CACHE.read_text())
+    except (OSError, ValueError):
+        raw = {}
+    STATES.update({k: v for k, v in raw.items() if isinstance(v, dict) and now - v.get("at", 0) < STATE_KEEP_S})
+
+
+def save_states():
+    STATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_CACHE.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(STATES))
+    tmp.replace(STATE_CACHE)
+
+
 def pr_state(key):
-    """Returns (OPEN|MERGED|CLOSED|UNKNOWN, live): live is True when production already runs the merge."""
+    """Returns (OPEN|MERGED|CLOSED|UNKNOWN, merge commit). Merged and closed PRs are read from GitHub once; only open ones are asked again."""
+    now = time.time()
+    hit = STATES.get(key)
+    if settled(hit, now):
+        return hit["state"], hit.get("merge")
     repo, n = key.split("#")
     r = subprocess.run(["gh", "pr", "view", n, "--repo", repo, "--json", "state,mergeCommit"], capture_output=True, text=True)
     try:
         d = json.loads(r.stdout)
     except ValueError:
         return "UNKNOWN", False
-    return d.get("state", "UNKNOWN"), (d.get("mergeCommit") or {}).get("oid")
+    state, merge = d.get("state", "UNKNOWN"), (d.get("mergeCommit") or {}).get("oid")
+    if state in ("MERGED", "CLOSED"):
+        STATES[key] = {"state": state, "merge": merge, "at": now}
+    return state, merge
 
 
 def production_sha(repo):
@@ -159,8 +193,10 @@ def run(board):
     CACHE.parent.mkdir(parents=True, exist_ok=True)
     CACHE.write_text(json.dumps({k: v for k, v in cache.items() if now - v["at"] < CACHE_MAX_S}))
     keys = sorted({k for ls in links for k in ls})
+    load_states(now)
     with ThreadPoolExecutor(4) as ex:
         raw = dict(zip(keys, ex.map(pr_state, keys)))
+    save_states()
     # every merged newest PR, not only QA's: a merged ticket off board 15 goes to Done once its merge is live
     merged_newest = {ls[-1] for ls in links if ls and raw[ls[-1]][0] == "MERGED"}
     for repo in {k.split("#")[0] for k in merged_newest}:
@@ -204,6 +240,9 @@ def self_test():
     assert verdict("Valentin Review", ["a#1"], s, waiting_on_him=True) is None, "open Question waits on him"
     assert verdict("Valentin Review", ["a#1"], s) == "MERGED-NOT-MOVED", "no Question: merged work must move"
     assert PR.findall("see https://github.com/hypertask-ai/hypertask/pull/2939.") == [("hypertask-ai/hypertask", "2939")]
+    assert settled({"state": "MERGED", "at": 0}, 10 ** 9), "merged is final"
+    assert settled({"state": "CLOSED", "at": 100}, 100 + CLOSED_TTL_S - 1) and not settled({"state": "CLOSED", "at": 100}, 100 + CLOSED_TTL_S)
+    assert not settled({"state": "OPEN", "at": 100}, 101) and not settled(None, 0), "open and unknown are asked again"
     print("SELF_TEST_OK")
 
 
