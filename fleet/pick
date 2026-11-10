@@ -1733,6 +1733,12 @@ def choose(n, dry):
     raise SystemExit("none: no free ticket the pool may take" + (" (app freeze: CI and infra only)" if frozen else ""))
 
 
+# Runners share one checkout. A repo-root GATES.md from runner 3's HTPR-8046 cross-QA made runner 9 treat new work
+# (HYCI-224, HYCI-245) as cross-QA and hand it back unbuilt, 10 Nov.
+GATES_LINE = ("\nYour ticket is $key. Your unlazy gates file is .unlazy/$key/GATES.md in the repo. A GATES.md at the repo root "
+              "or under another ticket's folder belongs to another runner's ticket: ignore it, never adopt its scope.")
+
+
 def render(n, t, source):
     label, model, effort = brain(t)
     ln = lane(t)
@@ -1746,6 +1752,7 @@ def render(n, t, source):
         brief_file = HERE / "briefs" / ("release-stop.txt" if t["board"] == "11514" else "incident.txt")
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
         label, model, effort = ("brain-hard", *ENGINES[INCIDENT_ENGINE]["incident"])
+    brief += GATES_LINE.replace("$key", t["key"])
     return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
             "title": t["title"], "url": url(t), "repo": repo_for(t), "brief_file": str(brief_file), "brief": brief,
             "brain": label, "engine": INCIDENT_ENGINE if source == "incident" else ENGINE, "model": model, "effort": effort,
@@ -1801,6 +1808,7 @@ def self_test():
     assert "ENGINE" not in job["brief"] and job["brief_file"].endswith("briefs/park-job.txt")
     assert "PARK RUN" not in render(5, t, "board")["brief"]
     hard = {**t, "labels": ["brain-hard"]}
+    assert ".unlazy/HTPR-1/GATES.md" in render(5, t, "board")["brief"], "every brief names the ticket's own gates file"
     assert engine_skips("opencode", {**t, "labels": ["brain-medium", "feature"]}), "OpenCode skips medium features"
     assert not engine_skips("cursor", {**t, "labels": ["brain-medium", "feature"]}), "Cursor still takes medium features"
     assert brain(hard)[1:] == ("grok-4.7-high", "high"), "no allocation: the built-in map"
