@@ -108,7 +108,8 @@
    "app": "multiprompt",
    "fallback": "Mini Boss CEO",
    "status": "unknown",
-   "notes": "Solo dev (Valentin 2026-11-07: keep solo devs). Builds and ships its own app's tickets live, while Valentin chats with it. Assign yourself before you start a ticket; runners never take a ticket a solo dev holds. Hand a ticket to the runner pool only by leaving it unassigned in Todo."
+   "take": {"Doing": 0, "AI Review": 0},
+   "notes": "Ticket writer first (Valentin 2026-11-10: \"should write more tickets and do less himself we are overburning claude\"; \"he can still do some stuff the hard or immediate stuff himself but runners should work on multibot too\"). Turn what Valentin asks into tickets and leave them unassigned in Todo: the runner pool builds them. Build yourself only hard tickets (brain-hard or brain-extra-hard) or immediate ones Valentin is waiting on live; assign yourself first. solo-wake wakes you only for your own Doing and AI Review tickets, never to drain Todo."
   },
   {
    "name": "multiprompt-android",
