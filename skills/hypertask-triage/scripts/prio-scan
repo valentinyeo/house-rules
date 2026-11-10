@@ -25,7 +25,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-os.environ.setdefault("SHIP_SESSION_NAME", "Chief Of Staff")
+os.environ["SHIP_SESSION_NAME"] = "Chief Of Staff"
 os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
 
 VCC = str(Path.home() / ".local/bin/vcc")
@@ -46,7 +46,7 @@ def payload(text):
 def vcc(*args):
     done = subprocess.run([VCC, "--json", *args], capture_output=True, text=True)
     if done.returncode:
-        raise RuntimeError(f"vcc {' '.join(args)} failed: {(done.stderr or done.stdout).strip()[-200:]}")
+        raise RuntimeError(f"vcc {' '.join(args)} failed: {(done.stderr or done.stdout).strip()[-600:]}")
     return payload(done.stdout)
 
 
@@ -129,12 +129,12 @@ def apply(sets):
                 continue
             done = subprocess.run([VCC, "task", "update", key, "--priority", prio], capture_output=True, text=True)
             if done.returncode:
-                raise RuntimeError((done.stderr or done.stdout).strip()[-200:])
+                raise RuntimeError((done.stderr or done.stdout).strip()[-600:])
             note = subprocess.run([VCC, "activity", "add", key, f"Priority scan: set {prio}. Reason: {reason}. "
                                    "Change it by hand any time; the scan never overrides a set priority."],
                                   capture_output=True, text=True)
             if note.returncode:
-                raise RuntimeError("priority set, agent-lane note failed: " + (note.stderr or note.stdout).strip()[-200:])
+                raise RuntimeError("priority set, agent-lane note failed: " + (note.stderr or note.stdout).strip()[-600:])
         except RuntimeError as err:
             bad += 1
             print(f"  FAIL {key}: {err}")
