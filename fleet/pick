@@ -35,7 +35,7 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
   e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 11514
   f. the rest of the CI or infra lane, same cap
-One runner holds one ticket until it is live. brain-extra-hard runs only on the claude engine (Opus high); every other engine skips it.
+One runner holds one ticket until it is live. brain-extra-hard runs on the codex engine (Sol high) or the claude engine (Opus high); every other engine skips it.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
 a ticket with a BlockedBy link is governed by that link instead.
@@ -120,7 +120,7 @@ ENGINES = {
                                         "hard": ("grok-4.7-high", "high")},
                    park=("grok-4.7-medium", "medium"), incident=("grok-4.7-high", "high")),
     "codex": dict(plan="codex", brains={"light": ("gpt-6.1-terra", "medium"), "medium": ("gpt-6.1-sol", "medium"),
-                                        "hard": ("gpt-6.1-sol", "high")},
+                                        "hard": ("gpt-6.1-sol", "high"), "extra-hard": ("gpt-6.1-sol", "high")},
                   park=("gpt-6.1-terra", "medium"), incident=None),
     "opencode": dict(plan="opencode", brains={"light": ("deepseek-v4.1-flash", "low"), "medium": ("deepseek-v4.1-flash", "high")},
                      park=("deepseek-v4.1-flash", "low"), incident=None),
