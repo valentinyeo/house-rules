@@ -973,7 +973,8 @@ def board_lead(board):
 
 
 def lead_comment_at(t):
-    """When the board lead last wrote on t, or None. Used only after the third park."""
+    """When the board lead (or Chief Of Staff, who oversees every lead) last wrote on t, or None. Used only after the
+    third park."""
     lead = board_lead(t.get("board"))
     if not lead:
         return None
@@ -981,7 +982,7 @@ def lead_comment_at(t):
 
     def consider(name, stamp):
         nonlocal best
-        if name != lead:
+        if name not in (lead, "Chief Of Staff"):
             return
         when = stamp_time(stamp or "")
         if when and (best is None or when > best):
