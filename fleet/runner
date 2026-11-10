@@ -57,6 +57,8 @@ known_engine() { case $1 in cursor|codex|opencode|claude|pi-codex|pi-opencode) r
 # harness-N holding "pi" runs this runner's codex and opencode picks in Pi with TokenEconomizer instead of hax.
 # Same plan, same model; the pacer and picker never see it.
 PI_BIN=${PI_BIN:-$HOME/.npm-global/bin/pi}
+# TokenEconomizer calls `pi` by name for its judge; without this every call failed (102 times, 8-10 Nov) and it never acted.
+export PATH="$(dirname "$PI_BIN"):$PATH"
 PI_AUTH=${PI_AUTH:-$HOME/.pi/agent/auth.json}
 # A Pi login that cannot refresh kills a pick in about four seconds and the slot then sleeps 15 minutes. One dead token
 # emptied three slots for 10.5 hours (HYCI-209, 136 faults, 401 invalid_refresh_token). A failed pick leaves a mark and
