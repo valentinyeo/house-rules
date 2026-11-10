@@ -728,9 +728,11 @@ def sendback_board(board, status):
     building = {t["ticketNumber"] for t in tickets if (t.get("section") or "") in BUILD_COLUMNS.get(board, ())}
     hold = {r["ticket"] for r in (status or {}).get("rows", [])
             if board in HOME or r["verdict"] in ("MERGED-NOT-MOVED", "LIVE-READY")}
-    pick = scopes.pick_module()
-    hold |= {pick.running(m) for m in range(1, pick.RUNNERS + 1)} | set(pick.claim_files())
     prs, live, now = open_pr_states(building), live_workers(), datetime.now(timezone.utc)
+    pick = scopes.pick_module()
+    # only the run an alive runner is on now, or a claim whose run has not started yet: the picker's 3h claim window
+    # counts every short run a runner made since, and held every ticket in a building column (board 15: 9 of 9)
+    hold |= {pick.running(m) for m in range(1, pick.RUNNERS + 1) if f"runner {m}" in live} | set(pick.fresh_claims())
     rows = sendback_rows(board, tickets, prs, hold, live, now)
     for r in rows:
         # a BlockedBy link governs the wait (the CI snag rule): its PR is red because of the blocker, so the PR is kept
