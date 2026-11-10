@@ -52,13 +52,15 @@ const out = [];
 root.findAll(() => true).forEach(n => {
   let a = n, p = []; while (a && a.id !== root.id) { p.unshift(a.name); a = a.parent; }
   const r = ('cornerRadius' in n && typeof n.cornerRadius === 'number' && n.cornerRadius > 0) ? n.cornerRadius : null;
+  const radii = ('topLeftRadius' in n && typeof n.cornerRadius !== 'number') ? [n.topLeftRadius, n.topRightRadius, n.bottomRightRadius, n.bottomLeftRadius] : null;
   const fills = (n.type !== 'TEXT' && Array.isArray(n.fills)) ? n.fills.filter(f => f.type === 'SOLID' && f.visible !== false && (f.opacity ?? 1) > 0).map(f => hex(f.color)) : [];
-  if (r !== null || fills.length) out.push({ path: p.join('/') + ' [' + n.id + ']', radius: r, fills });
+  if (r !== null || radii || fills.length || n.type === 'ELLIPSE') out.push({ path: p.join('/') + ' [' + n.id + ']', type: n.type, w: n.width, h: n.height, radius: r, radii, fills });
 });
 return out;
 ```
 4. Run `scripts/ds-check.py --repo <app repo> --files <source files the design touches> --frame frame.json`. Use `--ignore Today` for "today" columns.
 5. Post only on PASS. Put the PASS line in the agent-lane comment. On FAIL, fix the frame, or name each new value in the people comment and wait for his yes.
+6. Hypertask: no circles or pills, ever. Corners are 0, 2 or 4px. Copying a round element from live code is not allowed; use 4px. ds-check fails it, and flags round corners in the touched files as bugs.
 
 ## Show Valentin
 - He is often on his phone. Send the image with SendUserFile, and give the Figma link `https://www.figma.com/design/<fileKey>?node-id=<a-b>`. A link alone gets missed.
