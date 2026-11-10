@@ -865,26 +865,33 @@ def decide_suppress(n_recent, lead_after_third, blocker_keys, open_keys):
 
 
 PARK_STATES = {"WAIT_CHECK", "PARKED"}
-_LEDGER_PARKS = []
+_LEDGER = []
+
+
+def ledger_rows():
+    """fleet/runner's run ledger, one dict per ended run, read once per pick."""
+    if not _LEDGER:
+        rows = []
+        try:
+            for line in open(RUNNER_STATE / "run-ledger.jsonl"):
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+        except OSError:
+            pass
+        _LEDGER.append(rows)
+    return _LEDGER[0]
 
 
 def ledger_parks():
     """{ticket: [stamps]} of runs on a ticket not their own that ended parked or waiting. Runners park by moving the ticket themselves, so
     fleet/park's park-events alone never reached the limit (HYCI-200 re-picked every 3 minutes, 2026-11-10)."""
-    if not _LEDGER_PARKS:
-        seen = {}
-        try:
-            for line in open(STATE / "run-ledger.jsonl"):
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if r.get("state") in PARK_STATES and r.get("ticket") and r.get("source") != "own":
-                    seen.setdefault(r["ticket"], []).append(r.get("ts", ""))
-        except OSError:
-            pass
-        _LEDGER_PARKS.append(seen)
-    return _LEDGER_PARKS[0]
+    seen = {}
+    for r in ledger_rows():
+        if r.get("state") in PARK_STATES and r.get("ticket") and r.get("source") != "own":
+            seen.setdefault(r["ticket"], []).append(r.get("ts", ""))
+    return seen
 
 
 def park_event_times(key):
