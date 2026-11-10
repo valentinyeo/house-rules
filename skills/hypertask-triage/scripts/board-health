@@ -32,7 +32,13 @@ each. It re-enters the queue by priority. A live runner's ticket that moved in
 the last 3 hours, incidents, design-pass, tickets waiting on a person and
 merged tickets (wrong-status) stay. --only sendback limits it to this one.
 
-usage: board-health [--board 15] [--plan] [--fix [--only queue|sendback]] [--apply] [--alarm-board 11514] [--self-test]
+Close dead PRs (board 15, Valentin 2026-11-10: "pr count climbing again why?"). pr-queue only
+reads, so --fix --apply closes, as the runner App, with a comment: the older of two PRs for one
+ticket (DUPLICATE), a PR whose ticket is archived or in Done (TICKET-CLOSED), and a NO-TICKET or
+ORPHAN PR GitHub shows untouched for 48 hours. Bot PRs never. --fix alone and --plan print them.
+--only prs limits it to this one.
+
+usage: board-health [--board 15] [--plan] [--fix [--only queue|sendback|prs]] [--apply] [--alarm-board 11514] [--self-test]
 Exit 0 GREEN, 1 RED.
 """
 import argparse
@@ -45,7 +51,7 @@ import tempfile
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -393,6 +399,41 @@ def self_test():
     waits = plan_sendback([dict(rows["A"], why="it waits on an open BlockedBy ticket", waits=True)])
     assert waits[0][1] == [["vcc", "task", "move", "A", "Backlog"], ["vcc", "task", "unassign", "A", "--agent", "Runner 9"]], \
         "a ticket that waits on a blocker goes home like fleet/park --waits-on; its PR stays open"
+    gh = "https://github.com/hypertask-ai/hypertask/pull/"
+    at = lambda h: (now - timedelta(hours=h)).isoformat().replace("+00:00", "Z")
+    bad = lambda n, v, ticket=None, h=1, **kw: dict({"pr": gh + str(n), "number": n, "ticket": ticket, "verdict": v,
+                                                     "updated": at(h), "author": "runner-bot"}, **kw)
+    rows = [bad(1, "DUPLICATE", "HTPR-1", newer=gh + "2"),
+            bad(3, "TICKET-CLOSED", "HTPR-3", ticket_status="Archive", ticket_section="Backlog"),
+            bad(4, "TICKET-CLOSED", "HTPR-4", ticket_status="Normal", ticket_section="Done"),
+            bad(5, "TICKET-CLOSED", "HTPR-5", ticket_status="Normal", ticket_section="AI Review"),
+            bad(6, "TICKET-CLOSED", "HTPR-6", ticket_status="Normal", ticket_section="Flag: Everyone"),
+            bad(7, "TICKET-CLOSED", "HTPR-7", h=500),  # ticket not found: a hypertask outage looks the same
+            bad(8, "NO-TICKET", h=48), bad(9, "NO-TICKET", h=47.9), bad(10, "ORPHAN", "HTPR-10", h=72),
+            bad(11, "ORPHAN", "HTPR-11", h=47.9), bad(12, "ORPHAN", "HTPR-12", updated=None),
+            bad(13, "BOT", h=900, author="app/dependabot"), bad(14, "NO-TICKET", h=900, author="app/dependabot"),
+            bad(15, "PARKED", "HTPR-15", h=900), bad(16, "STALE-TICKET", "HTPR-16", h=900),
+            bad(17, "NOT-A-WORKER", "HTPR-17", h=900), bad(18, "WRONG-COLUMN", "HTPR-18", h=900),
+            dict(bad(19, "NO-TICKET", h=900), pr="https://github.com/valentinyeo/x/pull/19"),
+            bad(20, "ORPHAN", "HTPR-20", h=900)]
+    closes = {c[0][3].rsplit("/", 1)[-1]: (t, c[0], note) for t, c, note in plan_pr_closes(15, rows, now, {gh + "20"})}
+    assert sorted(closes, key=int) == ["1", "3", "4", "8", "10"], sorted(closes, key=int)
+    assert "pull/2 is the newer PR for HTPR-1" in closes["1"][1][-1], "duplicate names the newer PR"
+    assert "archived" in closes["3"][1][-1] and "project-15/3" in closes["3"][1][-1] and "done" in closes["4"][1][-1]
+    assert closes["8"][0] is None and closes["8"][1][-1] == \
+        "Closed by board-health: no owner for 48h. Reopen and assign the ticket to continue.", closes["8"]
+    assert closes["10"][1][:4] == ["gh", "pr", "close", gh + "10"] and "project-15/10" in closes["10"][1][-1]
+    assert plan_pr_closes(15, None, now) == [], "pr-queue failed: close nothing"
+    calls = []
+    real_run, real_fix = subprocess.run, globals()["run_fix"]
+    try:
+        globals()["run_fix"] = lambda c: calls.append(c) or subprocess.CompletedProcess(c, 0, "", "")
+        subprocess.run = lambda c, **kw: calls.append(c) or subprocess.CompletedProcess(c, 0, "", "")
+        apply_fixes([(t, [c], note) for t, c, note in (closes["8"], closes["10"])])
+    finally:
+        subprocess.run, globals()["run_fix"] = real_run, real_fix
+    assert [c[:3] for c in calls] == [["gh", "pr", "close"], ["gh", "pr", "close"], ["vcc", "activity", "add"]], calls
+    assert calls[2][3] == "HTPR-10", "a PR with no ticket closes without an agent-lane note"
     print("SELF_TEST_OK")
 
 
@@ -602,6 +643,56 @@ def gh_token():
     return subprocess.run(["gh-app-token"], capture_output=True, text=True).stdout.strip()
 
 
+PR_CLOSE_BOARDS = {15}
+PR_IDLE_H = 48
+BOT_AUTHORS = ("dependabot", "renovate")
+
+
+def plan_pr_closes(board, bad, now, skip=()):
+    """Close the open PRs pr-queue proves nobody will finish, as the runner App. Pure.
+    bad: pr-queue's summary["bad"]; skip: PR URLs another fix in this run already closes.
+    DUPLICATE: the older PR, naming the newer. TICKET-CLOSED: only a ticket archived or in Done.
+    NO-TICKET and ORPHAN: only when GitHub shows no update for 48h. Bot PRs never."""
+    plan = []
+    for b in bad or []:
+        url, key = b.get("pr") or "", b.get("ticket")
+        if url in skip or "/hypertask-ai/" not in url or b.get("verdict") == "BOT" \
+                or any(x in (b.get("author") or "").lower() for x in BOT_AUTHORS):
+            continue
+        link = key and TICKET_URL.format(b=board, n=key.rsplit("-", 1)[-1])
+        archived, done = b.get("ticket_status") == "Archive", (b.get("ticket_section") or "").lower() == "done"
+        idle = hours_since(b.get("updated"), now)
+        if b.get("verdict") == "DUPLICATE" and b.get("newer"):
+            why = f"duplicate of the newer {b['newer']}"
+            comment = f"Closed by board-health: {b['newer']} is the newer PR for {key}. Work continues there."
+        elif b.get("verdict") == "TICKET-CLOSED" and key and (archived or done):
+            why = f"its ticket is {'archived' if archived else 'done'}"
+            comment = f"Closed by board-health: {why}. Reopen the ticket and this PR to continue: {link}"
+        elif b.get("verdict") in ("NO-TICKET", "ORPHAN") and idle is not None and idle >= PR_IDLE_H:
+            why = f"no owner and untouched {int(idle)}h"
+            comment = "Closed by board-health: no owner for 48h. Reopen and assign the ticket to continue." \
+                + (f" Ticket: {link}" if link else "")
+        else:
+            continue
+        plan.append((key, [["gh", "pr", "close", url, "--comment", comment]], f"{NOTE} {url} closed: {why}."))
+    return plan
+
+
+def pr_close_board(board, name, plan):
+    """Read only: the PR closes for one board, minus PRs another fix in plan already closes."""
+    if board not in PR_CLOSE_BOARDS:
+        return []
+    prq = run_json([str(HERE / "pr-queue"), "--scope", name])
+    skip = {c[3] for _, cmds, _ in plan for c in cmds if c[:3] == ["gh", "pr", "close"]}
+    return plan_pr_closes(board, (prq or {}).get("bad"), datetime.now(timezone.utc), skip)
+
+
+def show_pr_closes(board, closes):
+    print(f"PR-CLOSE board {board}: {len(closes)} open PRs would close (--fix --apply closes them)")
+    for _, cmds, note in closes:
+        print(f"  {note[len(NOTE) + 1:]}")
+
+
 def open_pr_states(keys):
     """{ticket: newest open PR} for the given tickets, across the hypertask-ai and valentinyeo repos. Read only."""
     env = dict(os.environ, GH_TOKEN=gh_token())
@@ -745,21 +836,24 @@ def apply_fixes(plan):
             failed += 1
             print(f"FIX FAILED {ticket}: {(errs[0].stderr or errs[0].stdout).strip()[:160]}")
             continue
-        subprocess.run(["vcc", "activity", "add", ticket, note], capture_output=True, text=True)
+        if ticket:  # a PR with no ticket has no agent lane
+            subprocess.run(["vcc", "activity", "add", ticket, note], capture_output=True, text=True)
         done += 1
-        print(f"FIXED {ticket}: {note[len(NOTE) + 1:][:100]}")
+        print(f"FIXED {ticket or cmds[0][3]}: {note[len(NOTE) + 1:][:100]}")
     print(f"FIX SUMMARY {done} fixed, {skipped} already noted, {failed} failed")
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--board", type=int, default=15)
-    p.add_argument("--apply", action="store_true", help="file or bump the alarm when a line is red over a day")
+    p.add_argument("--apply", action="store_true", help="file or bump the alarm when a line is red over a day; "
+                   "with --fix also close the PRs pr-queue proves dead")
     p.add_argument("--fix", action="store_true", help="run the safe fixes, then score again")
     p.add_argument("--scope", help="a key in scopes.json: a board view one lead owns, e.g. 2060/postbox")
     p.add_argument("--alarm-board", type=int, help="default: the scope's alarm board")
     p.add_argument("--plan", action="store_true", help="print every safe fix and write nothing")
-    p.add_argument("--only", choices=["queue", "sendback"], help="with --plan or --fix: run just the free-the-queue or the send-back fix")
+    p.add_argument("--only", choices=["queue", "sendback", "prs"],
+                   help="with --plan or --fix: run just the free-the-queue, the send-back or the PR-close fix")
     p.add_argument("--self-test", action="store_true")
     a = p.parse_args()
     if a.self_test:
@@ -771,24 +865,31 @@ def main():
         if a.board not in QUEUE_FIX_BOARDS or view:
             print(f"FIX not available on {name}: the shared login cannot write there. The lead fixes by hand.")
         else:
-            plan, rows, back = [], queue_holds(a.board) if a.only != "sendback" else [], ([], [])
-            status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)]) if a.only != "queue" else None
+            plan, rows, back = [], queue_holds(a.board) if a.only in (None, "queue") else [], ([], [])
+            status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)]) if a.only in (None, "sendback") else None
             if not a.only:  # cheap first: merged moves on, live ones close, doubles (solo devs too) drop extras
                 plan = plan_fixes(a.board, run_json([str(HERE / "flow-check"), "--scope", name]), status)
-            if a.only != "queue":
+            if a.only in (None, "sendback"):
                 back = sendback_board(a.board, status)
                 sent = {t for t, _, _ in back[1]}
                 plan = [p for p in plan if p[0] not in sent] + back[1]
             plan += plan_queue_fixes(rows)
+            closes = pr_close_board(a.board, name, plan) if a.only in (None, "prs") else []
             if a.fix and not a.plan:
                 apply_fixes(plan)
+                if a.apply:  # PR closes are the one fix that waits for --apply (the hourly timer passes it)
+                    apply_fixes(closes)
+                elif closes:
+                    show_pr_closes(a.board, closes)
                 if a.board == 15 and not a.only:
                     print(run_text([str(HERE / "flag-columns"), "--apply"]).strip().splitlines()[-1:])
                     print(run_text([str(HERE / "flag-links"), "--apply"]).strip().splitlines()[:1])
             else:
-                if a.only != "queue":
+                if a.only in (None, "sendback"):
                     show_sendback(a.board, *back)
                 show_plan(a.board, plan, rows)
+                if a.only in (None, "prs"):
+                    show_pr_closes(a.board, closes)
                 return 0
     whole = not view
     with ThreadPoolExecutor(6) as ex:
