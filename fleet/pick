@@ -85,6 +85,7 @@ REST_MAX = 3 * 86400  # an IDLE rest never outlives this, changed or not
 REST_GRACE = 60  # seconds: the run's own last write may land just after its IDLE end
 # an IDLE rest on a ticket nobody waits on (no BlockedBy, no Valentin wait) ends after this: back to its holder or the orphan lane
 SHORT_REST = 2 * 3600
+URGENT_REST = 600
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
 
@@ -729,6 +730,9 @@ def resting(n, dry):
         if changed and (changed - when).total_seconds() > REST_GRACE:
             continue
         if (now - when).total_seconds() > REST_GRACE + SHORT_REST and not t["waiting"] and t["section"] != "Valentin Review":
+            continue
+        # an Urgent ticket that waits on nobody rests 10 minutes, not 2 hours (HYCI-245, release blocker, 10 Nov)
+        if t.get("prio") == "Urgent" and not t["waiting"] and t["section"] != "Valentin Review" and (now - when).total_seconds() > URGENT_REST:
             continue
         rest.add(key)
     return rest
