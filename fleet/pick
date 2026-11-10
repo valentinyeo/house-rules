@@ -1745,6 +1745,14 @@ GATES_LINE = ("\nYour ticket is $key. Your unlazy gates file is .unlazy/$key/GAT
               "description, not from that file: rewrite its Scope line when they differ.")
 
 
+# Was in the launcher's shared brief-extra file from 7 Nov, so every run on every ticket was told "never change its
+# code": runner 9 handed new build work (HYCI-245) back as a cross-QA four times on 10 Nov. Only cross-qa runs get it.
+CROSS_QA_LINE = ("Source cross-qa (Valentin 2026-11-06, no runner idles while work waits): another runner built this ticket "
+                 "and it waits on an independent check. Your one job this run: do that check (live proof in production; for "
+                 "a UI or design-pass change, the side-by-side Figma QA). Pass: move it Done with the evidence. Fail: move it "
+                 "to Bugs with the evidence. Never take it over and never change its code.")
+
+
 def render(n, t, source):
     label, model, effort = brain(t)
     ln = lane(t)
@@ -1758,6 +1766,8 @@ def render(n, t, source):
         brief_file = HERE / "briefs" / ("release-stop.txt" if t["board"] == "11514" else "incident.txt")
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
         label, model, effort = ("brain-hard", *ENGINES[INCIDENT_ENGINE]["incident"])
+    if source == "cross-qa":
+        brief = CROSS_QA_LINE + "\n" + brief
     brief += GATES_LINE.replace("$key", t["key"])
     return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
             "title": t["title"], "url": url(t), "repo": repo_for(t), "brief_file": str(brief_file), "brief": brief,
@@ -1815,6 +1825,8 @@ def self_test():
     assert "PARK RUN" not in render(5, t, "board")["brief"]
     hard = {**t, "labels": ["brain-hard"]}
     assert ".unlazy/HTPR-1/GATES.md" in render(5, t, "board")["brief"], "every brief names the ticket's own gates file"
+    assert "never change its code" not in render(5, t, "board")["brief"], "build work is never told it is a cross-QA"
+    assert "never change its code" in render(5, t, "cross-qa")["brief"], "a cross-qa run gets the check-only rule"
     assert engine_skips("opencode", {**t, "labels": ["brain-medium", "feature"]}), "OpenCode skips medium features"
     assert not engine_skips("cursor", {**t, "labels": ["brain-medium", "feature"]}), "Cursor still takes medium features"
     assert brain(hard)[1:] == ("grok-4.7-high", "high"), "no allocation: the built-in map"
