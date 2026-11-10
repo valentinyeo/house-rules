@@ -33,6 +33,7 @@ HUMAN = re.compile(r"\bvalentin\b|flag approval", re.I)
 WAIT = re.compile(r"ci-blocked|checks pending|awaiting checks|\bCI pending\b|\brecheck\b", re.I)
 OWN = re.compile(r"\bOWN_PR\b|own PR", re.I)
 PARKED_LINE = re.compile(r"(?:^|\s)PARKED\s+\S+")
+STALL = re.compile(r"no model reply|reply cap|reply stalled", re.I)
 TICKET_WAIT = re.compile(r"waits on|waiting on|parked on|BlockedBy", re.I)
 
 
@@ -54,6 +55,10 @@ def classify(final, rc, elapsed, stop, waited, ticket):
         return _out("BUILDING", "DONE", detail=line[:160])
     if PARKED_LINE.search(line):
         return _out("PARKED", "PARKED", detail=line[:160])
+    # A capped run is the model's fault, not the ticket's: the reason lands in the ledger and fleet/pick hands the ticket
+    # back to the next run (HYCI-250).
+    if line and STALL.search(line):
+        return _out("FAULT", "FAIL", detail=line[:160])
     if line and HUMAN.search(line):
         why = "unknown state: flag approval is not a state" if re.search(r"flag approval", line, re.I) else "unknown state: waiting on a person is not a state"
         return _out("FAULT", "FAULT", park="lead", detail=why)
@@ -126,6 +131,9 @@ def self_test():
     done = classify("INFRA RUNNER DONE HYCI-1 Done", 0, 400, "", 0, "HYCI-1")
     assert done["state"] == "BUILDING" and done["result"] == "DONE" and done["park"] == ""
     assert classify("PARKED HYCI-9", 0, 30, "", 0, "HYCI-9")["state"] == "PARKED"
+    stall = classify("RUNNER IDLE no model reply for 600s twice, run ended", 124, 700, "", 0, "HYCI-1")
+    assert stall["state"] == "FAULT" and stall["result"] == "FAIL" and "no model reply" in stall["detail"], stall
+    assert stall["park"] == ""
     wait = classify("RUNNER IDLE ci-blocked HYCI-117", 0, 400, "", 10, "HYCI-1")
     assert wait["state"] == "WAIT_CHECK" and wait["park"] == ""
     late = classify("RUNNER IDLE checks pending", 0, 400, "", WAIT_LIMIT, "HYCI-1")

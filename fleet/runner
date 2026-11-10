@@ -83,6 +83,36 @@ pi_mark_auth_failure() {
 }
 harness() { local want=$2; [ "$(cat "$STATE/harness-$1" 2>/dev/null)" = pi ] || { echo "$want"; return; }; case $want in codex|opencode) pi_down "$want" && echo "$want" || echo "pi-$want" ;; *) echo "$want" ;; esac; }
 
+# A reply that never comes burns the whole run: 9 of 88 DeepSeek runs hit the 3h limit on 2026-11-10, one after 89 minutes
+# of provider silence (HYCI-250). Pi writes a session record for every event, so its session file is a true heartbeat:
+# no new record for REPLY_CAP seconds means the provider sent nothing. That attempt is killed, retried once, then the run
+# ends and fleet/pick hands the ticket back. hax and cursor print only the final message, so they have no heartbeat to
+# watch and keep the 3h run limit alone.
+REPLY_CAP=${REPLY_CAP:-600}
+CAP_TICK=${CAP_TICK:-15}
+stall_mark() { echo "$STATE/stall-${n:-0}"; }
+pi_session_dir() { echo "$STATE/pi-session-${n:-0}/$(date +%s)"; }
+newest_beat() {
+  local d=$1 f
+  f=$(ls -t "$d"/*.jsonl 2>/dev/null | head -1)
+  if [ -n "$f" ]; then stat -c %Y "$f" 2>/dev/null || echo 0; else stat -c %Y "$d" 2>/dev/null || echo 0; fi
+}
+# Take the tool calls with the agent: a half-finished child left running would outlive the attempt.
+kill_tree() { local pid=$1 kid; for kid in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$kid"; done; kill -TERM "$pid" 2>/dev/null; }
+# Waits for one attempt. 0 = the agent ended by itself, 124 = no reply for REPLY_CAP seconds and it was killed.
+wait_reply() {
+  local pid=$1 beat=$2 quiet=0 last now
+  last=$(newest_beat "$beat")
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$CAP_TICK"
+    now=$(newest_beat "$beat")
+    if [ "${now:-0}" -gt "${last:-0}" ]; then last=$now; quiet=0; continue; fi
+    quiet=$((quiet + CAP_TICK))
+    [ "$quiet" -ge "$REPLY_CAP" ] && { printf 'no reply from the model for %ss\n' "$REPLY_CAP" > "$(stall_mark)"; kill_tree "$pid"; return 124; }
+  done
+  return 0
+}
+
 # One stack-key read per runner process, kept in this shell only (house rule: keys once per job, never in a loop).
 opencode_key() {
   [ -n "${OC_KEY:-}" ] || OC_KEY=$("$HOME/.local/bin/stack-key" 'opencode go' 'API KEY' 2>/dev/null)
@@ -111,22 +141,50 @@ launch() {
     if [ "$eng" = cursor ]; then printf ' <brief, %d chars>\n' "${#brief}"; else printf ' < <brief, %d chars on stdin>\n' "${#brief}"; fi
     return 0
   fi
-  if [ "$eng" = cursor ]; then timeout 3h "${base[@]}" "$brief"; return; fi
   [ "$eng" = opencode ] && [ -z "${OC_KEY:-}" ] && { echo "no OpenCode Go key loaded" >&2; return 1; }
-  (
-    cd "$repo" || exit 1
-    # Claude runs on the subscription login only: no API key, token or base URL may reach it.
-    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID
-    export HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1
-    unset OPENCODE_API_KEY
-    [ "$eng" = opencode ] && export OPENCODE_API_KEY="$OC_KEY"
-    # TokenEconomizer's own calls stay on the run's plan, never Pi's default provider (OpenRouter, paid).
-    case $eng in pi-codex) export TE_PYTHON=python3 TE_PAID_MODEL=openai-codex/gpt-6-luna ;;
-                 pi-opencode) export TE_PYTHON=python3 TE_PAID_MODEL=opencode-go/deepseek-v4.1-flash ;; esac
-    # te-off-N: the A/B control runner. TokenEconomizer logs cost but acts on nothing (Valentin 8 Nov: "how good it is").
-    [ -f "$STATE/te-off-${n:-0}" ] && export TE_SHADOW=1
-    printf '%s' "$brief" | timeout 3h "${base[@]}"
-  )
+  # The reply cap needs the harness's own progress file, so a Pi run gets a session dir of its own.
+  local beat=""
+  case $eng in pi-codex|pi-opencode)
+    find "$STATE/pi-session-${n:-0}" -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf {} + 2>/dev/null
+    beat=$(pi_session_dir); mkdir -p "$beat"; base+=(--session-dir "$beat") ;;
+  esac
+  local attempt=0 rc=0 apid
+  while :; do
+    attempt=$((attempt+1))
+    rm -f "$(stall_mark)"
+    if [ "$eng" = cursor ]; then
+      timeout 3h "${base[@]}" "$brief" & apid=$!
+    else
+      (
+        cd "$repo" || exit 1
+        # Claude runs on the subscription login only: no API key, token or base URL may reach it.
+        unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID
+        export HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1
+        unset OPENCODE_API_KEY
+        [ "$eng" = opencode ] && export OPENCODE_API_KEY="$OC_KEY"
+        # TokenEconomizer's own calls stay on the run's plan, never Pi's default provider (OpenRouter, paid).
+        case $eng in pi-codex) export TE_PYTHON=python3 TE_PAID_MODEL=openai-codex/gpt-6-luna ;;
+                     pi-opencode) export TE_PYTHON=python3 TE_PAID_MODEL=opencode-go/deepseek-v4.1-flash ;; esac
+        # te-off-N: the A/B control runner. TokenEconomizer logs cost but acts on nothing (Valentin 8 Nov: "how good it is").
+        [ -f "$STATE/te-off-${n:-0}" ] && export TE_SHADOW=1
+        printf '%s' "$brief" | timeout 3h "${base[@]}"
+      ) & apid=$!
+    fi
+    if [ -n "$beat" ]; then
+      wait_reply "$apid" "$beat"; rc=$?
+      wait "$apid" 2>/dev/null
+    else
+      wait "$apid"; rc=$?
+    fi
+    [ -f "$(stall_mark)" ] || break
+    if [ "$attempt" -lt 2 ]; then
+      echo "reply cap: nothing from the model for ${REPLY_CAP}s; retrying once (attempt 2 of 2)"
+      continue
+    fi
+    echo "RUNNER IDLE no model reply for ${REPLY_CAP}s twice, run ended"
+    break
+  done
+  return "$rc"
 }
 
 green() {
@@ -181,6 +239,32 @@ run_brief() {
 
 case "${1:-}" in
   check) python3 "$PICK_GATE" pick >/dev/null && "$(python3 "$PICK_GATE" pick)" --check-access ;;
+  reply-cap-selftest)
+    # The reply cap, proved without a model call: a chatty attempt is kept, a silent one is killed with its tool calls.
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    STATE=$tmp REPLY_CAP=3 CAP_TICK=1 n=0; bad=0
+    expect() { [ "$2" = "$3" ] || { echo "reply-cap self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    mkdir -p "$tmp/beat1"
+    ( for i in 1 2 3 4 5 6; do sleep 1; echo '{}' >> "$tmp/beat1/session.jsonl"; done ) &
+    cpid=$!
+    wait_reply "$cpid" "$tmp/beat1"; expect 'a chatty attempt is kept' "$?" 0
+    wait "$cpid" 2>/dev/null; expect 'a chatty attempt runs to its own end' "$?" 0
+    [ -f "$(stall_mark)" ] && { echo 'reply-cap self-test FAILED: a chatty attempt wrote a stall mark' >&2; bad=1; }
+    mkdir -p "$tmp/beat2"
+    ( sleep 60 & echo $! > "$tmp/grandchild.pid"; wait ) &
+    spid=$!; started=$(date +%s)
+    wait_reply "$spid" "$tmp/beat2"; expect 'a silent attempt is killed' "$?" 124
+    took=$(( $(date +%s) - started ))
+    [ "$took" -le 6 ] || { echo "reply-cap self-test FAILED: kill took ${took}s at a 3s cap" >&2; bad=1; }
+    grep -q 'no reply from the model' "$(stall_mark)" || { echo 'reply-cap self-test FAILED: no stall reason written' >&2; bad=1; }
+    wait "$spid" 2>/dev/null
+    kill -0 "$spid" 2>/dev/null && { echo 'reply-cap self-test FAILED: the silent attempt survived' >&2; bad=1; }
+    gpid=$(cat "$tmp/grandchild.pid" 2>/dev/null)
+    kill -0 "$gpid" 2>/dev/null && { echo 'reply-cap self-test FAILED: the tool call outlived the attempt' >&2; bad=1; }
+    python3 "$HERE/runner-state.py" --classify --final 'RUNNER IDLE no model reply for 600s twice, run ended' --rc 124 --elapsed 700 --ticket HYCI-1 | grep -q '"state": "FAULT"' \
+      || { echo 'reply-cap self-test FAILED: a capped run is not classified as a fault with its reason' >&2; bad=1; }
+    [ "$bad" = 0 ] && echo 'reply-cap self-test ok'
+    exit "$bad" ;;
   harness-selftest)
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
     STATE=$tmp; PI_AUTH=$tmp/auth.json; export PI_AUTH HARNESS_DOWN_TTL=21600
@@ -249,7 +333,7 @@ case "${1:-}" in
       printf '%s\n' "$out" | tail -5
       grep -q RUNNER_LAUNCH_OK <<< "$out" && echo "launch-check ok: $eng $model $effort" || { echo "launch-check FAILED: exit $rc"; exit 1; }
     fi ;;
-  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | launch-check <engine> <model> <effort> [--noop]' ;;
+  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | reply-cap-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
   *)
     n=$1
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
