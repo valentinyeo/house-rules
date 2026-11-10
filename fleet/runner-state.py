@@ -77,6 +77,8 @@ def classify(final, rc, elapsed, stop, waited, ticket):
         if waited is not None and int(waited) >= WAIT_LIMIT:
             return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 30 min")
         return _out("WAIT_CHECK", "WAIT_CHECK", detail=line[:160])
+    if int(rc) == 124 or int(elapsed) >= 3 * 3600 - 10:
+        return _out("FAULT", "FAIL", detail="timeout: hit the 3h run limit")
     if not line and (int(rc) != 0 or int(elapsed) < 120):
         return _out("FAULT", "FAIL", detail="crash or run ended before it started")
     if line:
