@@ -409,11 +409,44 @@ def brain_tag(t):
     return next((b for b in ("extra-hard", "hard", "medium", "light") if f"brain-{b}" in t["labels"]), "medium")
 
 
+def engine_skips(e, t):
+    """Engine e does not take t: it skips t's brain (opencode and brain-hard), or t timed out on OpenCode in the last 24h."""
+    return brain_tag(t) not in ENGINES[e]["brains"] or (e == "opencode" and opencode_timed_out(t["key"]))
+
+
+def timed_out_here(t):
+    return ENGINE == "opencode" and opencode_timed_out(t["key"])
+
+
+def skipped(t):
+    """This runner's engine does not take t."""
+    return bool(set(t["labels"]) & SKIP_ALL) or timed_out_here(t)
+
+
+def hand_back_timeouts(n, dry):
+    """An OpenCode runner leaves the tickets it timed out on: fleet/park --hand-back unassigns it and keeps column and PR,
+    so ship-claim stops holding it and a runner on another engine adopts the ticket as an orphan."""
+    me = f"runner {n}"
+    for t in SNAP["tickets"]:
+        if t["section"] not in BOARDS[t["board"]][1] or me not in names(t) or not timed_out_here(t):
+            continue
+        if dry:
+            log(f"would hand back {t['key']}: timed out on OpenCode in the last 24 hours")
+            continue
+        r = subprocess.run([str(HERE / "park"), t["key"], "--hand-back",
+                            "an OpenCode run hit the 3h limit on it; a runner on another engine finishes it."],
+                           capture_output=True, text=True, env=dict(os.environ, SHIP_SESSION_NAME=f"RUNNER {n}"), timeout=300)
+        out = (r.stdout + r.stderr).strip().splitlines()
+        log(f"hand back {t['key']}: " + (out[-1] if out else f"rc {r.returncode}"))
+        if r.returncode == 0:
+            t["holders"] = [h for h in t["holders"] if h[0] != me]
+
+
 def cannot_do(name, t):
-    """A live runner whose engine skips this ticket's brain (opencode and brain-hard): it holds the ticket in name only."""
+    """A live runner whose engine skips this ticket: it holds the ticket in name only."""
     m = re.fullmatch(r"runner (\d+)", name)
     e = m and runner_engine(int(m[1]))
-    return bool(e) and brain_tag(t) not in ENGINES[e]["brains"]
+    return bool(e) and engine_skips(e, t)
 
 
 def orphan(t):
@@ -739,6 +772,8 @@ def eligible_reason(t):
     labels = set(t["labels"])
     if labels & SKIP_ALL:
         return "label skip: " + ", ".join(sorted(labels & SKIP_ALL))
+    if skipped(t):
+        return "timed out on OpenCode in the last 24 hours"
     if t["waiting"]:
         return "waits on Valentin"
     if not t["section"] in BOARDS[t["board"]][0]:
@@ -848,6 +883,7 @@ def write_trace(n, dry, ticket, source, ending):
 
 
 PARK_WINDOW = 6 * 3600
+ESCALATE_WINDOW = 24 * 3600
 PARK_LIMIT = 3
 
 
@@ -865,26 +901,46 @@ def decide_suppress(n_recent, lead_after_third, blocker_keys, open_keys):
 
 
 PARK_STATES = {"WAIT_CHECK", "PARKED"}
-_LEDGER_PARKS = []
+_LEDGER = []
+
+
+def ledger_rows():
+    """fleet/runner's run ledger, one dict per ended run, read once per pick."""
+    if not _LEDGER:
+        rows = []
+        try:
+            for line in open(RUNNER_STATE / "run-ledger.jsonl"):
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+        except OSError:
+            pass
+        _LEDGER.append(rows)
+    return _LEDGER[0]
 
 
 def ledger_parks():
     """{ticket: [stamps]} of runs on a ticket not their own that ended parked or waiting. Runners park by moving the ticket themselves, so
     fleet/park's park-events alone never reached the limit (HYCI-200 re-picked every 3 minutes, 2026-11-10)."""
-    if not _LEDGER_PARKS:
-        seen = {}
-        try:
-            for line in open(STATE / "run-ledger.jsonl"):
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if r.get("state") in PARK_STATES and r.get("ticket") and r.get("source") != "own":
-                    seen.setdefault(r["ticket"], []).append(r.get("ts", ""))
-        except OSError:
-            pass
-        _LEDGER_PARKS.append(seen)
-    return _LEDGER_PARKS[0]
+    seen = {}
+    for r in ledger_rows():
+        if r.get("state") in PARK_STATES and r.get("ticket") and r.get("source") != "own":
+            seen.setdefault(r["ticket"], []).append(r.get("ts", ""))
+    return seen
+
+
+def opencode_timed_out(key):
+    """An OpenCode (DeepSeek) run on this ticket hit the 3h run limit in the last 24 hours. DeepSeek ping-pongs with the
+    review bot until the clock runs out (9 of 88 runs on 2026-11-10), so the ticket goes to another engine."""
+    now = dt.datetime.now(dt.timezone.utc)
+    for r in ledger_rows():
+        if (r.get("ticket") == key and r.get("engine") in ("opencode", "pi-opencode")
+                and str(r.get("detail", "")).startswith("timeout")):
+            when = stamp_time(r.get("ts", ""))
+            if when and (now - when).total_seconds() < ESCALATE_WINDOW:
+                return True
+    return False
 
 
 def park_event_times(key):
@@ -1021,7 +1077,7 @@ def slot_candidates(n, me, skip):
     for t in SNAP["tickets"]:
         if t["board"] != "11514":
             continue
-        if t["waiting"] or "design-pass" in t["labels"] or set(t["labels"]) & SKIP_ALL or t["key"] in skip or repark_suppressed(t):
+        if t["waiting"] or "design-pass" in t["labels"] or skipped(t) or t["key"] in skip or repark_suppressed(t):
             continue
         new_col = t["section"] in BOARDS[t["board"]][0]
         building_col = t["section"] in BOARDS[t["board"]][1]
@@ -1164,6 +1220,9 @@ def try_claim(n, t, source, dry):
     if rc == 4 and source != "incident":
         own = held_ticket(out)
         mine = fetch_ticket(own) if own else None
+        if mine and timed_out_here(mine):
+            log(f"hold {t['key']}: own {own} timed out on OpenCode; it waits for its hand-back")
+            return False
         if mine and own not in SKIP[0] and not held_back(mine, own=True):
             raise Pick(mine, "own")
         if mine and parkable(mine):  # parking clears both holds: ship-claim lets a parked ticket's open PR go too
@@ -1211,7 +1270,7 @@ def pr_orphan_rank(p):
     t = by_key(tk)
     if not t or t["section"] not in BOARDS[t["board"]][1] or not orphan(t):
         return None
-    if set(t["labels"]) & (SKIP_ALL | {"design-pass"}) or not orphan_ok(t) or held_back(t):
+    if skipped(t) or "design-pass" in t["labels"] or not orphan_ok(t) or held_back(t):
         return None
     return (3, p["updated"], p["number"])
 
@@ -1392,8 +1451,8 @@ def may_join(n, board):
 
 def worker_can_adopt(m, t):
     """Could free runner m take t on a lane that stays open: its brain, its boards, and a checks slot when t is checks work."""
-    brains = ENGINES.get(runner_engine(m) or "", {}).get("brains", {})
-    if brain_tag(t) not in brains:
+    e = runner_engine(m)
+    if not e or engine_skips(e, t):
         return False
     if not may_join(m, t["board"]):
         return False
@@ -1455,6 +1514,7 @@ def choose(n, dry):
     hit = incident_step(n, dry)
     if hit:
         return hit
+    hand_back_timeouts(n, dry)
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
     others = {k for k, who in taken.items() if who != str(n)}
@@ -1493,7 +1553,7 @@ def choose(n, dry):
 
     # a. own ticket
     # a merged ticket waiting for its live check is its merging runner's; a design-pass one needs another runner's QA
-    for t in sorted((t for t in building if me in names(t) and not set(t["labels"]) & SKIP_ALL
+    for t in sorted((t for t in building if me in names(t) and not skipped(t)
                      and not (t["section"] == "QA" and "design-pass" in t["labels"])),
                     key=lambda t: (BOARD_ORDER[t["board"]], rank(t))):
         if t["key"] not in skip and not held_back(t, own=True):
@@ -1501,11 +1561,11 @@ def choose(n, dry):
     # a'. my own ticket rests or waits but still sits in a building column: park it first (one job per REST_MAX), so the
     # one-runner-one-ticket hold clears even while the WIP cap closes every lane that would have tried a claim
     for t in building:
-        if me in names(t) and t["section"] != "QA" and not set(t["labels"]) & SKIP_ALL and parkable(t):
+        if me in names(t) and t["section"] != "QA" and not skipped(t) and parkable(t):
             return t, "park"
     qa_mine = [t for t in building if me in names(t) and t["section"] == "QA"]
     if qa_mine:
-        theirs = sorted((t for t in building if t["section"] == "QA" and t["key"] not in skip and not set(t["labels"]) & SKIP_ALL
+        theirs = sorted((t for t in building if t["section"] == "QA" and t["key"] not in skip and not skipped(t)
                          and any(live_runner(h) and h != me for h in names(t)) and "design-pass" not in t["labels"]),
                         key=lambda t: t["key"])
         if theirs:
@@ -1515,7 +1575,7 @@ def choose(n, dry):
 
     # b. orphans
     for t in sorted((t for t in building if orphan(t) and t["key"] not in skip and not t["waiting"]
-                     and not set(t["labels"]) & (SKIP_ALL | {"design-pass"}) and orphan_ok(t) and can_join(n, t["board"])),
+                     and not skipped(t) and "design-pass" not in t["labels"] and orphan_ok(t) and can_join(n, t["board"])),
                     key=lambda t: (rank(t), t["updated"])):
         if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
             continue
@@ -1590,7 +1650,7 @@ def choose(n, dry):
         if not t:
             TRACE["prs"].append({"pr": p["number"], "ticket": key, "result": DEAD.get(key, "ticket unreadable")})
             continue
-        if (t["key"] in skip or set(t["labels"]) & (SKIP_ALL | {"design-pass"}) or not can_join(n, t["board"])
+        if (t["key"] in skip or skipped(t) or "design-pass" in t["labels"] or not can_join(n, t["board"])
                 or any(live_runner(h) and h != me for h in names(t))):
             continue
         if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
@@ -1778,7 +1838,95 @@ def self_test():
     assert decide_suppress(3, False, ["HYCI-1"], []) is False, "BlockedBy closed: offered again"
     assert decide_suppress(3, False, ["HYCI-1"], ["HYCI-1"]) is True
     trace_self_test()
+    escalate_self_test()
     print("fleet/pick self-test ok")
+
+
+def escalate_self_test():
+    """A ticket an OpenCode run timed out on in the last 24h leaves OpenCode: its holder neither resumes nor parks it, no
+    OpenCode runner takes it, and a runner on another engine adopts it as an orphan."""
+    global RUNNER_STATE, RUNNERS, SNAP, try_claim
+    import tempfile
+    saved = (RUNNER_STATE, RUNNERS, SNAP, try_claim, ENGINE, ship_claim)
+    RUNNER_STATE = Path(tempfile.mkdtemp())
+    assert RUNNER_STATE != STATE, "the ledger is read where fleet/runner writes it, not from the picker's state"
+    RUNNERS = 3
+    now = dt.datetime.now(dt.timezone.utc)
+    iso = lambda h: (now - dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def ledger(*rows):
+        _LEDGER.clear()
+        (RUNNER_STATE / "run-ledger.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    def run(key, engine, hours, detail="timeout: hit the 3h run limit"):
+        return {"ts": iso(hours), "runner": 2, "ticket": key, "engine": engine, "model": "m", "result": "FAIL",
+                "state": "FAULT", "detail": detail, "source": "board"}
+
+    t = {"key": "HTPR-70", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium",
+         "holders": [["runner 2", True]], "waiting": False, "subs": False, "paid": False,
+         "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"}
+    new_t = {**t, "key": "HTPR-71", "section": "Bugs", "holders": []}
+    (RUNNER_STATE / "engine-1").write_text("codex\n")
+    (RUNNER_STATE / "engine-2").write_text("opencode\n")
+    (RUNNER_STATE / "engine-3").write_text("opencode\n")
+    try_claim = lambda n, t, source, dry: True
+    try:
+        ledger(run("HTPR-70", "pi-opencode", 1), run("HTPR-71", "opencode", 2))
+        assert opencode_timed_out("HTPR-70") and opencode_timed_out("HTPR-71"), "pi-opencode and opencode both count"
+        assert orphan(t), "timed out on OpenCode within 24h: its OpenCode holder holds it in name only"
+        assert not worker_can_adopt(3, t) and worker_can_adopt(1, t), "only a runner on another engine may adopt it"
+        set_engine("opencode")
+        assert skipped(t) and eligible_reason(new_t) == "timed out on OpenCode in the last 24 hours"
+        SNAP = {"tickets": [t, new_t], "rel": {"HTPR-70": [[], []], "HTPR-71": [[], []]}, "prs": [], "incidents": [], "open": {}}
+        for n in (2, 3):
+            try:
+                got = choose(n, True)
+                raise AssertionError(f"OpenCode runner {n} took {got[0]['key']} as {got[1]}")
+            except SystemExit as e:
+                assert str(e).startswith("none:"), e
+        set_engine("codex")
+        assert not skipped(t) and eligible_reason(new_t) is None
+        assert choose(1, True) == (t, "orphan"), "a Codex runner adopts the timed-out ticket"
+
+        set_engine("opencode")
+        try_claim = saved[3]
+        hold = "ship-claim: HOLD. RUNNER 2 has unfinished merged work: https://app.hypertask.ai/detail/project-15/70 (HTPR-70)."
+        globals()["ship_claim"] = lambda n, key, incident=False, dry=False: (4, hold)
+        SNAP["tickets"] = [t, {**new_t, "key": "HTPR-72"}]
+        SNAP["rel"]["HTPR-72"] = [[], []]
+        try:
+            got = choose(2, True)
+            raise AssertionError(f"ship-claim's hold handed the holder {got[0]['key']} as {got[1]}")
+        except Pick as p:
+            raise AssertionError(f"ship-claim's hold resumed the timed-out {p.t['key']} as {p.source}")
+        except SystemExit as e:
+            assert str(e).startswith("none:"), e
+        calls, real_run = [], subprocess.run
+        subprocess.run = lambda args, **kw: calls.append((args, kw["env"]["SHIP_SESSION_NAME"])) or \
+            subprocess.CompletedProcess(args, 0, "HTPR-70 stays in In Progress, RUNNER 2 unassigned\n", "")
+        try:
+            hand_back_timeouts(2, True)
+            assert not calls and names(t) == ["runner 2"], "a dry run hands nothing back"
+            hand_back_timeouts(2, False)
+        finally:
+            subprocess.run = real_run
+        assert [(a[1:3], who) for a, who in calls] == [(["HTPR-70", "--hand-back"], "RUNNER 2")], calls
+        assert names(t) == [], "the handed-back ticket no longer names its OpenCode runner"
+        t["holders"] = [["runner 2", True]]
+
+        ledger(run("HTPR-70", "pi-opencode", 25))
+        assert not opencode_timed_out("HTPR-70") and not orphan(t), "a timeout older than 24h changes nothing"
+        set_engine("opencode")
+        assert not skipped(t) and choose(2, True) == (t, "own"), "after 24h its OpenCode holder resumes it"
+
+        ledger(run("HTPR-70", "codex", 1), run("HTPR-70", "cursor", 1), run("HTPR-70", "pi-opencode", 1, "rc 1"))
+        assert not opencode_timed_out("HTPR-70") and not orphan(t), "a timeout on another engine, or another fault, changes nothing"
+        assert not skipped(t) and choose(2, True) == (t, "own")
+    finally:
+        _LEDGER.clear()
+        set_engine(saved[4])
+        globals()["ship_claim"] = saved[5]
+        RUNNER_STATE, RUNNERS, SNAP, try_claim = saved[:4]
 
 
 def wip_self_test():
