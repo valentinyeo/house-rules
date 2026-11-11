@@ -342,6 +342,12 @@ def self_test():
         ("HYCI-7", [["vcc", "task", "update", "HYCI-7", "--section", "32923"]],
          f"{NOTE} back to the queue. No PR linked while it sat in AI Review.")], \
         "board 11514 sends PR-less tickets to Backlog and closes only live merged ones"
+    alarm_st = {"rows": [{"ticket": "HYCI-277", "verdict": "MERGED-NOT-MOVED", "pr": "a#9", "column": "In Progress",
+                          "live": True, "title": "Board health: board 11514 red over a day", "labels": []}]}
+    assert plan_fixes(11514, None, alarm_st) == [
+        ("HYCI-277", [["vcc", "task", "update", "HYCI-277", "--section", "32923"]],
+         f"{NOTE} back to the queue. A board-health alarm stays open until the board is green.")], \
+        "a board-health alarm with a live partial fix returns to Backlog, it does not close"
     closed_11514 = {"rows": [{"ticket": "HYCI-8", "verdict": "PR-CLOSED", "pr": "a#3", "column": "In Progress"}]}
     assert plan_fixes(11514, None, closed_11514) == [
         ("HYCI-8", [["vcc", "task", "update", "HYCI-8", "--section", "32923"]],
@@ -487,6 +493,9 @@ def plan_fixes(board, flow, status):
         if r["verdict"] == "MERGED-NOT-MOVED" and board == 15:
             plan.append((n, [["vcc", "task", "move", n, "QA"]],
                          f"{NOTE} moved to QA. Its PR is merged: {r['pr']}. Runner proves it live, then Done."))
+        elif r["verdict"] == "MERGED-NOT-MOVED" and r.get("live") and str(r.get("title") or "").startswith("Board health:"):
+            plan.append((n, [["vcc", "task", "update", n, "--section", str(home(r, board))]],
+                         f"{NOTE} back to the queue. A board-health alarm stays open until the board is green."))
         elif r["verdict"] == "MERGED-NOT-MOVED" and r.get("live"):
             plan.append((n, [["vcc", "task", "move", n, "Done"]],
                          f"{NOTE} moved to Done. Its PR {r['pr']} is merged and live."))

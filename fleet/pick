@@ -1036,6 +1036,16 @@ def repark_suppressed(t):
     return decide_suppress(len(recent), bool(lead_at and lead_at > third), blockers, open_keys)
 
 
+def open_blocked_by(t):
+    """Open outgoing BlockedBy, when this pick can read the links.
+    A spent lookup is not a block. The kept slot never reaches held_back, so a known blocker has to drop the ticket here."""
+    if t["key"] not in SNAP["rel"]:
+        if CHECKED[0] >= BLOCK_LOOKUPS * 2:
+            return False
+        CHECKED[0] += 1
+    return any(is_open(w) for w in relations(t["key"])[0])
+
+
 def held_reason(t, own=False):
     """Why no runner takes this ticket now, or None. It waits on someone: Valentin Review, a marked Question to Valentin
     (not for the runner's own ticket), an open BlockedBy link, or a ticket parked three times in six hours. The relation
@@ -1103,6 +1113,8 @@ def slot_candidates(n, me, skip):
         if t["board"] != "11514":
             continue
         if t["waiting"] or "design-pass" in t["labels"] or skipped(t) or t["key"] in skip or repark_suppressed(t):
+            continue
+        if open_blocked_by(t):
             continue
         new_col = t["section"] in BOARDS[t["board"]][0]
         building_col = t["section"] in BOARDS[t["board"]][1]
@@ -2300,6 +2312,24 @@ def wip_self_test():
         RUNNING.clear()
         ci[2]["prio"] = "Urgent"
         assert choose(1, True) == (ci[2], "kept-slot"), "busy pool: the free runner still takes the blocker"
+        # HYCI-277: a Backlog alarm that waits on an open ticket is not the kept slot. A closed blocker offers it again.
+        alarm = tk("HYCI-277", "Backlog")
+        alarm["prio"] = "Urgent"
+        blocker = tk("HYCI-233", "Agent Blocked", "runner 9")
+        plain = tk("HYCI-1", "Backlog")
+        SNAP["tickets"] = [alarm, blocker, plain]
+        SNAP["rel"] = {"HYCI-277": [["HYCI-233"], []], "HYCI-233": [[], ["HYCI-277"]], "HYCI-1": [[], []]}
+        SNAP["prs"] = []
+        SNAP["open"] = {}
+        CHECKED[0] = 0
+        set_members("11514", {"runner 1", "runner 2"})
+        got = choose(2, True)
+        assert (got[0]["key"], got[1]) == ("HYCI-1", "kept-slot"), got
+        SNAP["tickets"] = [alarm, plain]
+        SNAP["rel"] = {"HYCI-277": [["HYCI-233"], []], "HYCI-1": [[], []]}
+        SNAP["open"] = {"HYCI-233": False}
+        got = choose(2, True)
+        assert (got[0]["key"], got[1]) == ("HYCI-277", "kept-slot"), got
         (STATE / "runner-2.log").unlink()
         RUNNING.clear()
         SNAP["tickets"] = [tk("HTPR-50", "AI Review")]
