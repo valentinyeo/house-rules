@@ -134,6 +134,15 @@ ENGINE = "cursor"
 # House rules, live incident lane: any runner takes it on grok-4.7 high, whatever its engine. The pacer can rest Cursor
 # to 0 runners; an incident still runs there (HYCI-208 sat unheld for hours while every slot ran on Codex).
 INCIDENT_ENGINE = "cursor"
+# Valentin can reserve a plan for himself (poteto-2-advisor pacer, ~/.local/state/pacing/reserved.json, 11 Nov: "take cursor
+# off the pool pls"). While Cursor is reserved, incidents run on Codex at Sol high instead.
+try:
+    _RES = json.loads((Path.home() / ".local/state/pacing/reserved.json").read_text())
+    if float((_RES.get("grok") or {}).get("until", 0)) > time.time():
+        INCIDENT_ENGINE = "codex"
+except (OSError, ValueError, AttributeError):
+    pass
+INCIDENT_MODEL = {"cursor": ("grok-4.7-high", "high"), "codex": ("gpt-6.1-sol", "high")}
 RUN_START = re.compile(r"^\S+ (?:cursor|hax|claude): (.*)$")
 TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|HYCI)-([0-9]+)\b")
 RETIRED = re.compile(r"^(?:ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
@@ -1841,7 +1850,7 @@ def render(n, t, source):
     if source == "incident":
         brief_file = HERE / "briefs" / ("release-stop.txt" if t["board"] == "11514" else "incident.txt")
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
-        label, model, effort = ("brain-hard", *ENGINES[INCIDENT_ENGINE]["incident"])
+        label, model, effort = ("brain-hard", *INCIDENT_MODEL[INCIDENT_ENGINE])
     if source == "cross-qa":
         brief = CROSS_QA_LINE + "\n" + brief
     brief += GATES_LINE.replace("$key", t["key"])
@@ -2004,8 +2013,14 @@ def self_test():
     globals()["SNAP"] = {"incidents": [inc_t]}
     hit = incident_step(5, True)
     assert hit and hit[1] == "incident", "an OpenCode slot takes an incident"
+    live_engine = INCIDENT_ENGINE
+    globals()["INCIDENT_ENGINE"] = "cursor"
     inc = render(5, hit[0], "incident")
     assert (inc["engine"], inc["model"], inc["effort"]) == ("cursor", "grok-4.7-high", "high"), "incidents run on Cursor grok high"
+    globals()["INCIDENT_ENGINE"] = "codex"
+    inc = render(5, hit[0], "incident")
+    assert (inc["engine"], inc["model"], inc["effort"]) == ("codex", "gpt-6.1-sol", "high"), "reserved Cursor: incidents on Sol high"
+    globals()["INCIDENT_ENGINE"] = live_engine
     globals()["SNAP"] = SNAP_BACKUP
     set_engine("claude")
     assert "brain-hard" not in SKIP_ALL and "brain-extra-hard" not in SKIP_ALL
