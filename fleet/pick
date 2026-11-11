@@ -1446,8 +1446,10 @@ def incident_runner(key, n):
     fresh = fresh_claims().get(key)
     if fresh and fresh != str(n):
         return fresh
+    # a runner that ended on it under 30 minutes ago is waiting on its checks and comes back to it; a takeover would only
+    # pile runners on one incident (HYCI-282 had runners 8, 10 and 12 assigned within 33 minutes, 11 Nov)
     for m in range(1, RUNNERS + 1):
-        if m != n and active_run(m) == key:
+        if m != n and (active_run(m) == key or just_ended(m, key)):
             return str(m)
     return None
 
