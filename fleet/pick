@@ -1512,14 +1512,22 @@ def just_ended(n, key):
 
 
 def incident_step(n, dry):
-    """Step 0. The open incident that no other runner works, oldest and most urgent first. Lane cap, app freeze,
-    rests and the skip sets of the other steps do not apply; only brain-extra-hard and design-pass tickets (which
+    """Step 0. The open incident that no other runner works, oldest and most urgent first. Lane cap, app freeze and the
+    skip sets of the other steps do not apply; an open BlockedBy link and a fresh IDLE rest (10 minutes, Urgent) do; only brain-extra-hard and design-pass tickets (which
     ship-claim refuses) and tickets that wait on a person are left out."""
     me = f"runner {n}"
     cands = [t for t in SNAP.get("incidents") or []
              if t["board"] in INCIDENT_BOARDS and can_join(n, t["board"]) and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & {"brain-extra-hard", "design-pass"}]
+    rest = None
     for t in sorted(cands, key=lambda t: (rank(t), t["created"])):
         if incident_runner(t["key"], n):
+            continue
+        # An incident that waits on open tickets, or that a runner just ended waiting on (Urgent: 10 minute rest), is not
+        # re-run: HYCI-309 (waits on HYCI-298, HYCI-299) took 9 Sol high runs in one hour, each ending "waits-on" (11 Nov).
+        if rest is None:
+            rest = resting(n, dry)
+        if t["key"] in rest or ("rel" in SNAP and any(is_open(w) for w in relations(t["key"])[0])):
+            note(t["key"], "incident waits on open tickets or rests after an IDLE end")
             continue
         if me in names(t):
             if just_ended(n, t["key"]):
