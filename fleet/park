@@ -114,6 +114,12 @@ def note(key, text):
 def release(key, t):
     for name in holders(t):
         vcc("task", "unassign", key, "--agent", name, check=False)
+    # fleet/pick keeps a claim file for 3h10 so no other runner takes the ticket; a parked ticket is free now
+    # (HYCI-245 sat unpicked 3 hours after runner 9 parked it, 11 Nov)
+    try:
+        (Path(os.environ.get("FLEET_PICK_STATE", HOME / ".local/state/fleet-pick")) / "claims" / key).unlink()
+    except OSError:
+        pass
 
 
 def park_waits(key, waits, t=None):
