@@ -163,6 +163,11 @@ def park_unstarted(key, t=None):
     return f"{key} -> {home}, unassigned"
 
 
+# A hand-back that only waits on checks, review or a deploy is a timed wait, not a failed try: it must not count toward the
+# three-parks hold in fleet/pick (HYCI-269 hit three in five minutes on "checks pending" and its PR sat hidden, 11 Nov).
+CHECK_WAIT = re.compile(r"\brecheck\b|\b(?:pending|running|queued|awaiting|in progress)\b", re.I)
+
+
 def park_hand_back(key, why, t=None):
     """Unfinished work nobody waits on (a PR that fails to build, a fix the run could not finish): the caller leaves, the ticket
     keeps its column and PR. The unassign and the note change the ticket, so its IDLE rest ends and the orphan lane hands it to
@@ -180,7 +185,8 @@ def park_hand_back(key, why, t=None):
     free_claim(key)
     note(key, f"Handed back by fleet/park: {mine[0]} could not finish it and nothing waits on anyone. Left to do: {why.strip()} "
               f"Column {t.get('section')} and the PR stay. The next free runner takes it as an orphan.")
-    record_event(key)
+    if not CHECK_WAIT.search(why):
+        record_event(key)
     return f"{key} stays in {t.get('section')}, {mine[0]} unassigned, handed to the orphan lane"
 
 
@@ -378,6 +384,7 @@ def sweep(apply, forced):
 # ---------------------------------------------------------------- main
 
 def self_test():
+    assert CHECK_WAIT.search("PR 3364 is pending hosted tests. Recheck after 11:45") and not CHECK_WAIT.search("QA FAIL: 8px corners")
     assert home_section(15, ["AI Cost", "Bug", "brain-hard"], "Own AI keys") == "Backlog"
     assert home_section(2060, [], "x") == "Todo" and home_section(11514, [], "x") == "Backlog"
     t = {"ticketNumber": "HTPR-1", "pullRequests": [], "waitingOnUserId": None, "blockerCommentId": None}
