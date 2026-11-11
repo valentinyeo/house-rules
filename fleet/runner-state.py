@@ -37,7 +37,7 @@ PARKED_LINE = re.compile(r"(?:^|\s)PARKED\s+\S+")
 STALL = re.compile(r"no model reply|reply cap|reply stalled", re.I)
 TICKET_WAIT = re.compile(r"waits on|waiting on|parked on|BlockedBy", re.I)
 # Live proof that needs Valentin's PC or the check phone, while it is off (IGSH-1923, IGSH-1925, HYCI-256, 11 Nov night).
-PC_WAIT = re.compile(r"\b(?:desktops?|laptops?|PC|phone|computer)\b[^.;]{0,40}\b(?:disconnected|unavailable|unreachable|offline|cannot be reached)"
+PC_WAIT = re.compile(r"\b(?:desktops?|laptops?|PC|phone|computer|Windows)\b[^.;]{0,40}\b(?:disconnected|unavailable|unreachable|offline|cannot be reached)"
                      r"|\b(?:disconnected|unavailable|unreachable|offline)\b[^.;]{0,20}\b(?:desktops?|laptops?|PC|phone)\b", re.I)
 
 
@@ -169,6 +169,7 @@ def self_test():
     assert pc["state"] == "PARKED" and pc["park"] == "pc", pc
     assert classify("RUNNER IDLE IGSH-1925 live-proof unavailable; laptops disconnected", 0, 400, "", 0, "IGSH-1925")["park"] == "pc"
     assert classify("RUNNER IDLE HYCI-256 PC connection unavailable", 0, 400, "", 0, "HYCI-256")["park"] == "pc"
+    assert classify("RUNNER IDLE Windows offline; live verification pending", 0, 400, "", 0, "IGSH-1")["park"] == "pc"
     assert classify("RUNNER IDLE something new", 0, 400, "", WAIT_LIMIT, "HTPR-1")["state"] == "FAULT"
     assert classify("", 0, 400, "pacer", 0, "")["state"] == "IDLE_PACER"
     cap = classify_pick("none: wip: 4 of 4, new work closed (not counted: waiting 2)", "")
