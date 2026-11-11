@@ -1584,8 +1584,9 @@ def choose(n, dry):
             if cands and held.startswith("HYCI-"):
                 units, workers, _ = pipeline()
                 if len(units) >= len(workers) and all(t["board"] == "11514" for t in cands):
-                    log("kept slot: another runner is on checks work at the cap")
-                    cands = []
+                    # house rule: at the cap, Urgent Fleet CI & Infra tickets still go out (HYCI-245 waited 3h, 11 Nov)
+                    cands = [t for t in cands if t["prio"] == "Urgent"]
+                    log("kept slot: at the cap, Urgent only" if cands else "kept slot: another runner is on checks work at the cap")
         if cands:
             got = take_kept_slot(n, me, cands, dry)
             if got:
