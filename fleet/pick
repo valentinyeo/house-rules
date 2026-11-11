@@ -38,7 +38,7 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
 One runner holds one ticket until it is live. brain-extra-hard runs on the codex engine (Sol high) or the claude engine (Opus high); every other engine skips it.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
-a ticket with a BlockedBy link is governed by that link instead.
+a ticket with an open BlockedBy link is held by that link; a closed link does not lift a rest (the blocker's fix changes the ticket).
 A ticket with an open BlockedBy link, in Valentin Review or waiting on Valentin is never picked (fleet/park puts them there).
 A runner whose own unfinished ticket rests or waits (ship-claim HOLD names it) gets that ticket back with source "park" and
 briefs/park-job.txt: decide the fleet/park mode, run it, end. A ticket is handed back at most once per REST_MAX (ledger
@@ -778,8 +778,9 @@ def resting(n, dry):
 
 class Skip:
     """Tickets this pick hands out to nobody: other runners' claims (hard) and tickets resting after an IDLE end.
-    A resting ticket with a BlockedBy link is governed by that link instead (held_back lets it go when the blocker is done).
-    The link is read only when a resting ticket is actually considered, so a busy ledger costs no extra reads."""
+    A resting ticket stays resting even when it has a BlockedBy link: an open link holds it anyway, and a closed link once
+    lifted every rest, so HTPR-8863 (closed HYCI-265) was re-adopted every few minutes while it waited to 02:30 (11 Nov).
+    The blocker's fix wakes it: ci-unblock-waiters changes the ticket, and a changed ticket ends its rest."""
 
     def __init__(self, hard, rest):
         self.hard, self.rest = hard, rest
@@ -787,7 +788,7 @@ class Skip:
     def __contains__(self, key):
         if key in self.hard:
             return True
-        return key in self.rest and not relations(key)[0]
+        return key in self.rest
 
 
 def lane_count(taken):
@@ -2190,6 +2191,9 @@ def wip_self_test():
     (STATE / "runner-1.log").write_text(f"{iso(0.5)} pick: HTPR-11 codex gpt-6.1-sol high (orphan)\n{iso(0.4)} end\n")
     (STATE / "runner-1.result").write_text("WAIT_CHECK\n")
     assert "HTPR-11" in resting(2, True), "a WAIT_CHECK end rests the ticket for every runner, like IDLE did"
+    SNAP["rel"]["HTPR-11"] = [["HYCI-9"], []]
+    assert "HTPR-11" in Skip(set(), resting(2, True)), "a closed BlockedBy link does not lift the rest"
+    del SNAP["rel"]["HTPR-11"]
     (STATE / "runner-1.result").write_text("DONE\n")
     assert "HTPR-11" not in resting(2, True), "a DONE end does not rest the ticket"
     (STATE / "runner-1.log").unlink(); (STATE / "runner-1.result").unlink()
