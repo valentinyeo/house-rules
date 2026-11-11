@@ -68,12 +68,20 @@ def holders(t):
 
 
 def blockers(key):
-    """Tickets `key` waits on: BlockedBy relations seen from key (direction outgoing), not archived."""
-    out = []
+    """Open outgoing BlockedBy tickets, using each board's completion columns."""
+    out, done_sections = [], {}
     for r in vcc("task", "relations", key).get("relations") or []:
         other = r.get("otherTask") or {}
-        if r.get("relationType") == "BlockedBy" and r.get("direction") == "outgoing" and other.get("status") != "Archive":
-            out.append(other.get("ticketNumber"))
+        if r.get("relationType") != "BlockedBy" or r.get("direction") != "outgoing" or other.get("status") == "Archive":
+            continue
+        task = get(other["ticketNumber"])
+        if task.get("status") == "Archive":
+            continue
+        board = str(task["projectId"])
+        if board not in done_sections:
+            done_sections[board] = {s["id"] for s in vcc("section", "list", "--project", board)["sections"] if s.get("isDone")}
+        if task.get("sectionId") not in done_sections[board]:
+            out.append(other["ticketNumber"])
     return out
 
 
@@ -373,6 +381,74 @@ def self_test():
     assert co_holders(co, "RUNNER 7") == ([], ["Infra Runner 3", "Runner 6"]), "a runner that is not assigned releases nothing"
     assert lead_for("HTPR-1") == ("HT Product Lead", "15")
     assert lead_for("HYCI-1")[0] == "Chief Of Staff" and lead_for("IGSH-1")[0] == "Chief Of Staff"
+    from unittest.mock import patch
+
+    tasks = {
+        "HYCI-244": {"projectId": 11514, "sectionId": 32929, "status": "Normal"},
+        "IGSH-3": {"projectId": 2060, "sectionId": 900, "status": "Normal"},
+        "HTPR-4": {"projectId": 15, "sectionId": 29521, "status": "Normal"},
+        "HTPR-5": {"projectId": 15, "sectionId": 4312, "status": "Normal"},
+        "HTPR-6": {"projectId": 15, "sectionId": 29803, "status": "Normal"},
+        "HTPR-7": {"projectId": 15, "sectionId": 30997, "status": "Normal"},
+        "HYCI-8": {"projectId": 11514, "sectionId": 32924, "status": "Normal"},
+        "HYCI-9": {"projectId": 11514, "status": "Archive"},
+    }
+    sections = {
+        "11514": [{"id": 32929, "name": "Done", "isDone": True}, {"id": 32924, "name": "In Progress"}],
+        "2060": [{"id": 900, "name": "Released", "isDone": True}],
+        "15": [{"id": n, "isDone": n != 30997} for n in (29521, 4312, 29803, 30997)],
+    }
+    relations = [{"relationType": "BlockedBy", "direction": "outgoing",
+                  "otherTask": {"ticketNumber": k, "status": "Normal"}} for k in tasks]
+    relations += [
+        {"relationType": "BlockedBy", "direction": "incoming", "otherTask": {"ticketNumber": "HTPR-200"}},
+        {"relationType": "RelatedTo", "direction": "outgoing", "otherTask": {"ticketNumber": "HTPR-201"}},
+        {"relationType": "BlockedBy", "direction": "outgoing", "otherTask": {"ticketNumber": "HYCI-202", "status": "Archive"}},
+    ]
+
+    def fake_vcc(*args, **kwargs):
+        if args[:2] == ("task", "relations"):
+            return {"relations": relations}
+        if args[:2] == ("task", "get"):
+            return {"tasks": [tasks[args[2]]]}
+        if args[:2] == ("section", "list"):
+            return {"sections": sections[args[-1]]}
+        assert args == ("task", "unassign", "HTPR-1", "--agent", "Runner 4"), args
+        return {"success": True}
+
+    ticket = {**t, "section": "AI Review", "pullRequests": [{"number": 1}],
+              "assignees": [{"agent": {"displayName": "Runner 4"}}, {"agent": {"displayName": "Runner 6"}}]}
+    with patch.dict(os.environ, {"SHIP_SESSION_NAME": "RUNNER 4"}), \
+            patch(__name__ + ".vcc", side_effect=fake_vcc) as api, \
+            patch(__name__ + ".note") as posted, patch(__name__ + ".record_event") as event:
+        assert blockers("HTPR-1") == ["HTPR-7", "HYCI-8"], "completed and incoming links must not block; Flag: Off must block"
+        try:
+            park_hand_back("HTPR-1", "finish the PR", ticket)
+        except RuntimeError as error:
+            assert "open BlockedBy" in str(error)
+        else:
+            raise AssertionError("an active blocker must refuse hand-back")
+        assert not any(c.args[:2] == ("task", "unassign") for c in api.call_args_list)
+        posted.assert_not_called()
+        event.assert_not_called()
+        relations[:] = [r for r in relations if r["otherTask"]["ticketNumber"] not in ("HTPR-7", "HYCI-8")]
+        result = park_hand_back("HTPR-1", "finish the PR", ticket)
+        assert "Runner 4 unassigned" in result and "AI Review" in result
+        assert [c.args for c in api.call_args_list if c.args[:2] == ("task", "unassign")] == [
+            ("task", "unassign", "HTPR-1", "--agent", "Runner 4")]
+        assert ticket["section"] == "AI Review" and ticket["pullRequests"] == [{"number": 1}]
+        posted.assert_called_once()
+        event.assert_called_once_with("HTPR-1")
+        api.reset_mock()
+        api.side_effect = RuntimeError("blocker read unavailable")
+        try:
+            park_hand_back("HTPR-1", "finish the PR", ticket)
+        except RuntimeError as error:
+            assert "blocker read unavailable" in str(error)
+        else:
+            raise AssertionError("an unreadable blocker must refuse hand-back")
+        assert not any(c.args[:2] == ("task", "unassign") for c in api.call_args_list)
+    print("fleet/park completed-blocker hand-back regression ok")
     print("fleet/park self-test ok")
 
 
