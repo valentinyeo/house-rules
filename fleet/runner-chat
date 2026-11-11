@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Attach the current runner's background task to its replayable Agent Chat inbox."""
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+class ChatError(Exception):
+    pass
+
+
+def request(path, body=None):
+    token = os.environ.get("HT_TOKEN", "")
+    if not token:
+        raise ChatError("HT_TOKEN is required; use the current runner's identity")
+    base = os.environ.get("RUNNER_CHAT_BASE", "https://app.hypertask.ai/api/mcp").rstrip("/")
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}):
+        raise ChatError("chat requires HTTPS (except loopback)")
+    req = urllib.request.Request(
+        base + path,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    )
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    try:
+        with urllib.request.build_opener(NoRedirect).open(req, timeout=30) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise ChatError(f"chat HTTP {exc.code}") from None
+    except (OSError, ValueError):
+        raise ChatError("chat request failed") from None
+    if not isinstance(result, dict) or result.get("success") is not True:
+        raise ChatError("chat request was not successful")
+    return result
+
+
+def pending():
+    result = request("/chat/pending?unanswered=true")
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        raise ChatError("invalid chat inbox")
+    for message in messages:
+        if not isinstance(message, dict) or any(
+            not isinstance(message.get(key), str) or not message[key]
+            for key in ("id", "sessionId", "text")
+        ):
+            raise ChatError("invalid chat message")
+    return messages
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    listen = sub.add_parser("listen", help="Finish the background task when messages arrive; never acknowledge them")
+    listen.add_argument("--once", action="store_true")
+    listen.add_argument("--interval", type=int, choices=range(1, 61), default=5, metavar="1-60")
+    listen.add_argument("--timeout", type=int, choices=range(1, 1801), default=300, metavar="1-1800")
+    reply = sub.add_parser("reply", help="Answer this exact message; only a successful server reply settles it")
+    reply.add_argument("session_id")
+    reply.add_argument("message_id")
+    reply.add_argument("--text", required=True)
+    args = parser.parse_args(argv)
+    if args.command == "reply":
+        if not args.session_id or not args.message_id or not args.text.strip() or len(args.text.encode("utf-16-le")) // 2 > 8000:
+            parser.error("reply requires session, message, and 1-8000 characters of text")
+        session = urllib.parse.quote(args.session_id, safe="")
+        request("/chat/sessions/" + session + "/messages", {"text": args.text, "replyToMessageId": args.message_id})
+        print(json.dumps({"success": True, "sessionId": args.session_id, "messageId": args.message_id}))
+        return 0
+    deadline = time.monotonic() + args.timeout
+    while True:
+        messages = pending()
+        if messages or args.once or time.monotonic() >= deadline:
+            print(json.dumps({"success": True, "messages": messages}, ensure_ascii=False), flush=True)
+            return 0
+        time.sleep(min(args.interval, max(0, deadline - time.monotonic())))
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except ChatError as exc:
+        print(f"runner-chat: {exc}", file=sys.stderr)
+        sys.exit(1)
