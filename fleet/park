@@ -111,15 +111,19 @@ def note(key, text):
         print(f"WARNING {key}: agent-lane note not written: {(r.stderr or r.stdout).strip()[-200:]}", file=sys.stderr)
 
 
-def release(key, t):
-    for name in holders(t):
-        vcc("task", "unassign", key, "--agent", name, check=False)
-    # fleet/pick keeps a claim file for 3h10 so no other runner takes the ticket; a parked ticket is free now
-    # (HYCI-245 sat unpicked 3 hours after runner 9 parked it, 11 Nov)
+def free_claim(key):
+    """fleet/pick keeps a claim file for 3h10 so no other runner takes the ticket. A parked or handed-back ticket is free
+    now (HYCI-245 sat unpicked 3 hours after a park, then its green PR sat 80 minutes after a hand-back, 11 Nov)."""
     try:
         (Path(os.environ.get("FLEET_PICK_STATE", HOME / ".local/state/fleet-pick")) / "claims" / key).unlink()
     except OSError:
         pass
+
+
+def release(key, t):
+    for name in holders(t):
+        vcc("task", "unassign", key, "--agent", name, check=False)
+    free_claim(key)
 
 
 def park_waits(key, waits, t=None):
@@ -173,6 +177,7 @@ def park_hand_back(key, why, t=None):
     if not why.strip():
         raise RuntimeError("--hand-back needs a reason: what is left to do")
     vcc("task", "unassign", key, "--agent", mine[0])
+    free_claim(key)
     note(key, f"Handed back by fleet/park: {mine[0]} could not finish it and nothing waits on anyone. Left to do: {why.strip()} "
               f"Column {t.get('section')} and the PR stay. The next free runner takes it as an orphan.")
     record_event(key)
