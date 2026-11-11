@@ -336,9 +336,17 @@ def self_test():
         "a solo dev's extra ticket goes to the queue: no pool runner adopts it from Doing"
     live_st = {"rows": [{"ticket": "HYCI-6", "verdict": "MERGED-NOT-MOVED", "pr": "a#2", "column": "AI Review", "live": True},
                         {"ticket": "HYCI-7", "verdict": "NO-PR", "pr": None, "column": "AI Review", "title": "x", "labels": []}]}
-    assert plan_fixes(11514, None, live_st) == [("HYCI-6", [["vcc", "task", "move", "HYCI-6", "Done"]],
-                                                 f"{NOTE} moved to Done. Its PR a#2 is merged and live.")], \
-        "no HOME map on 11514: sendback moves PR-less tickets there"
+    assert plan_fixes(11514, None, live_st) == [
+        ("HYCI-6", [["vcc", "task", "move", "HYCI-6", "Done"]],
+         f"{NOTE} moved to Done. Its PR a#2 is merged and live."),
+        ("HYCI-7", [["vcc", "task", "update", "HYCI-7", "--section", "32923"]],
+         f"{NOTE} back to the queue. No PR linked while it sat in AI Review.")], \
+        "board 11514 sends PR-less tickets to Backlog and closes only live merged ones"
+    closed_11514 = {"rows": [{"ticket": "HYCI-8", "verdict": "PR-CLOSED", "pr": "a#3", "column": "In Progress"}]}
+    assert plan_fixes(11514, None, closed_11514) == [
+        ("HYCI-8", [["vcc", "task", "update", "HYCI-8", "--section", "32923"]],
+         f"{NOTE} back to the queue. Its PR closed unmerged while it sat in In Progress.")], \
+        "HYCI-219 case: a closed PR on the fleet board returns its ticket to Backlog"
     pats = [scopes._pattern(p) for p in ("Runner {n}", "HT Design Builder")]
     tk = lambda num, sec, *names: {"ticketNumber": num, "section": sec, "title": "t",
                                    "assignees": [{"agent": {"displayName": n}} for n in names]}
@@ -456,7 +464,8 @@ def roster_owners():
 
 QUEUE_EXEMPT = {"postbox dev", "multiprompt android dev", "ht design builder"} | roster_owners()
 QUEUE_NOTE = "Unassigned from {who}: runners hold one ticket until live. YPER4-1371."
-HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}}
+HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734},
+        11514: {"other": 32923}}
 NOTE = "board-health fix:"
 
 
