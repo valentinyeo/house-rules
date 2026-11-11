@@ -1261,7 +1261,7 @@ def try_claim(n, t, source, dry):
 
 
 PRS_CACHE = STATE / "open-prs.json"
-PRS_FRESH_S, PRS_STALE_S = 120, 900
+PRS_FRESH_S, PRS_STALE_S = 600, 900
 
 
 def open_prs_rest(tok, why):
@@ -1278,8 +1278,8 @@ def open_prs_rest(tok, why):
 
 def open_prs():
     """Every open PR to production on hypertask-ai/hypertask, read once per pick. One GitHub read serves every
-    runner's pick for PRS_FRESH_S; on a failed read (the App's GraphQL limit ran out on 2026-11-10 and every pick
-    stopped) a copy up to PRS_STALE_S old stands in."""
+    runner's pick for PRS_FRESH_S, the same ten minutes fleet/pr-snapshot writes its copy; on a failed read (the
+    App's GraphQL limit ran out on 2026-11-10 and every pick stopped) a copy up to PRS_STALE_S old stands in."""
     if SNAP["prs"] is None:
         try:
             cached = json.loads(PRS_CACHE.read_text())
