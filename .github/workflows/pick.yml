@@ -16,6 +16,7 @@ jobs:
       - run: python3 fleet/roster-announce --self-test
       - run: python3 fleet/roster-check --self-test
       - run: fleet/runner harness-selftest
+      - run: fleet/runner provider-busy-selftest
       - run: fleet/runner reply-cap-selftest
       - run: python3 -m unittest tests.test_rules_drift -v
       - run: python3 -m unittest tests.test_ticket_gate_label -v

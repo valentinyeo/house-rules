@@ -83,6 +83,40 @@ pi_mark_auth_failure() {
 }
 harness() { local want=$2; [ "$(cat "$STATE/harness-$1" 2>/dev/null)" = pi ] || { echo "$want"; return; }; case $want in codex|opencode) pi_down "$want" && echo "$want" || echo "pi-$want" ;; *) echo "$want" ;; esac; }
 
+# A provider that refuses the work is busy, not broken (HYCI-255): 429 "The inference service is overloaded" crashed four
+# DeepSeek runners on 2026-11-11 and each restart walked back into the same wall. One overload marks that plan busy for 15
+# minutes and every runner on it rests until the mark expires. It never picks another provider.
+PROVIDER_BUSY_SECONDS=${PROVIDER_BUSY_SECONDS:-900}
+OVERLOAD_RE='inference service is overloaded|429: .*server_error'
+plan_of_engine() {
+  case $1 in
+    opencode|pi-opencode) echo opencode ;; codex|pi-codex) echo codex ;; cursor|pi-cursor) echo cursor ;; claude) echo claude ;;
+    *) echo "$1" ;;
+  esac
+}
+provider_busy_path() { echo "$STATE/provider-busy-$(plan_of_engine "${1:-0}")"; }
+provider_busy_until() { cat "$(provider_busy_path "${1:-0}")" 2>/dev/null || echo 0; }
+provider_busy_left() {
+  local until left
+  until=$(provider_busy_until "${1:-0}")
+  left=$(( ${until:-0} - $(date +%s) ))
+  [ "$left" -gt 0 ] && echo "$left" || echo 0
+}
+mark_provider_busy() {
+  local eng=${1:-0} log=$2 plan
+  grep -a -qE "$OVERLOAD_RE" "$log" 2>/dev/null || return 1
+  plan=$(plan_of_engine "$eng")
+  echo $(( $(date +%s) + PROVIDER_BUSY_SECONDS )) > "$(provider_busy_path "$eng")"
+  { echo "$(date -u +%FT%TZ) provider busy: $plan for ${PROVIDER_BUSY_SECONDS}s, its runners rest; no provider switch" >> "$STATE/runner-${n:-0}.log"; } 2>/dev/null || true
+}
+provider_busy_wait() {
+  local eng=${1:-0} left
+  left=$(provider_busy_left "$eng")
+  [ "$left" -gt 0 ] || { rm -f "$(provider_busy_path "$eng")"; return 0; }
+  { echo "$(date -u +%FT%TZ) provider busy: $(plan_of_engine "$eng") ${left}s left, resting" >> "$STATE/runner-${n:-0}.log"; } 2>/dev/null || true
+  sleep "$left"
+}
+
 # A reply that never comes burns the whole run: 9 of 88 DeepSeek runs hit the 3h limit on 2026-11-10, one after 89 minutes
 # of provider silence (HYCI-250). Pi writes a session record for every event, so its session file is a true heartbeat:
 # no new record for REPLY_CAP seconds means the provider sent nothing. That attempt is killed, retried once, then the run
@@ -266,6 +300,36 @@ case "${1:-}" in
       || { echo 'reply-cap self-test FAILED: a capped run is not classified as a fault with its reason' >&2; bad=1; }
     [ "$bad" = 0 ] && echo 'reply-cap self-test ok'
     exit "$bad" ;;
+  provider-busy-selftest)
+    # Proved without a model call: an overload line writes a 15 minute mark for its plan only, the mark rests that plan,
+    # a clean log marks nothing, and no engine file moves (HYCI-255).
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    STATE=$tmp; n=0; bad=0
+    export PROVIDER_BUSY_SECONDS=900
+    expect() { [ "$2" = "$3" ] || { echo "provider-busy self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    echo opencode > "$tmp/engine-0"
+    printf '429: {"type":"server_error","message":"The inference service is overloaded. Please try again later."}\n' > "$tmp/overload.log"
+    printf 'all good, nothing to report\n' > "$tmp/clean.log"
+    mark_provider_busy opencode "$tmp/clean.log" 2>/dev/null
+    expect 'a clean log marks nothing' "$?" 1
+    expect 'a clean log leaves the plan free' "$(provider_busy_left opencode)" 0
+    mark_provider_busy pi-opencode "$tmp/overload.log"
+    expect 'an overload marks its plan busy' "$?" 0
+    left=$(provider_busy_left opencode)
+    [ "$left" -ge 895 ] && [ "$left" -le 900 ] || { echo "provider-busy self-test FAILED: mark is ${left}s, want about 900" >&2; bad=1; }
+    expect 'pi-opencode is the same plan as opencode' "$(plan_of_engine pi-opencode)" opencode
+    expect 'another plan is not marked' "$(provider_busy_left codex)" 0
+    expect 'the mark changes no engine' "$(cat "$tmp/engine-0")" opencode
+    echo $(( $(date +%s) - 5 )) > "$(provider_busy_path opencode)"
+    expect 'an expired mark leaves the plan free' "$(provider_busy_left opencode)" 0
+    provider_busy_wait opencode
+    [ -f "$(provider_busy_path opencode)" ] && { echo 'provider-busy self-test FAILED: an expired mark stayed on disk' >&2; bad=1; }
+    python3 "$HERE/runner-state.py" --classify --final '' --rc 1 --elapsed 30 --ticket HYCI-1 --overload 1 \
+      | grep -q '"state": "PROVIDER_BUSY"' || { echo 'provider-busy self-test FAILED: the ending does not read provider busy' >&2; bad=1; }
+    python3 "$HERE/runner-state.py" --classify --final '' --rc 1 --elapsed 30 --ticket HYCI-1 --overload 0 \
+      | grep -q '"state": "FAULT"' || { echo 'provider-busy self-test FAILED: a plain crash no longer reads as a fault' >&2; bad=1; }
+    [ "$bad" = 0 ] && echo 'provider-busy self-test ok'
+    exit "$bad" ;;
   harness-selftest)
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
     STATE=$tmp; PI_AUTH=$tmp/auth.json; export PI_AUTH HARNESS_DOWN_TTL=21600
@@ -315,7 +379,10 @@ case "${1:-}" in
     fi ;;
   tick) "$SELF" top-up ;;
   status)
-    echo "target=$(target) max=$(maxcap) engines: $(for i in $(seq 1 "$(target)"); do printf '%s=%s ' "$i" "$(engine "$i")"; done)"; green && echo "green: $GREEN_WHY" || echo "not green: $GREEN_WHY"
+    echo "target=$(target) max=$(maxcap) engines: $(for i in $(seq 1 "$(target)"); do printf '%s=%s ' "$i" "$(engine "$i")"; done)"
+    for p in cursor codex opencode claude; do
+      left=$(provider_busy_left "$p"); [ "${left:-0}" -gt 0 ] && echo "provider busy: $p ${left}s left"
+    done; green && echo "green: $GREEN_WHY" || echo "not green: $GREEN_WHY"
     [ -f "$STATE/PAUSED" ] && echo "PAUSED"
     tmux ls 2>/dev/null | grep "^${SESS_PFX}-" || echo "no runner sessions" ;;
   stop-all)
@@ -334,7 +401,7 @@ case "${1:-}" in
       printf '%s\n' "$out" | tail -5
       grep -q RUNNER_LAUNCH_OK <<< "$out" && echo "launch-check ok: $eng $model $effort" || { echo "launch-check FAILED: exit $rc"; exit 1; }
     fi ;;
-  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | reply-cap-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
+  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | reply-cap-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
   *)
     n=$1
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
@@ -354,6 +421,7 @@ case "${1:-}" in
         echo "$(date -u +%FT%TZ) relaunch: launcher changed" >> "$rlog"; exec "$SELF" "$n" --loop
       fi
       if [ -f "$STATE/PAUSED" ] || [ -f "$STATE/stop-$n" ]; then sleep 300; continue; fi
+      provider_busy_wait "$(engine "$n")"
       pick_bin=$(python3 "$PICK_GATE" pick 2>>"$rlog") || { echo "$(date -u +%FT%TZ) pick-gate: no runnable picker" >> "$rlog"; sleep 900; continue; }
       if ! pick=$("$pick_bin" "$n" --json 2>>"$rlog"); then
         echo "$(date -u +%FT%TZ) pick: nothing to start" >> "$rlog"
@@ -402,7 +470,11 @@ case "${1:-}" in
       waitf="$STATE/wait-check-$pick_ticket"
       waited=0; [ -f "$waitf" ] && waited=$(( $(date +%s) - $(stat -c %Y "$waitf") ))
       final=$(grep -a -E 'INFRA RUNNER DONE|CI RUNNER DONE|RUNNER DONE|^PARKED |RUNNER IDLE' "$runlog" | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300 || true)
-      meta=$(python3 "$HERE/runner-state.py" --classify --final "$final" --rc "$rc" --elapsed "$elapsed" --stop "$stop" --waited "$waited" --ticket "$pick_ticket") \
+      # A run with no ending of its own that the provider refused is provider busy, never a crash. The mark rests every
+      # runner on that plan, and it changes no engine: the same provider is tried again when the mark expires.
+      overload=0
+      if [ -z "$final" ] && mark_provider_busy "$pick_engine" "$runlog"; then overload=1; fi
+      meta=$(python3 "$HERE/runner-state.py" --classify --final "$final" --rc "$rc" --elapsed "$elapsed" --stop "$stop" --waited "$waited" --ticket "$pick_ticket" --overload "$overload") \
         || meta='{"state":"FAULT","result":"FAIL","park":"","waits":"","detail":"classifier failed"}'
       state=$(jq -r '.state // "FAULT"' <<<"$meta"); res=$(jq -r '.result // "FAIL"' <<<"$meta")
       park_mode=$(jq -r '.park // ""' <<<"$meta"); waits=$(jq -r '.waits // ""' <<<"$meta"); detail=$(jq -r '.detail // ""' <<<"$meta")
