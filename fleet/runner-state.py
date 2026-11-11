@@ -22,6 +22,7 @@ STATES = (
     "IDLE_CAP",
     "IDLE_PACER",
     "IDLE_LOAD",
+    "PROVIDER_BUSY",
     "PARKED",
     "STOPPED",
     "FAULT",
@@ -43,8 +44,11 @@ def _out(state, result, park="", waits="", detail=""):
     return {"state": state, "result": result, "park": park, "waits": waits, "detail": detail[:500]}
 
 
-def classify(final, rc, elapsed, stop, waited, ticket):
-    """One ending. `park` is lead, waits, or empty. `waits` is comma-separated ticket keys."""
+def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
+    """One ending. `park` is lead, waits, or empty. `waits` is comma-separated ticket keys.
+
+    `overload` is the launcher's read of the run log: the provider refused the work (HYCI-255). That is a rest, not a crash.
+    """
     line = (final or "").strip()
     mark = (stop or "").strip().lower()
     if mark == "pacer":
@@ -55,6 +59,9 @@ def classify(final, rc, elapsed, stop, waited, ticket):
         return _out("BUILDING", "DONE", detail=line[:160])
     if PARKED_LINE.search(line):
         return _out("PARKED", "PARKED", detail=line[:160])
+    # The provider overloaded: nothing was built and nothing is broken, so the ticket must not read as a fault (HYCI-255).
+    if overload and not line:
+        return _out("PROVIDER_BUSY", "PROVIDER_BUSY", detail="provider busy: the inference service is overloaded")
     # A capped run is the model's fault, not the ticket's: the reason lands in the ledger and fleet/pick hands the ticket
     # back to the next run (HYCI-250).
     if line and STALL.search(line):
@@ -131,6 +138,12 @@ def self_test():
     done = classify("INFRA RUNNER DONE HYCI-1 Done", 0, 400, "", 0, "HYCI-1")
     assert done["state"] == "BUILDING" and done["result"] == "DONE" and done["park"] == ""
     assert classify("PARKED HYCI-9", 0, 30, "", 0, "HYCI-9")["state"] == "PARKED"
+    busy = classify("", 1, 30, "", 0, "HYCI-1", overload=True)
+    assert busy["state"] == "PROVIDER_BUSY" and busy["result"] == "PROVIDER_BUSY" and busy["park"] == "", busy
+    assert "provider busy" in busy["detail"], busy
+    assert classify("", 1, 30, "", 0, "HYCI-1")["state"] == "FAULT", "without the overload read it is still a crash"
+    assert classify("RUNNER IDLE checks pending", 0, 400, "", 0, "HYCI-1", overload=True)["state"] == "WAIT_CHECK", \
+        "a run that got its own final line keeps that ending"
     stall = classify("RUNNER IDLE no model reply for 600s twice, run ended", 124, 700, "", 0, "HYCI-1")
     assert stall["state"] == "FAULT" and stall["result"] == "FAIL" and "no model reply" in stall["detail"], stall
     assert stall["park"] == ""
@@ -163,6 +176,7 @@ def self_test():
         classify_pick("none: wip: 2 of 2, new work closed (not counted: cap 2)", ""),
         classify("", 0, 500, "pacer", 0, ""),
         classify("RUNNER IDLE not green", 0, 500, "", 0, "HTPR-4"),
+        classify("", 1, 40, "", 0, "HYCI-2", overload=True),
         classify("PARKED HTPR-5", 0, 40, "", 0, "HTPR-5"),
         classify("", 0, 500, "manual", 0, ""),
         classify("RUNNER IDLE waiting on Valentin flag approval", 0, 500, "", 0, "HTPR-6"),
@@ -191,7 +205,8 @@ def main():
         return
     if "--classify" in sys.argv:
         row = classify(_arg("--final"), int(_arg("--rc", "0")), int(_arg("--elapsed", "0")),
-                       _arg("--stop"), int(_arg("--waited", "0")), _arg("--ticket"))
+                       _arg("--stop"), int(_arg("--waited", "0")), _arg("--ticket"),
+                       overload=_arg("--overload", "0") == "1")
         print(json.dumps(row))
         return
     sys.exit("usage: fleet/runner-state.py --classify | --pick-fail | --self-test")
