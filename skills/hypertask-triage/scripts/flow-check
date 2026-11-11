@@ -23,7 +23,9 @@ CI blocks: CI Boss owns CI on board 11514. A ticket blocked by CI links an
 Urgent HYCI ticket in its log. CI-WAIT lists those; CI-SLOW marks a CI ticket
 open over 6 hours, not Urgent or not In Progress; CI-DONE means CI is fixed
 but the ticket still waits; CI-NO-TICKET is a CI failure blocker with no CI
-ticket, so CI Boss never hears of it.
+ticket, so CI Boss never hears of it. Only a BlockedBy relation blocks: a CI
+ticket named in the log and since Done leaves nothing to wait on, so CI-DONE
+carries ci_linked and the scorecard drops the ones that hold no link.
 
 Valentin, 2026-11-05: "20 tickets in progress. That's impossible. We don't
 have that many runners."
@@ -281,7 +283,7 @@ def run(key):
                 verdict = "CI-NO-LINK"
             ci_rows.append({"ticket": r["ticket"], "column": r["column"], "verdict": verdict,
                             "ci_ticket": None if ref == "NO-TICKET" else ref, "ci_open_h": open_h,
-                            "waited_h": r["idle_h"], "title": r["title"]})
+                            "ci_linked": is_linked, "waited_h": r["idle_h"], "title": r["title"]})
         with ThreadPoolExecutor(6) as ex:
             ci_logs = list(ex.map(lambda n: ht("task", "agent-log", n).get("activities", []), refs))
         boss = max((a.get("createdAt") or "" for log in ci_logs for a in log
