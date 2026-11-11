@@ -425,9 +425,34 @@ def timed_out_here(t):
     return ENGINE == "opencode" and opencode_timed_out(t["key"])
 
 
+PC_PORT = int(os.environ.get("FLEET_PC_PORT", "15037"))
+_PC_WAITS = None
+
+
+def pc_waits():
+    """Tickets a run handed back because Valentin's PC or the check phone was off. Empty once the PC tunnel answers:
+    the file is cleared and every ticket goes back to the pool (IGSH-1923, HYCI-256 held runners 30+ min, 11 Nov)."""
+    global _PC_WAITS
+    if _PC_WAITS is None:
+        import socket
+        path = RUNNER_STATE / "pc-waits"
+        try:
+            socket.create_connection(("127.0.0.1", PC_PORT), timeout=2).close()
+            path.unlink(missing_ok=True)
+            _PC_WAITS = set()
+        except OSError:
+            try:
+                _PC_WAITS = {ln.split()[1] for ln in open(path) if len(ln.split()) == 2}
+            except OSError:
+                _PC_WAITS = set()
+            if _PC_WAITS:
+                log(f"pc off: skipping {', '.join(sorted(_PC_WAITS))}")
+    return _PC_WAITS
+
+
 def skipped(t):
-    """This runner's engine does not take t."""
-    return bool(set(t["labels"]) & SKIP_ALL) or timed_out_here(t)
+    """This runner's engine does not take t, or t waits on Valentin's PC while it is off."""
+    return bool(set(t["labels"]) & SKIP_ALL) or timed_out_here(t) or t["key"] in pc_waits()
 
 
 def hand_back_timeouts(n, dry):

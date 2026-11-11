@@ -486,6 +486,10 @@ case "${1:-}" in
       echo "$res" > "$STATE/runner-$n.result"
       if [ "$park_mode" = "lead" ]; then
         "$HERE/park" "$pick_ticket" --lead --why "$detail" >>"$rlog" 2>&1 || echo "$(date -u +%FT%TZ) park-lead failed" >>"$rlog"
+      elif [ "$park_mode" = "pc" ]; then
+        # fleet/pick skips it until the PC tunnel answers again
+        printf '%s %s\n' "$(date -u +%FT%TZ)" "$pick_ticket" >> "$STATE/pc-waits"
+        "$HERE/park" "$pick_ticket" --hand-back "needs Valentin's PC or the check phone online for the live check" >>"$rlog" 2>&1 || echo "$(date -u +%FT%TZ) park-pc failed" >>"$rlog"
       elif [ "$park_mode" = "waits" ] && [ -n "$waits" ] && [ "$waits" != "null" ]; then
         "$HERE/park" "$pick_ticket" --waits-on "$waits" >>"$rlog" 2>&1 || echo "$(date -u +%FT%TZ) park-waits failed" >>"$rlog"
       fi
