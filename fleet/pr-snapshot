@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""One shared on-disk copy of the app's open pull requests (HYCI-278).
+
+    fleet/pr-snapshot write [--repo owner/name] [--limit N]
+    fleet/pr-snapshot read [--repo owner/name] [--max-age SECONDS]
+    fleet/pr-snapshot --self-test [--case bad-copy]
+
+`write` makes one `gh pr list` call and stores every open pull request with the
+fields the fleet readers need. `read` prints `{"at","repo","fields","prs"}` and
+exits 0 only when the copy exists, names the same repository, is not in the
+future, is no older than `--max-age`, and lists unique pull request numbers.
+Anything else exits 2, so the caller reads GitHub live.
+
+Readers on this VPS: fleet/slo-watch.py, the agent feed collectors
+(scripts/lib/open-pulls.mjs, collect-agent-runtime.mjs, collect-agent-cards.mjs),
+CI Boss bin/ship-watch and Poteto bin/flow_metrics.py.
+"""
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import time
+
+DIR = os.environ.get("PR_SNAPSHOT_DIR") or os.path.expanduser("~/.local/state/pr-snapshot")
+REPO = "hypertask-ai/hypertask"
+LIMIT = 300
+FIELDS = ["number", "title", "url", "author", "labels", "isDraft", "baseRefName", "createdAt", "updatedAt",
+          "headRefName", "headRefOid", "mergeStateStatus", "autoMergeRequest", "statusCheckRollup"]
+SKEW = 120
+
+
+def path_for(repo, root=None):
+    return os.path.join(root or DIR, "open-prs-" + repo.replace("/", "-") + ".json")
+
+
+def gh_out(args, timeout=180):
+    token_file = os.path.expanduser("~/.local/bin/gh-app-token")
+    env = dict(os.environ, PATH=os.path.expanduser("~/.local/bin") + ":" + os.environ.get("PATH", ""))
+    if os.path.exists(token_file):
+        try:
+            token = subprocess.run([token_file], capture_output=True, text=True, timeout=60).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            token = ""
+        if token:
+            env["GH_TOKEN"] = token
+    return subprocess.run(["gh", *args], capture_output=True, text=True, env=env, timeout=timeout)
+
+
+def valid(body, repo, now, max_age, root=None):
+    if not isinstance(body, dict):
+        return None
+    at = body.get("at")
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        return None
+    if at > now + SKEW or now - at > max_age:
+        return None
+    if body.get("repo") != repo:
+        return None
+    fields = body.get("fields")
+    if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+        return None
+    prs = body.get("prs")
+    if not isinstance(prs, list) or not prs:
+        return None
+    seen = set()
+    for pr in prs:
+        if not isinstance(pr, dict):
+            return None
+        number = pr.get("number")
+        if not isinstance(number, int) or isinstance(number, bool) or number in seen:
+            return None
+        seen.add(number)
+    return body
+
+
+def read(repo, max_age, now=None, root=None):
+    now = time.time() if now is None else now
+    try:
+        with open(path_for(repo, root)) as handle:
+            body = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return valid(body, repo, now, max_age, root)
+
+
+def write(repo=REPO, limit=LIMIT, root=None, runner=gh_out):
+    root = root or DIR
+    os.makedirs(root, exist_ok=True)
+    with open(os.path.join(root, "write.lock"), "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return "busy: another writer holds the lock"
+        got = runner(["pr", "list", "-R", repo, "--state", "open", "--limit", str(limit),
+                      "--json", ",".join(FIELDS)])
+        if got.returncode != 0:
+            return "gh failed: " + ((got.stderr or "").strip().splitlines() or ["no output"])[-1][:200]
+        try:
+            prs = json.loads(got.stdout)
+        except ValueError:
+            return "gh returned no JSON"
+        if not isinstance(prs, list) or not prs:
+            return "gh returned no open pull requests"
+        body = {"at": time.time(), "repo": repo, "fields": FIELDS, "prs": prs}
+        if valid(body, repo, body["at"], 0, root) is None:
+            return "gh returned an unusable list"
+        tmp = path_for(repo, root) + f".tmp-{os.getpid()}"
+        with open(tmp, "w") as handle:
+            json.dump(body, handle, separators=(",", ":"))
+        os.replace(tmp, path_for(repo, root))
+        return f"wrote {len(prs)} open pull requests to {path_for(repo, root)}"
+
+
+def selftest(case):
+    import tempfile
+    now = 1794400000.0
+    root = tempfile.mkdtemp()
+    prs = [{"number": 1, "baseRefName": "production", "statusCheckRollup": []},
+           {"number": 2, "baseRefName": "production", "statusCheckRollup": []}]
+    body = {"at": now - 30, "repo": REPO, "fields": FIELDS, "prs": prs}
+    with open(path_for(REPO, root), "w") as handle:
+        json.dump(body, handle)
+    if case == "bad-copy":
+        for bad in ({"at": now + 600, "repo": REPO, "fields": FIELDS, "prs": prs},
+                    {"at": now - 5000, "repo": REPO, "fields": FIELDS, "prs": prs},
+                    {"at": now - 30, "repo": "other/repo", "fields": FIELDS, "prs": prs},
+                    {"at": now - 30, "repo": REPO, "fields": FIELDS, "prs": [{"number": 1}, {"number": 1}]},
+                    {"at": now - 30, "repo": REPO, "fields": FIELDS, "prs": []},
+                    {"at": "recent", "repo": REPO, "fields": FIELDS, "prs": prs}):
+            assert valid(bad, REPO, now, 900, root) is None, bad
+            with open(path_for(REPO, root), "w") as handle:
+                json.dump(bad, handle)
+            assert read(REPO, 900, now, root) is None, bad
+        with open(path_for(REPO, root), "w") as handle:
+            handle.write("{not json")
+        assert read(REPO, 900, now, root) is None
+        os.unlink(path_for(REPO, root))
+        assert read(REPO, 900, now, root) is None
+        print("bad-copy: live fallback ok")
+        return 0
+    assert read(REPO, 900, now, root)["prs"] == prs
+    assert read(REPO, 10, now, root) is None
+    class Ok:
+        returncode = 0
+        stdout = json.dumps(prs)
+        stderr = ""
+    assert write(REPO, 300, root, lambda argv: Ok()).startswith("wrote 2")
+    assert read(REPO, 900, time.time(), root)["prs"] == prs
+    class Bad:
+        returncode = 1
+        stdout = ""
+        stderr = "gh: rate limit exceeded"
+    before = open(path_for(REPO, root)).read()
+    assert write(REPO, 300, root, lambda argv: Bad()).startswith("gh failed")
+    assert open(path_for(REPO, root)).read() == before, "a failed read must keep the last good copy"
+    class Empty:
+        returncode = 0
+        stdout = "[]"
+        stderr = ""
+    assert write(REPO, 300, root, lambda argv: Empty()).startswith("gh returned no open")
+    print("pr-snapshot self-test ok")
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    repo = REPO
+    if "--repo" in args:
+        repo = args[args.index("--repo") + 1]
+    if args[:1] == ["--self-test"]:
+        return selftest(args[args.index("--case") + 1] if "--case" in args else "")
+    if args[:1] == ["write"]:
+        limit = int(args[args.index("--limit") + 1]) if "--limit" in args else LIMIT
+        out = write(repo, limit)
+        print(out, file=sys.stderr if out.startswith(("busy", "gh", "unusable")) else sys.stdout)
+        return 0 if out.startswith("wrote") or out.startswith("busy") else 1
+    if args[:1] == ["read"]:
+        max_age = int(args[args.index("--max-age") + 1]) if "--max-age" in args else 900
+        body = read(repo, max_age)
+        if body is None:
+            print(json.dumps({"prs": []}))
+            return 2
+        print(json.dumps(body, separators=(",", ":")))
+        return 0
+    print(__doc__.strip().splitlines()[2], file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -131,6 +131,28 @@ def watch_missing_drill_review():
     return "slo missing-check: drill-review silent"
 
 
+def open_prs():
+    """Open app pull requests from the shared copy when it is fresh, else live. None when neither works (HYCI-278)."""
+    snapshot = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pr-snapshot")
+    try:
+        shared = subprocess.run([sys.executable, snapshot, "read", "--max-age", "900"],
+                                capture_output=True, text=True, timeout=60)
+        body = json.loads(shared.stdout) if shared.returncode == 0 else None
+        if isinstance(body, dict) and isinstance(body.get("prs"), list):
+            return body["prs"]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    got = gh_out(["pr", "list", "-R", "hypertask-ai/hypertask", "--state", "open", "--base", "production",
+                  "--json", "number,baseRefName,statusCheckRollup"])
+    if got.returncode != 0:
+        return None
+    try:
+        live = json.loads(got.stdout)
+    except ValueError:
+        return None
+    return live if isinstance(live, list) else None
+
+
 def required_contexts():
     """Required check names on production. The rules endpoint returns a list of rules; the names sit in the
     required_status_checks rule's parameters."""
@@ -152,16 +174,13 @@ def watch_missing_check():
     ctxs = required_contexts()
     if ctxs is None:
         return "slo missing-check: rules unreadable"
-    got = gh_out(["pr", "list", "-R", "hypertask-ai/hypertask", "--state", "open", "--base", "production",
-                "--json", "number,statusCheckRollup"])
-    if got.returncode != 0:
-        return "slo missing-check: open PRs unreadable"
-    try:
-        prs = json.loads(got.stdout)
-    except ValueError:
+    prs = open_prs()
+    if not prs:
         return "slo missing-check: open PRs unreadable"
     need = set(ctxs)
     for pr in prs:
+        if pr.get("baseRefName", "production") != "production":
+            continue
         roll = pr.get("statusCheckRollup") or []
         by = {c.get("name") or c.get("context"): c.get("state") for c in roll if isinstance(c, dict)}
         if not by:
