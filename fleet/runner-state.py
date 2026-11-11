@@ -36,6 +36,9 @@ OWN = re.compile(r"\bOWN_PR\b|own PR", re.I)
 PARKED_LINE = re.compile(r"(?:^|\s)PARKED\s+\S+")
 STALL = re.compile(r"no model reply|reply cap|reply stalled", re.I)
 TICKET_WAIT = re.compile(r"waits on|waiting on|parked on|BlockedBy", re.I)
+# Live proof that needs Valentin's PC or the check phone, while it is off (IGSH-1923, IGSH-1925, HYCI-256, 11 Nov night).
+PC_WAIT = re.compile(r"\b(?:desktops?|laptops?|PC|phone|computer)\b[^.;]{0,40}\b(?:disconnected|unavailable|unreachable|offline|cannot be reached)"
+                     r"|\b(?:disconnected|unavailable|unreachable|offline)\b[^.;]{0,20}\b(?:desktops?|laptops?|PC|phone)\b", re.I)
 
 
 def _out(state, result, park="", waits="", detail=""):
@@ -66,6 +69,8 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
     # back to the next run (HYCI-250).
     if line and STALL.search(line):
         return _out("FAULT", "FAIL", detail=line[:160])
+    if line and PC_WAIT.search(line):
+        return _out("PARKED", "PARKED", park="pc", detail=line[:160])
     if line and HUMAN.search(line):
         why = "unknown state: flag approval is not a state" if re.search(r"flag approval", line, re.I) else "unknown state: waiting on a person is not a state"
         return _out("FAULT", "FAULT", park="lead", detail=why)
@@ -160,6 +165,10 @@ def self_test():
     idle_review = classify("CI RUNNER IDLE HYCI-171 waiting Codex re-review and gate on 50020e7977", 0, 400, "", 0, "HYCI-171")
     assert idle_review["state"] == "WAIT_CHECK" and idle_review["park"] == "", idle_review
     assert classify("RUNNER IDLE something new", 0, 400, "", 0, "HTPR-1")["state"] == "WAIT_CHECK"
+    pc = classify("RUNNER IDLE IGSH-1923 desktop disconnected; live proof pending", 0, 400, "", 0, "IGSH-1923")
+    assert pc["state"] == "PARKED" and pc["park"] == "pc", pc
+    assert classify("RUNNER IDLE IGSH-1925 live-proof unavailable; laptops disconnected", 0, 400, "", 0, "IGSH-1925")["park"] == "pc"
+    assert classify("RUNNER IDLE HYCI-256 PC connection unavailable", 0, 400, "", 0, "HYCI-256")["park"] == "pc"
     assert classify("RUNNER IDLE something new", 0, 400, "", WAIT_LIMIT, "HTPR-1")["state"] == "FAULT"
     assert classify("", 0, 400, "pacer", 0, "")["state"] == "IDLE_PACER"
     cap = classify_pick("none: wip: 4 of 4, new work closed (not counted: waiting 2)", "")
