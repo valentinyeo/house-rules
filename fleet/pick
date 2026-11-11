@@ -326,6 +326,9 @@ def load_snapshot():
     snap["incidents"] = list_incidents()
     if cache:
         save_cache(snap)
+    else:
+        # the per-pick read cap tests "key in SNAP['rel']", so stored links must sit there before any check runs
+        snap["rel"] = {k: v[1] for k, v in stored_relations().items()}
     return snap
 
 
@@ -356,11 +359,6 @@ def stored_relations():
 def relations(key):
     """(blocked_by_open: set of open tickets this one waits on, blocks_app: app tickets waiting on this one)."""
     rel = SNAP["rel"]
-    if key not in rel and not os.environ.get("FLEET_PICK_CACHE"):
-        if "_stored" not in SNAP:
-            SNAP["_stored"] = stored_relations()
-        if key in SNAP["_stored"]:
-            rel[key] = SNAP["_stored"][key][1]
     if key not in rel:
         d = ht("task", "relations", key)
         waits, blocks = [], []
@@ -2221,9 +2219,9 @@ def wip_self_test():
     SNAP["rel"]["HTPR-11"] = [["HYCI-9"], []]
     assert "HTPR-11" in Skip(set(), resting(2, True)), "a closed BlockedBy link does not lift the rest"
     (STATE / "relations.json").write_text(json.dumps({"HTPR-77": [time.time(), [["HYCI-7"], []]], "HTPR-78": [time.time() - REL_TTL - 5, [[], []]]}))
-    SNAP.pop("_stored", None)
-    assert relations("HTPR-77") == [["HYCI-7"], []] and "HTPR-78" not in SNAP["_stored"], "a fresh stored link is reused, a stale one is not"
-    (STATE / "relations.json").unlink(); SNAP.pop("_stored"); SNAP["rel"].pop("HTPR-77")
+    fresh = stored_relations()
+    assert fresh.get("HTPR-77", [0, None])[1] == [["HYCI-7"], []] and "HTPR-78" not in fresh, "a fresh stored link is reused, a stale one is not"
+    (STATE / "relations.json").unlink()
     del SNAP["rel"]["HTPR-11"]
     (STATE / "runner-1.result").write_text("DONE\n")
     assert "HTPR-11" not in resting(2, True), "a DONE end does not rest the ticket"
