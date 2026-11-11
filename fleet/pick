@@ -86,6 +86,9 @@ REST_MAX = 3 * 86400  # an IDLE rest never outlives this, changed or not
 REST_GRACE = 60  # seconds: the run's own last write may land just after its IDLE end
 # an IDLE rest on a ticket nobody waits on (no BlockedBy, no Valentin wait) ends after this: back to its holder or the orphan lane
 SHORT_REST = 2 * 3600
+# run endings that leave the ticket waiting on someone else: it rests for every runner. runner-state.py (8 Nov) writes
+# WAIT_CHECK or FAULT (wait past 30 min, or parked to the lead) where the launcher once wrote IDLE.
+REST_RESULTS = {"IDLE", "WAIT_CHECK", "FAULT"}
 URGENT_REST = 600
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
@@ -732,7 +735,7 @@ def resting(n, dry):
     except (OSError, ValueError):
         pass
     last = last_run(n)
-    if last and last[2] == "IDLE" and last[1] and seen.get(last[0]) != last[1]:
+    if last and last[2] in REST_RESULTS and last[1] and seen.get(last[0]) != last[1]:
         seen[last[0]] = last[1]
         if not dry:
             with open(path, "a") as f:
@@ -748,7 +751,7 @@ def resting(n, dry):
         except (OSError, ValueError):
             pass
         other = last_run(m)
-        if other and other[2] == "IDLE" and other[1]:
+        if other and other[2] in REST_RESULTS and other[1]:
             everyone[other[0]] = max(everyone.get(other[0], ""), other[1])
     now = dt.datetime.now(dt.timezone.utc)
     rest = set()
@@ -2184,6 +2187,12 @@ def wip_self_test():
     (STATE / "runner-1.idle").write_text(f"{iso(3)} HTPR-10\n{iso(1)} HTPR-11\n{iso(3)} HTPR-12\n")
     assert resting(2, True) == {"HTPR-11", "HTPR-12"}, "an IDLE rest on work nobody waits on ends after SHORT_REST"
     (STATE / "runner-1.idle").unlink()
+    (STATE / "runner-1.log").write_text(f"{iso(0.5)} pick: HTPR-11 codex gpt-6.1-sol high (orphan)\n{iso(0.4)} end\n")
+    (STATE / "runner-1.result").write_text("WAIT_CHECK\n")
+    assert "HTPR-11" in resting(2, True), "a WAIT_CHECK end rests the ticket for every runner, like IDLE did"
+    (STATE / "runner-1.result").write_text("DONE\n")
+    assert "HTPR-11" not in resting(2, True), "a DONE end does not rest the ticket"
+    (STATE / "runner-1.log").unlink(); (STATE / "runner-1.result").unlink()
 
     tickets = [tk("HTPR-20", "In Progress", "runner 9"), tk("HTPR-21", "AI Review", "runner 1"),
                tk("HTPR-22", "QA", labels=["design-pass"]), tk("HTPR-23", "In Progress", labels=["incident"]),
