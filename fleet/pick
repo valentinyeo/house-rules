@@ -340,9 +340,27 @@ def save_cache(snap):
 SNAP = None
 
 
+REL_TTL = 900
+
+
+def stored_relations():
+    """Links read by recent picks, kept REL_TTL seconds. Each pick may read only BLOCK_LOOKUPS*2 links, and without a store
+    every pick spent them on the same top tickets, so lower free tickets were never reached (6 runners idle, 11 Nov)."""
+    try:
+        now = time.time()
+        return {k: v for k, v in json.loads((STATE / "relations.json").read_text()).items() if now - v[0] < REL_TTL}
+    except (OSError, ValueError, AttributeError, TypeError, IndexError):
+        return {}
+
+
 def relations(key):
     """(blocked_by_open: set of open tickets this one waits on, blocks_app: app tickets waiting on this one)."""
     rel = SNAP["rel"]
+    if key not in rel and not os.environ.get("FLEET_PICK_CACHE"):
+        if "_stored" not in SNAP:
+            SNAP["_stored"] = stored_relations()
+        if key in SNAP["_stored"]:
+            rel[key] = SNAP["_stored"][key][1]
     if key not in rel:
         d = ht("task", "relations", key)
         waits, blocks = [], []
@@ -355,6 +373,15 @@ def relations(key):
             (waits if r.get("direction") == "outgoing" else blocks).append(num)
         rel[key] = [waits, blocks]
         save_cache(SNAP)
+        if not DRY_RUN and not os.environ.get("FLEET_PICK_CACHE"):
+            store = stored_relations()
+            store[key] = [time.time(), rel[key]]
+            tmp = (STATE / "relations.json").with_suffix(f".{os.getpid()}")
+            try:
+                tmp.write_text(json.dumps(store))
+                os.replace(tmp, (STATE / "relations.json"))
+            except OSError:
+                pass
     return rel[key]
 
 
@@ -2193,6 +2220,10 @@ def wip_self_test():
     assert "HTPR-11" in resting(2, True), "a WAIT_CHECK end rests the ticket for every runner, like IDLE did"
     SNAP["rel"]["HTPR-11"] = [["HYCI-9"], []]
     assert "HTPR-11" in Skip(set(), resting(2, True)), "a closed BlockedBy link does not lift the rest"
+    (STATE / "relations.json").write_text(json.dumps({"HTPR-77": [time.time(), [["HYCI-7"], []]], "HTPR-78": [time.time() - REL_TTL - 5, [[], []]]}))
+    SNAP.pop("_stored", None)
+    assert relations("HTPR-77") == [["HYCI-7"], []] and "HTPR-78" not in SNAP["_stored"], "a fresh stored link is reused, a stale one is not"
+    (STATE / "relations.json").unlink(); SNAP.pop("_stored"); SNAP["rel"].pop("HTPR-77")
     del SNAP["rel"]["HTPR-11"]
     (STATE / "runner-1.result").write_text("DONE\n")
     assert "HTPR-11" not in resting(2, True), "a DONE end does not rest the ticket"
