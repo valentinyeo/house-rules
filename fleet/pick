@@ -48,6 +48,7 @@ ship-claim runs with SHIP_CLAIM_PICKED=1: this picker already ordered infra agai
 share virtual claims (so 20 separate dry runs give 20 different tickets); FLEET_PICK_CACHE=<file> reuses one
 board snapshot. Exit 0 with a pick, exit 1 with the reason on stderr.
 """
+from collections import Counter
 import datetime as dt
 import fcntl
 import json
@@ -861,7 +862,7 @@ def blocked(t):
 CHECKED = [0]
 
 # what this pick considered and refused: ticket key -> first reason; written as one line per pick (write_trace)
-TRACE = {"why": {}, "new": False, "wip": None, "prs": []}
+TRACE = {"why": {}, "new": False, "wip": None, "prs": {}}
 TRACE_MAX = 4_000_000
 
 
@@ -877,37 +878,36 @@ def trace_path(dry):
 
 
 def write_trace(n, dry, ticket, source, ending):
-    """One JSON line per pick slot: WIP state, the step that chose, and the top 10 of the board ranking with the reason each
-    refused one was passed over. Never writes to stdout (the runner parses it) and never fails the pick."""
+    """One JSON line per pick: every ticket and PR outcome, plus refusal counts. Never fails the pick."""
     try:
         path = trace_path(dry)
         if path is None or SNAP is None:
             return
         now = dt.datetime.now(dt.timezone.utc)
-        pool = sorted((t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][0]),
-                      key=lambda t: (rank(t), BOARD_ORDER[t["board"]], t["created"]))
+        pool = sorted(SNAP["tickets"], key=lambda t: (rank(t), BOARD_ORDER[t["board"]], t["created"]))
         closed = (TRACE["wip"] or {}).get("new") == "closed"
         top = []
-        # the ten best by rank, plus the first three below them that nothing refused: when the top is all refusals the
-        # replay still sees what a runner could have taken
-        shown = pool[:10] + [t for t in pool[10:] if t["key"] not in TRACE["why"]][:3]
-        for t in shown:
+        for t in pool:
             if ticket and t["key"] == ticket["key"]:
                 result = "chosen"
             elif t["key"] in TRACE["why"]:
                 result = TRACE["why"][t["key"]]
             elif not TRACE["new"]:
                 result = f"not reached: {source or 'none'} chose first"
-            elif closed:
+            elif closed and t["section"] in BOARDS[t["board"]][0]:
                 result = "new work closed by the WIP cap"
             else:
                 result = "not tried"
             created = stamp_time(t["created"])
             top.append({"key": t["key"], "prio": t["prio"], "brain": next((l for l in t["labels"] if l.startswith("brain-")), ""),
-                        "board": t["board"], "age_h": round((now - created).total_seconds() / 3600, 1) if created else None,
-                        "result": result})
+                        "board": t["board"], "section": t["section"],
+                        "age_h": round((now - created).total_seconds() / 3600, 1) if created else None, "result": result})
+        prs = [TRACE["prs"].get(p["number"], {"pr": p["number"], "ticket": pr_ticket(p),
+               "result": f"not reached: {source or 'none'} chose first"}) for p in SNAP.get("prs") or []]
         line = {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "runner": n, "dry": dry, "wip": TRACE["wip"], "step": source or "none",
-                "ticket": ticket["key"] if ticket else None, "ending": ending, "candidates": top, "prs": TRACE["prs"][:10]}
+                "ticket": ticket["key"] if ticket else None, "ending": ending, "candidates": top, "prs": prs,
+                "refusal_counts": dict(Counter(t["result"] for t in top if t["result"] != "chosen")),
+                "pr_refusal_counts": dict(Counter(p["result"] for p in prs if p["result"] != "chosen"))}
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size > TRACE_MAX:
             os.replace(path, f"{path}.1")
@@ -935,7 +935,6 @@ def decide_suppress(n_recent, lead_after_third, blocker_keys, open_keys):
     return True
 
 
-PARK_STATES = {"WAIT_CHECK", "PARKED"}
 _LEDGER = []
 
 
@@ -955,16 +954,6 @@ def ledger_rows():
     return _LEDGER[0]
 
 
-def ledger_parks():
-    """{ticket: [stamps]} of runs on a ticket not their own that ended parked or waiting. Runners park by moving the ticket themselves, so
-    fleet/park's park-events alone never reached the limit (HYCI-200 re-picked every 3 minutes, 2026-11-10)."""
-    seen = {}
-    for r in ledger_rows():
-        if r.get("state") in PARK_STATES and r.get("ticket") and r.get("source") != "own":
-            seen.setdefault(r["ticket"], []).append(r.get("ts", ""))
-    return seen
-
-
 def opencode_timed_out(key):
     """An OpenCode (DeepSeek) run on this ticket hit the 3h run limit in the last 24 hours. DeepSeek ping-pongs with the
     review bot until the clock runs out (9 of 88 runs on 2026-11-10), so the ticket goes to another engine."""
@@ -979,6 +968,7 @@ def opencode_timed_out(key):
 
 
 def park_event_times(key):
+    """Completed fleet/park actions, not the same run's WAIT_CHECK/PARKED result a second time."""
     out = []
     try:
         for line in open(STATE / "park-events"):
@@ -989,7 +979,6 @@ def park_event_times(key):
                     out.append(when)
     except OSError:
         pass
-    out += [w for w in map(stamp_time, ledger_parks().get(key, [])) if w]
     return out
 
 
@@ -1354,9 +1343,16 @@ def pr_candidates(n, taken):
     frozen = FREEZE.exists()
     out = []
     for p in SNAP["prs"]:
+        tk = pr_ticket(p)
+        entry = {"pr": p["number"], "ticket": tk, "result": "candidate"}
+        TRACE["prs"][p["number"]] = entry
+        if not tk:
+            entry["result"] = "no linked pool ticket"
+            continue
         idle = now - dt.datetime.fromisoformat(p["updated"].replace("Z", "+00:00"))
         if frozen:
             if "HYCI-" not in p["title"] or idle < dt.timedelta(minutes=30):
+                entry["result"] = "app freeze: only checks PRs idle 30 minutes"
                 continue
             key = (0, p["updated"], p["number"])
         elif p["draft"]:
@@ -1366,16 +1362,21 @@ def pr_candidates(n, taken):
         else:
             key = pr_orphan_rank(p)
             if key is None:
+                entry["result"] = ("red PR idle under six hours" if p["red"] else
+                                   TRACE["why"].get(tk, "not an eligible orphan in a building column"))
                 continue
         if idle < dt.timedelta(hours=2) and not frozen:
+            entry["result"] = "PR idle under two hours"
             continue
         m = TICKET.search(p["title"])
         if not m:
+            entry["result"] = "no ticket in PR title"
             continue
         owner = PR_CLAIMS / str(p["number"]) / "owner"
         try:
             who, at = owner.read_text().split("\t")
             if who != f"RUNNER {n}" and now - dt.datetime.fromisoformat(at) < dt.timedelta(hours=3):
+                entry["result"] = f"PR claimed by {who}"
                 continue
         except (OSError, ValueError):
             pass
@@ -1647,10 +1648,28 @@ def choose(n, dry):
     frozen = FREEZE.exists()
 
     # b. orphans
-    for t in sorted((t for t in building if orphan(t) and t["key"] not in skip and not t["waiting"]
-                     and not skipped(t) and "design-pass" not in t["labels"] and orphan_ok(t) and can_join(n, t["board"])),
-                    key=lambda t: (rank(t), t["updated"])):
-        if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
+    for t in sorted(building, key=lambda t: (rank(t), t["updated"])):
+        why = None
+        if not orphan(t):
+            why = "held by " + ", ".join(names(t))
+        elif t["key"] in skip:
+            why = "claimed by another runner or resting"
+        elif t["waiting"]:
+            why = "waits on Valentin"
+        elif skipped(t):
+            why = "ticket engine or PC hold"
+        elif "design-pass" in t["labels"] or not orphan_ok(t):
+            why = "ticket design-pass or pool hold"
+        elif not can_join(n, t["board"]):
+            why = f"runner {n} is not a member of board {t['board']}"
+        elif in_lane(t) and full():
+            why = "checks lane full"
+        elif frozen and not in_lane(t):
+            why = "app freeze"
+        if why:
+            note(t["key"], why)
+            continue
+        if held_back(t):
             continue
         if try_claim(n, t, "orphan", dry):
             return t, "orphan"
@@ -1692,6 +1711,12 @@ def choose(n, dry):
     new.sort(key=lambda t: (rank(t), t["created"]))
     lane_new = [t for t in new if in_lane(t)]
     app_new = [t for t in new if not in_lane(t)]
+    if full():
+        for t in lane_new:
+            note(t["key"], "checks lane full")
+    if frozen:
+        for t in app_new:
+            note(t["key"], "app freeze")
     tries = 0
 
     def attempt(cands):
@@ -1719,19 +1744,30 @@ def choose(n, dry):
 
     # c. PR queue
     for p, key in pr_candidates(n, others):
+        entry = TRACE["prs"][p["number"]]
         t = fetch_ticket(key)
         if not t:
-            TRACE["prs"].append({"pr": p["number"], "ticket": key, "result": DEAD.get(key, "ticket unreadable")})
+            entry["result"] = DEAD.get(key, "ticket unreadable")
             continue
-        if (t["key"] in skip or skipped(t) or "design-pass" in t["labels"] or not can_join(n, t["board"])
-                or any(live_runner(h) and h != me for h in names(t))):
+        if t["key"] in skip:
+            entry["result"] = "ticket claimed by another runner or resting"
+            continue
+        if skipped(t) or "design-pass" in t["labels"]:
+            entry["result"] = "ticket engine, PC or design-pass hold"
+            continue
+        if not can_join(n, t["board"]):
+            entry["result"] = f"runner {n} is not a member of board {t['board']}"
+            continue
+        if any(live_runner(h) and h != me for h in names(t)):
+            entry["result"] = "ticket held by another live runner"
             continue
         if (in_lane(t) and full()) or (frozen and not in_lane(t)) or held_back(t):
-            TRACE["prs"].append({"pr": p["number"], "ticket": key, "result": TRACE["why"].get(key, "lane full or app freeze")})
+            entry["result"] = TRACE["why"].get(key, "lane full or app freeze")
             continue
         if try_claim(n, t, "pr", dry):
+            entry["result"] = "chosen"
             return t, "pr"
-        TRACE["prs"].append({"pr": p["number"], "ticket": key, "result": TRACE["why"].get(key, "claim refused")})
+        entry["result"] = TRACE["why"].get(key, "claim refused")
 
     if closed:
         with_pr = {pr_ticket(p) for p in open_prs()}
@@ -1812,14 +1848,70 @@ def trace_self_test():
     assert not admission_remembered(3, "HTPR-1"), "a hold ends after ten minutes"
     mk = lambda key, prio, created: {"key": key, "board": "15", "section": "Bugs", "prio": prio, "labels": ["brain-medium"], "created": created}
     SNAP = {"tickets": [mk("HTPR-5", "Urgent", "2026-11-01T00:00:00Z"), mk("HTPR-6", "Medium", "2026-11-02T00:00:00Z")], "rel": {}}
-    TRACE.update(why={}, new=True, wip={"n": 1, "of": 2, "new": "open"}, prs=[])
+    TRACE.update(why={}, new=True, wip={"n": 1, "of": 2, "new": "open"}, prs={})
     note("HTPR-5", "BlockedBy HTPR-1")
     write_trace(3, False, SNAP["tickets"][1], "board", "picked")
     line = json.loads((RUNNER_STATE / "pick-trace.jsonl").read_text())
     assert line["step"] == "board" and line["ticket"] == "HTPR-6" and line["wip"]["new"] == "open"
     assert [c["result"] for c in line["candidates"]] == ["BlockedBy HTPR-1", "chosen"], line
     assert line["candidates"][0]["prio"] == "Urgent" and line["candidates"][0]["brain"] == "brain-medium"
+    assert line["refusal_counts"] == {"BlockedBy HTPR-1": 1}, line
+    SNAP["tickets"] = [mk(f"HTPR-{i}", "Medium", "2026-11-01T00:00:00Z") for i in range(100, 235)]
+    SNAP["tickets"][-1]["section"] = "AI Review"
+    TRACE["why"] = {t["key"]: "parked three times in six hours" for t in SNAP["tickets"]}
+    now = dt.datetime.now(dt.timezone.utc)
+    iso = lambda h: (now - dt.timedelta(hours=h)).isoformat()
+    SNAP["prs"] = [{"number": i, "title": f"HTPR-{i} x", "branch": f"runner-1/htpr-{i}", "draft": True,
+                    "red": False, "updated": iso(3)} for i in range(900001, 900023)]
+    SNAP["prs"][0]["title"] = "No ticket"
+    SNAP["prs"][0]["branch"] = "unlinked"
+    SNAP["prs"][1]["updated"] = iso(0.5)
+    SNAP["prs"][2].update(draft=False, red=True)
+    SNAP["prs"][3].update(draft=False)
+    assert len(pr_candidates(3, set())) == 18
+    write_trace(3, False, None, None, "none: no free ticket the pool may take")
+    line = json.loads((RUNNER_STATE / "pick-trace.jsonl").read_text().splitlines()[-1])
+    assert len(line["candidates"]) == 135 and len(line["prs"]) == 22, line
+    assert line["candidates"][-1]["section"] == "AI Review", "building tickets must not disappear from the trace"
+    assert line["refusal_counts"] == {"parked three times in six hours": 135}, line
+    assert line["pr_refusal_counts"]["no linked pool ticket"] == 1
+    assert line["pr_refusal_counts"]["PR idle under two hours"] == 1
+    assert line["pr_refusal_counts"]["red PR idle under six hours"] == 1
+    assert line["pr_refusal_counts"]["not an eligible orphan in a building column"] == 1
     SNAP = None
+
+
+def park_count_self_test():
+    import tempfile
+    from unittest.mock import patch
+    now = dt.datetime.now(dt.timezone.utc)
+    iso = lambda minutes: (now - dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    t = {"key": "HTPR-900001", "idx": 900001, "board": "15", "section": "Bugs", "title": "x", "labels": ["brain-medium"],
+         "prio": "Urgent", "holders": [], "waiting": False, "subs": False, "paid": False,
+         "created": iso(120), "updated": iso(5)}
+    rows = [{"ticket": t["key"], "ts": iso(m), "state": state, "source": "orphan"}
+            for m, state in ((59, "WAIT_CHECK"), (29, "PARKED"), (10, "WAIT_CHECK"))]
+    with tempfile.TemporaryDirectory() as directory:
+        state = Path(directory)
+        events = state / "park-events"
+        events.write_text(f"{iso(60)} {t['key']}\n{iso(30)} {t['key']}\n")
+        with patch.dict(globals(), STATE=state, RUNNER_STATE=state, FREEZE=state / "freeze", RUNNERS=2,
+                        SNAP={"tickets": [t], "prs": [], "rel": {t["key"]: [[], []]}, "incidents": [], "open": {}},
+                        _LEDGER=[rows], _PC_WAITS=set(), MEMBERS={b: None for b in BOARDS},
+                        TRACE={"why": {}, "new": False, "wip": None, "prs": {}}, CHECKED=[0],
+                        lead_comment_at=lambda t: None, try_claim=lambda *args: True):
+            assert len(park_event_times(t["key"])) == 2, "run results must not count the same park again"
+            assert not repark_suppressed(t)
+            assert choose(2, True) == (t, "board"), "two parks plus their run results must not idle a free runner"
+            events.write_text(events.read_text() + f"{iso(5)} {t['key']}\n")
+            assert len(park_event_times(t["key"])) == 3 and repark_suppressed(t), "three real parks still stop offers"
+            try:
+                choose(2, True)
+                raise AssertionError("three real parks were ignored")
+            except SystemExit as error:
+                assert str(error).startswith("none:"), error
+            events.write_text("")
+            assert park_event_times(t["key"]) == [], "a WAIT_CHECK result alone is not a completed park"
 
 
 def self_test():
@@ -1935,8 +2027,9 @@ def self_test():
     assert decide_suppress(3, False, ["HYCI-1"], []) is False, "BlockedBy closed: offered again"
     assert decide_suppress(3, False, ["HYCI-1"], ["HYCI-1"]) is True
     trace_self_test()
+    park_count_self_test()
     escalate_self_test()
-    print("fleet/pick self-test ok")
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes")
 
 
 def escalate_self_test():
