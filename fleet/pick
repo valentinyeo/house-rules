@@ -40,8 +40,9 @@ A ticket any runner ended IDLE on rests for every runner (runner-N.idle files an
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
 a ticket with an open BlockedBy link is held by that link; a closed link does not lift a rest (the blocker's fix changes the ticket).
 A ticket with an open BlockedBy link, in Valentin Review or waiting on someone is never picked (fleet/park puts them there).
-That someone may be Valentin or the board lead: fleet/park --lead sets an agent wait, and only a runner the lead hands it to
-starts it again (HYCI-276: a lead-parked board alarm came back to four runners because an agent wait did not count).
+That someone may be Valentin or the board lead: fleet/park --lead leaves the ticket with the lead, and only a runner the lead
+hands it to starts it again. A ticket a lead or another agent holds is not new work on Fleet CI & Infra either, nor is one
+waiting on an agent (HYCI-276: a lead-parked board alarm came back to four runners).
 A runner whose own unfinished ticket rests or waits (ship-claim HOLD names it) gets that ticket back with source "park" and
 briefs/park-job.txt: decide the fleet/park mode, run it, end. A ticket is handed back at most once per REST_MAX (ledger
 STATE/parks, any runner, written when the job is handed out), so a park run that fails to park cannot loop.
@@ -862,8 +863,11 @@ def eligible_reason(t):
             return "label skip: " + ", ".join(sorted(labels & SKIP_APP))
         agents = [h[0] for h in t["holders"] if h[1]]
         return "held by agent " + ", ".join(agents) if agents else None
-    if t["board"] == "11514" and labels & SKIP_INFRA:
-        return "label skip: " + ", ".join(sorted(labels & SKIP_INFRA))
+    if t["board"] == "11514":
+        if labels & SKIP_INFRA:
+            return "label skip: " + ", ".join(sorted(labels & SKIP_INFRA))
+        agents = [h[0] for h in t["holders"] if h[1]]
+        return "held by agent " + ", ".join(agents) if agents else None
     return None
 
 
@@ -2217,6 +2221,9 @@ def wip_self_test():
         "a wait on the board lead is not pool work: fleet/park --lead sets it (HYCI-276)"
     assert not slim({"ticketNumber": "HYCI-9", "section": "Backlog"}, "11514")["waiting"], \
         "a ticket nobody waits on stays pool work"
+    assert eligible_reason(tk("HYCI-9", "Backlog", "Chief Of Staff")) == "held by agent Chief Of Staff", \
+        "a 11514 ticket the fleet chief holds is not new work (board 15 makes the same call)"
+    assert eligible_reason(tk("HYCI-9", "Backlog")) is None, "an unheld 11514 ticket is still new work"
 
     SNAP = {"tickets": [tk("HTPR-10", "In Progress"), tk("HTPR-11", "In Progress"), tk("HTPR-12", "In Progress", waiting=True)],
             "rel": {}, "prs": [], "incidents": []}

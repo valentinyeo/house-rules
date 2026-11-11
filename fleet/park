@@ -6,7 +6,8 @@
     fleet/park <TICKET> --unstarted              nothing built, no PR: home column, unassigned
     fleet/park <TICKET> --hand-back "<left to do>"  unfinished, nothing waits on anyone (e.g. its PR fails to build): unassigns
                                                  you, column and PR stay, the orphan lane hands it to a fresh runner
-    fleet/park <TICKET> --lead --why "reason"    unknown state, or a wait on a person: home column, waiting person is the board lead, unassigned
+    fleet/park <TICKET> --lead --why "reason"    unknown state, or a wait on a person: home column, waiting on the board lead
+                                                 and held by it, so the pool leaves it there
     fleet/park <TICKET> --release                another runner owns the work (you were co-assigned, e.g. a cross-check): unassigns only you,
                                                  the ticket and its column stay as they are
     fleet/park --sweep [--apply] [--waits-on KEY=T1,T2 ...] [--valentin KEY[=COMMENT] ...]
@@ -250,8 +251,10 @@ def park_lead(key, why, t=None):
         vcc("task", "move", key, "--section", home)
     vcc("task", "waiting-on", key, "--user", uid)
     release(key, t)
+    vcc("task", "assign", key, "--agent", name, check=False)
     record_event(key)
-    note(key, f"Parked by fleet/park: unknown state. {why.strip()} Waiting person is {name}. Back in {home}, runner unassigned.")
+    note(key, f"Parked by fleet/park: unknown state. {why.strip()} Waiting person is {name}, who now holds it. "
+              f"Back in {home}, the runner left it.")
     return f"{key} -> {home}, waiting on {name}, unassigned"
 
 
