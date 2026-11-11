@@ -39,7 +39,9 @@ One runner holds one ticket until it is live. brain-extra-hard runs on the codex
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
 a ticket with an open BlockedBy link is held by that link; a closed link does not lift a rest (the blocker's fix changes the ticket).
-A ticket with an open BlockedBy link, in Valentin Review or waiting on Valentin is never picked (fleet/park puts them there).
+A ticket with an open BlockedBy link, in Valentin Review or waiting on someone is never picked (fleet/park puts them there).
+That someone may be Valentin or the board lead: fleet/park --lead sets an agent wait, and only a runner the lead hands it to
+starts it again (HYCI-276: a lead-parked board alarm came back to four runners because an agent wait did not count).
 A runner whose own unfinished ticket rests or waits (ship-claim HOLD names it) gets that ticket back with source "park" and
 briefs/park-job.txt: decide the fleet/park mode, run it, end. A ticket is handed back at most once per REST_MAX (ledger
 STATE/parks, any runner, written when the job is handed out), so a park run that fails to park cannot loop.
@@ -278,7 +280,8 @@ def slim(t, board):
     return {"key": t["ticketNumber"], "idx": t.get("uniqueIndex"), "board": board, "section": t.get("section") or "",
             "title": " ".join((t.get("title") or "").split()), "prio": p or "Medium",
             "labels": sorted({(l.get("name") or "").strip().lower() for l in t.get("labels") or []}),
-            "holders": holders, "waiting": bool(t.get("waitingOnUserId") or t.get("blockerCommentId")),
+            "holders": holders, "waiting": bool(t.get("waitingOnUserId") or t.get("waitingOnAgentId")
+                                                or t.get("blockerCommentId")),
             "subs": bool(t.get("sub_tasks")), "paid": "paid" in (t.get("description") or "").lower(),
             "created": t.get("createdAt") or "", "updated": t.get("updatedAt") or ""}
 
@@ -2207,6 +2210,13 @@ def wip_self_test():
     def pr(num, key, draft=False):
         return {"number": num, "title": f"{key} x", "draft": draft, "branch": f"runner-1/{key.lower()}",
                 "updated": iso(0.2), "red": False}
+
+    assert slim({"ticketNumber": "HYCI-9", "section": "Backlog", "waitingOnUserId": 7}, "11514")["waiting"], \
+        "a wait on Valentin is not pool work"
+    assert slim({"ticketNumber": "HYCI-9", "section": "Backlog", "waitingOnAgentId": "lead-id"}, "11514")["waiting"], \
+        "a wait on the board lead is not pool work: fleet/park --lead sets it (HYCI-276)"
+    assert not slim({"ticketNumber": "HYCI-9", "section": "Backlog"}, "11514")["waiting"], \
+        "a ticket nobody waits on stays pool work"
 
     SNAP = {"tickets": [tk("HTPR-10", "In Progress"), tk("HTPR-11", "In Progress"), tk("HTPR-12", "In Progress", waiting=True)],
             "rel": {}, "prs": [], "incidents": []}
