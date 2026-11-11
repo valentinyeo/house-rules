@@ -38,7 +38,12 @@ ticket (DUPLICATE), a PR whose ticket is archived or in Done (TICKET-CLOSED), an
 ORPHAN PR GitHub shows untouched for 48 hours. Bot PRs never. --fix alone and --plan print them.
 --only prs limits it to this one.
 
-usage: board-health [--board 15] [--plan] [--fix [--only queue|sendback|prs]] [--apply] [--alarm-board 11514] [--self-test]
+Clear CI waits (board 15, Valentin 2026-11-07: board health red over a day). A ticket blocked by CI links
+BlockedBy its board 11514 ticket, so only that relation can block it: nothing cleared either end, and the ci
+line could not go green. --fix --only links unlinks a CI ticket that is Done, and links one that is open
+and only named in the log; --plan prints them and writes nothing.
+
+usage: board-health [--board 15] [--plan] [--fix [--only queue|sendback|prs|links]] [--apply] [--alarm-board 11514] [--self-test]
 Exit 0 GREEN, 1 RED.
 """
 import argparse
@@ -135,6 +140,13 @@ def measure(flow, blockers, chatter, identities=None, status=None, board=None, p
     return m
 
 
+def ci_waiting(r):
+    """Only a BlockedBy relation is a CI wait. A CI ticket named in the log and since Done leaves nothing to wait on."""
+    if r.get("verdict") == "CI-WAIT":
+        return False
+    return not (r.get("verdict") == "CI-DONE" and not r.get("ci_linked", True))
+
+
 def measure_flow(flow):
     s, rows = flow["summary"], flow["rows"]
     o = s.get("ownership")
@@ -158,7 +170,7 @@ def measure_flow(flow):
     writers = Counter(t.get("writer") or "unknown" for t in s["no_brain"])
     m["brain"] = (len(s["no_brain"]), "written by " + ", ".join(f"{w} {n}" for w, n in writers.most_common())
                   + ": " + " ".join(t["ticket"] for t in s["no_brain"]) if s["no_brain"] else "")
-    ci_bad = [r for r in s.get("ci_blocked", []) if r["verdict"] != "CI-WAIT"]
+    ci_bad = [r for r in s.get("ci_blocked", []) if ci_waiting(r)]
     m["ci"] = (len(ci_bad), " ".join(f"{r['ticket']}>{r['ci_ticket'] or 'none'}" for r in ci_bad))
     return m
 
@@ -319,6 +331,18 @@ def self_test():
                    {"ticket": "HTPR-7", "verdict": "NO-PR", "pr": None, "column": "AI Review", "title": "[BUG] x", "labels": []}]}
     sm = measure(None, "", None, None, st)
     assert sm["shipped"][0] == 1 and sm["status"][0] == 2, sm
+    ci = lambda n, v, rel, **kw: dict({"ticket": n, "verdict": v, "ci_ticket": "HYCI-" + n[-1], "ci_linked": rel}, **kw)
+    cif = {"rows": [], "summary": {**flow["summary"], "ci_blocked": [
+        ci("HTPR-11", "CI-DONE", True), ci("HTPR-12", "CI-DONE", False),
+        ci("HTPR-13", "CI-NO-LINK", False), ci("HTPR-14", "CI-WAIT", True), dict(ci("HTPR-15", "CI-NO-TICKET", False), ci_ticket=None)]}}
+    assert measure(cif, "", None)["ci"] == (3, "HTPR-11>HYCI-1 HTPR-13>HYCI-3 HTPR-15>none"), measure(cif, "", None)["ci"]
+    cip = {t: (c, note) for t, c, note in plan_ci_fixes(cif)}
+    assert sorted(cip) == ["HTPR-11", "HTPR-13"], cip
+    assert cip["HTPR-11"][0] == [["vcc", "task", "unlink", "HTPR-11", "HYCI-1"]] and "waits on nothing" in cip["HTPR-11"][1]
+    assert cip["HTPR-13"][0] == [["vcc", "task", "link", "HTPR-13", "HYCI-3", "--type", "BlockedBy"]], cip["HTPR-13"]
+    assert plan_ci_fixes(None) == [] and plan_ci_fixes(busy) == [], "no CI rows, no CI fix"
+    assert ci_waiting(ci("X", "CI-DONE", False)) is False and ci_waiting(ci("X", "CI-DONE", True)) is True
+    assert measure(flow, "", None)["ci"][0] == 0, "an unlinked Done CI ticket is not a wait"
     fl = {"rows": [{"ticket": "A", "idle_h": 1}, {"ticket": "B", "idle_h": 9}],
           "summary": {"no_brain": [{"ticket": "C", "writer": "app feedback reporter"}],
                       "ownership": {"doubles": {"Runner 1": ["A", "B"]}}}}
@@ -566,6 +590,25 @@ def plan_queue_fixes(rows):
     """One unassign and one agent-lane note per held ticket and worker. Pure."""
     return [(r["ticket"], [["vcc", "task", "unassign", r["ticket"], "--agent", r["worker"]]],
              f"{NOTE} {QUEUE_NOTE.format(who=r['worker'])}") for r in rows]
+
+
+# Clear CI waits (house rule 2026-11-06: an app ticket blocked by CI links BlockedBy its HYCI ticket).
+# Nothing cleared the two dead ends, so the ci line could not go green: a Done CI ticket left linked
+# blocks the ticket for good, and a CI ticket named only in the log is no block at all.
+def plan_ci_fixes(flow):
+    """Safe CI link fixes as (ticket, commands, agent-lane note): unlink a Done CI ticket, link an open one. Pure."""
+    plan = []
+    for r in ((flow or {}).get("summary") or {}).get("ci_blocked") or []:
+        n, ci = r["ticket"], r.get("ci_ticket")
+        if not ci:
+            continue
+        if r["verdict"] == "CI-DONE" and r.get("ci_linked", True):
+            plan.append((n, [["vcc", "task", "unlink", n, ci]],
+                         f"{NOTE} unlinked {ci}: it is Done, so this ticket waits on nothing."))
+        elif r["verdict"] == "CI-NO-LINK":
+            plan.append((n, [["vcc", "task", "link", n, ci, "--type", "BlockedBy"]],
+                         f"{NOTE} linked BlockedBy {ci}: its CI failure is open and the board never saw it."))
+    return plan
 
 
 def queue_counts(rows):
@@ -872,8 +915,8 @@ def main():
     p.add_argument("--scope", help="a key in scopes.json: a board view one lead owns, e.g. 2060/postbox")
     p.add_argument("--alarm-board", type=int, help="default: the scope's alarm board")
     p.add_argument("--plan", action="store_true", help="print every safe fix and write nothing")
-    p.add_argument("--only", choices=["queue", "sendback", "prs"],
-                   help="with --plan or --fix: run just the free-the-queue, the send-back or the PR-close fix")
+    p.add_argument("--only", choices=["queue", "sendback", "prs", "links"],
+                   help="with --plan or --fix: run just the free-the-queue, the send-back, the PR-close or the CI-link fix")
     p.add_argument("--self-test", action="store_true")
     a = p.parse_args()
     if a.self_test:
@@ -887,12 +930,15 @@ def main():
         else:
             plan, rows, back = [], queue_holds(a.board) if a.only in (None, "queue") else [], ([], [])
             status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)]) if a.only in (None, "sendback") else None
+            flow = run_json([str(HERE / "flow-check"), "--scope", name]) if a.only in (None, "links") else None
             if not a.only:  # cheap first: merged moves on, live ones close, doubles (solo devs too) drop extras
-                plan = plan_fixes(a.board, run_json([str(HERE / "flow-check"), "--scope", name]), status)
+                plan = plan_fixes(a.board, flow, status)
             if a.only in (None, "sendback"):
                 back = sendback_board(a.board, status)
                 sent = {t for t, _, _ in back[1]}
                 plan = [p for p in plan if p[0] not in sent] + back[1]
+            if a.only in (None, "links"):  # a Done CI ticket left linked blocks for good: nothing cleared it
+                plan += plan_ci_fixes(flow)
             plan += plan_queue_fixes(rows)
             closes = pr_close_board(a.board, name, plan) if a.only in (None, "prs") else []
             if a.fix and not a.plan:
@@ -938,7 +984,7 @@ def main():
     lines, head, escalate = scorecard(name, measured, red_for, last, sc["lead"])
     print("\n".join(lines))
     if not a.fix and whole and a.board in QUEUE_FIX_BOARDS:
-        fixable = plan_fixes(a.board, f, status) + plan_queue_fixes(held.result())
+        fixable = plan_fixes(a.board, f, status) + plan_ci_fixes(f) + plan_queue_fixes(held.result())
         if fixable:
             print(f"FIXABLE {len(fixable)} safe fixes waiting: rerun with --plan to read them, --fix to run them")
     if whole and a.board in QUEUE_FIX_BOARDS:  # one fleet read, only on the four fleet boards

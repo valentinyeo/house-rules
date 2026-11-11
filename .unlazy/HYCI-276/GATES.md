@@ -1,35 +1,45 @@
-# HYCI-276 gates
+# Gates: HYCI-276 Board health: board 15 red over a day
 
-Ticket: Board health: board 15 red over a day (board 11514, Runner 11).
-Scope: board 15 stays red because fleet/pick keeps re-dispatching the board-health alarm to runners, who cannot fix
-lead-owned lines. Runner 9 parked HYCI-276 to the board lead four times between 14:11 and 20:19, and it came back
-each time. fleet/pick skips a ticket only when it waits on a person (`waitingOnUserId`), not when it waits on an
-agent lead (`waitingOnAgentId`), which is what `fleet/park --lead` sets. Fix that, so the alarm reaches the fleet
-chief instead of a runner slot.
+Scope: board 15's `ci` red line only. The other red lines (shipped, orphans, outside, overdue,
+pristine, idle, prq) are board 15 owner actions (HT Product Lead, Chief Of Staff) and are handed
+back in the agent lane, not claimed here. The earlier run's pick/park loop fix shipped in
+valentinyeo/house-rules#361 and #363.
 
-## G1 scope
-CHECK: the ticket's own agent log shows repeated runner claims after lead parks.
-EXPECT: four Runner 9 claim + park pairs on HYCI-276 within six hours.
+Why this line: a ticket's only real CI block is a BlockedBy relation. A Done CI ticket left linked
+never stops blocking, and a CI ticket named only in the agent log is not a block at all, yet the
+scorecard reports both, so the `ci` line can never go green. Nothing clears either one.
 
-## G2 the waiting flag honours a lead wait
-CHECK: `grep -n 'waitingOnAgentId' fleet/pick`
-EXPECT: one hit, in `slim()`, inside the `waiting` field.
+## G1 Ticket read and owned
 
-## G3 picker self-test
-CHECK: `python3 fleet/pick --self-test`
-EXPECT: exit 0, `self-test ok`.
+- Claim kept: launcher claim `tmux attach -t ht-or-runner-8 (Cursor Grok RUNNER 8)`; ticket read
+  with its comments and full agent log; no earlier code change exists for it.
+- Manual: yes. Evidence in the agent lane of HYCI-276.
 
-## G4 PR and CI
-CHECK: `gh pr view <n> -R valentinyeo/house-rules --json title,state`
-EXPECT: title names HYCI-276, state MERGED, no required check red.
+## G2 The ci score counts only real blocks
 
-## G5 the picker leaves a lead-parked ticket alone after merge
-CHECK: on the merged main, the lead-parked HYCI-276 is not returned for Runner 11.
-EXPECT: the pick's stderr reason does not hand out HYCI-276.
+- A log-only mention of a Done CI ticket is no longer a CI block; a relation to a Done CI ticket is.
+- CHECK: `cd /home/valentin/projects/worktrees/runner-8-hyci-276 && python3 skills/hypertask-triage/scripts/board-health --self-test`
+- EXPECT: exit 0 and `SELF-TEST` pass line.
 
-## G6 ticket leaves In Progress
-CHECK: `vcc task get HYCI-276`
-EXPECT: section Backlog, Runner 11 unassigned, waiting person the board lead.
+## G3 A safe fix clears a stale CI link and adds a missing one
 
-## G7 evidence
-EXPECT: exact command output for G3, G4, G5 quoted in the agent lane.
+- `--plan --only links` writes nothing and names each action; `--fix --only links` unlinks a Done
+  CI ticket and links an open one that was only mentioned.
+- CHECK: the same self-test covers both plans (pure functions, no writes).
+- EXPECT: pass.
+
+## G4 PR open and merged
+
+- One small PR to valentinyeo/house-rules, required checks green, merged.
+- Manual: PR link in the agent lane.
+
+## G5 Board 15's ci line is OK on a fresh scorecard
+
+- After the merged fix runs, a fresh `board-health --board 15` prints `OK  ci`.
+- CHECK: `cd /home/valentin/projects/worktrees/runner-8-hyci-276 && python3 skills/hypertask-triage/scripts/board-health --board 15 | grep -E "^(OK|RED|ESCALATE) +ci "`
+- EXPECT: a line starting with `OK` and the ci invariant.
+
+## G6 Ticket ends in a legal column
+
+- Remaining red lines named with their owners in the agent lane; the ticket leaves In Progress.
+- Manual: yes.
