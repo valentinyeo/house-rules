@@ -103,7 +103,7 @@ BOARDS = {
     "11514": (("Backlog",), ("In Progress", "AI Review")),
 }
 BOARD_ORDER = {b: i for i, b in enumerate(BOARDS)}
-PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "HYCI": "11514"}
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYCI": "11514"}
 RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 CI_LABELS = {"ci", "hypertask ci"}
 BASE_SKIP = set()
@@ -150,7 +150,7 @@ except (OSError, ValueError, AttributeError):
     pass
 INCIDENT_MODEL = {"cursor": ("grok-4.7-high", "high"), "codex": ("gpt-6.1-sol", "high")}
 RUN_START = re.compile(r"^\S+ (?:cursor|hax|claude): (.*)$")
-TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|HYCI)-([0-9]+)\b")
+TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|SOFT|HYCI)-([0-9]+)\b")
 RETIRED = re.compile(r"^(?:ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 PR_REPO = "hypertask-ai/hypertask"
 
