@@ -34,7 +34,7 @@ RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht
 BUILDING = {"15": ("In Progress", "AI Review", "QA"), "2060": ("Doing", "AI Review"),
             "11514": ("In Progress", "AI Review")}
 HOME_COLUMN = {"2060": "Todo", "11514": "Backlog"}
-TICKET = re.compile(r"^(HTPR|HYFA|IGSH|HYCI)-[0-9]+$")
+TICKET = re.compile(r"^(HTPR|HYFA|IGSH|SOFT|HYCI)-[0-9]+$")
 RUNNERISH = re.compile(r"^(?:runner \d+|ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 VALENTIN_REVIEW = "Valentin Review"
 
@@ -86,7 +86,7 @@ def blockers(key):
     return out
 
 
-PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "HYCI": "11514"}
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYCI": "11514"}
 
 
 def lead_for(key):
