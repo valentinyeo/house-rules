@@ -29,7 +29,8 @@ REPO = "hypertask-ai/hypertask"
 LIMIT = 300
 FIELDS = ["number", "title", "url", "author", "labels", "isDraft", "baseRefName", "createdAt", "updatedAt",
           "headRefName", "headRefOid", "mergeStateStatus", "autoMergeRequest", "statusCheckRollup"]
-POOL_EXTRA = ["valentinyeo/house-rules", "valentinyeo/poteto-2-advisor"]
+POOL_EXTRA = ["valentinyeo/house-rules", "valentinyeo/poteto-2-advisor",
+              "valentinyeo/multiprompt-android", "valentinyeo/wazig"]
 POOL_FIELDS = ["number", "title", "url", "isDraft", "author", "headRefName"]
 SKEW = 120
 
