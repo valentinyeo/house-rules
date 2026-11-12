@@ -139,7 +139,9 @@ def open_prs():
                                 capture_output=True, text=True, timeout=60)
         body = json.loads(shared.stdout) if shared.returncode == 0 else None
         if isinstance(body, dict) and isinstance(body.get("prs"), list):
-            return body["prs"]
+            kept = [pr for pr in body["prs"] if pr.get("baseRefName") == "production"]
+            if kept:
+                return kept
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
     got = gh_out(["pr", "list", "-R", "hypertask-ai/hypertask", "--state", "open", "--base", "production",
