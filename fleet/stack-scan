@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# House rule 2026-11-12: Effect and Foldkit are the default stack. Lists each Software Factory app repo's
+# framework dependencies so the stack review sees which apps are off the default. Read only (GitHub API).
+# Exit 1 when any TypeScript app has neither effect nor foldkit.
+set -u
+off=0
+for r in multiprompt triage chromescribe calorie-mcp-proto valentinyeocom yeoux-site pecunia endless-testing \
+         claude-cro screencast2-go token-ladder upwork-auto-applier; do
+  p=$(gh api "repos/valentinyeo/$r/contents/package.json" --jq .content 2>/dev/null | base64 -d 2>/dev/null)
+  if [ -z "$p" ]; then echo "$r: not TypeScript (no package.json)"; continue; fi
+  deps=$(printf '%s' "$p" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+deps = {**d.get("dependencies", {}), **d.get("devDependencies", {})}
+keys = ("effect", "foldkit", "@foldkit", "react", "svelte", "vue", "astro", "next", "solid-js", "hono", "electron", "@capacitor")
+print(" ".join(sorted(k for k in deps if k.startswith(keys))))')
+  case " $deps " in
+    *" effect "*|*foldkit*) echo "$r: default stack ($deps)" ;;
+    *) echo "$r: OFF default stack (${deps:-plain TypeScript})"; off=1 ;;
+  esac
+done
+exit $off
