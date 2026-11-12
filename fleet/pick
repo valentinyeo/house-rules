@@ -51,7 +51,7 @@ ship-claim runs with SHIP_CLAIM_PICKED=1: this picker already ordered infra agai
 share virtual claims (so 20 separate dry runs give 20 different tickets); FLEET_PICK_CACHE=<file> reuses one
 board snapshot. Exit 0 with a pick, exit 1 with the reason on stderr.
 """
-from collections import Counter
+from collections import Counter, defaultdict
 import datetime as dt
 import fcntl
 import json
@@ -983,6 +983,30 @@ def decide_suppress(n_recent, lead_after_third, blocker_keys, open_keys):
 _LEDGER = []
 
 
+def project(t):
+    """The project a ticket belongs to: board 15 is Hypertask, a 2060 ticket is its app label, others their board."""
+    if t["board"] == "2060":
+        labs = {l.lower() for l in t["labels"]}
+        return next((a for a in SF_REPOS if a in labs), "2060")
+    return t["board"]
+
+
+def project_load():
+    """Valentin 2026-11-12: "make sure all projects get an equal share IF they have tickets". Per project: tickets in
+    its building columns now, then runs on its tickets in the last 24 hours. New work goes to the least loaded first."""
+    by_key = {t["key"]: t for t in SNAP["tickets"]}
+    load = defaultdict(lambda: [0, 0])
+    for t in SNAP["tickets"]:
+        if t["section"] in BOARDS[t["board"]][1]:
+            load[project(t)][0] += 1
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for r in ledger_rows():
+        t = by_key.get(r.get("ticket") or "")
+        if t and str(r.get("ts", "")) >= since:
+            load[project(t)][1] += 1
+    return load
+
+
 def ledger_rows():
     """fleet/runner's run ledger, one dict per ended run, read once per pick."""
     if not _LEDGER:
@@ -1856,7 +1880,8 @@ def choose(n, dry):
         if t:
             return t, "ci-lane"
     if not frozen:
-        t = attempt(sorted(app_new, key=lambda t: (rank(t), BOARD_ORDER[t["board"]], t["created"])))
+        load = project_load()
+        t = attempt(sorted(app_new, key=lambda t: (tuple(load[project(t)]), rank(t), BOARD_ORDER[t["board"]], t["created"])))
         if t:
             return t, "board"
     if not full():
@@ -1981,6 +2006,20 @@ def park_count_self_test():
             assert park_event_times(t["key"]) == [], "a WAIT_CHECK result alone is not a completed park"
 
 
+def fair_self_test():
+    global SNAP
+    saved = SNAP
+    tk = lambda key, board, section, labels=(): {"key": key, "board": board, "section": section, "labels": list(labels)}
+    SNAP = {"tickets": [tk("HTPR-1", "15", "In Progress"), tk("HTPR-2", "15", "Bugs"),
+                        tk("IGSH-1", "2060", "Todo", ["Triage"]), tk("IGSH-2", "2060", "Doing", ["Multiprompt"])]}
+    _LEDGER.clear(); _LEDGER.append([])
+    load = project_load()
+    assert project(SNAP["tickets"][2]) == "triage" and project(SNAP["tickets"][0]) == "15"
+    assert tuple(load["triage"]) < tuple(load["15"]) and tuple(load["triage"]) < tuple(load["multiprompt"]), \
+        "a project with nothing in work goes before projects already being built"
+    _LEDGER.clear(); SNAP = saved
+
+
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
@@ -2102,6 +2141,7 @@ def self_test():
     trace_self_test()
     park_count_self_test()
     escalate_self_test()
+    fair_self_test()
     print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes")
 
 
