@@ -991,6 +991,19 @@ def project(t):
     return t["board"]
 
 
+def focus_projects(n):
+    """STATE/focus.json {"runners": [2, 3], "projects": ["triage"], "until": epoch, "why": "..."}: Valentin's direct order
+    to put runners on named projects (12 Nov: "put them on the calorie mcp and triage"). New work for those runners comes
+    only from those projects until it expires; own tickets, orphans, PRs and incidents still come first."""
+    try:
+        f = json.loads((STATE / "focus.json").read_text())
+    except (OSError, ValueError):
+        return set()
+    if float(f.get("until", 0)) < time.time() or n not in [int(r) for r in f.get("runners", [])]:
+        return set()
+    return {p.lower() for p in f.get("projects", [])}
+
+
 def project_load():
     """Valentin 2026-11-12: "make sure all projects get an equal share IF they have tickets". Per project: tickets in
     its building columns now, then runs on its tickets in the last 24 hours. New work goes to the least loaded first."""
@@ -1757,6 +1770,8 @@ def choose(n, dry):
             why = "checks lane full"
         elif frozen and not in_lane(t):
             why = "app freeze"
+        elif focus_projects(n) and project(t) not in focus_projects(n):
+            why = f"runner {n} focuses on {', '.join(sorted(focus_projects(n)))}"
         if why:
             note(t["key"], why)
             continue
@@ -1800,6 +1815,12 @@ def choose(n, dry):
         else:
             new.append(t)
     new.sort(key=lambda t: (rank(t), t["created"]))
+    focus = focus_projects(n)
+    if focus:
+        for t in new:
+            if project(t) not in focus:
+                note(t["key"], f"runner {n} focuses on {', '.join(sorted(focus))}")
+        new = [t for t in new if project(t) in focus]
     lane_new = [t for t in new if in_lane(t)]
     app_new = [t for t in new if not in_lane(t)]
     if full():
@@ -1848,6 +1869,9 @@ def choose(n, dry):
             continue
         if not can_join(n, t["board"]):
             entry["result"] = f"runner {n} is not a member of board {t['board']}"
+            continue
+        if focus_projects(n) and project(t) not in focus_projects(n):
+            entry["result"] = f"runner {n} focuses on {', '.join(sorted(focus_projects(n)))}"
             continue
         if any(live_runner(h) and h != me for h in names(t)):
             entry["result"] = "ticket held by another live runner"
