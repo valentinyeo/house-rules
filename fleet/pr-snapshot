@@ -31,7 +31,7 @@ FIELDS = ["number", "title", "url", "author", "labels", "isDraft", "baseRefName"
           "headRefName", "headRefOid", "mergeStateStatus", "autoMergeRequest", "statusCheckRollup"]
 POOL_EXTRA = ["valentinyeo/house-rules", "valentinyeo/poteto-2-advisor",
               "valentinyeo/multiprompt-android", "valentinyeo/wazig"]
-POOL_FIELDS = ["number", "title", "url", "isDraft", "author", "headRefName"]
+POOL_FIELDS = ["number", "title", "url", "isDraft", "baseRefName", "author", "headRefName"]
 SKEW = 120
 
 
@@ -164,7 +164,7 @@ def pool_query(repos):
         parts.append(
             f"r{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ "
             "pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) { "
-            "nodes { number title url isDraft headRefName author { login } } } }")
+            "nodes { number title url isDraft baseRefName headRefName author { login } } } }")
     return "query { " + " ".join(parts) + " }"
 
 
@@ -201,7 +201,8 @@ def write_pool(repos=None, root=None, runner=None, attempts=3, retry_delay=2):
                     written.append(f"{repo}: no answer")
                     continue
                 prs = [{"number": pull.get("number"), "title": pull.get("title"), "url": pull.get("url"),
-                        "isDraft": bool(pull.get("isDraft")), "headRefName": pull.get("headRefName"),
+                        "isDraft": bool(pull.get("isDraft")), "baseRefName": pull.get("baseRefName"),
+                        "headRefName": pull.get("headRefName"),
                         "author": pull.get("author") or {}}
                        for pull in nodes if isinstance(pull, dict)]
                 written.append(store(root, repo, prs, POOL_FIELDS))
@@ -285,13 +286,15 @@ def selftest(case):
         stderr = ""
         stdout = json.dumps({"data": {
             "r0": {"pullRequests": {"nodes": [{"number": 11, "title": "t", "url": "u", "isDraft": False,
-                                               "headRefName": "runner-4/x", "author": {"login": "runner"}}]}},
+                                               "baseRefName": "master", "headRefName": "runner-4/x",
+                                               "author": {"login": "runner"}}]}},
             "r1": {"pullRequests": {"nodes": []}}}})
     out = write_pool(pool, root, lambda argv: Pool())
     assert "house-rules" in out and "one-empty" in out, out
     assert read("valentinyeo/one-empty", 900, time.time(), root)["prs"] == [], "an empty pool copy is an answer"
     assert read("valentinyeo/house-rules", 900, time.time(), root)["prs"][0]["number"] == 11
     assert read("valentinyeo/house-rules", 900, time.time(), root)["prs"][0]["headRefName"] == "runner-4/x"
+    assert read("valentinyeo/house-rules", 900, time.time(), root)["prs"][0]["baseRefName"] == "master"
     class NoAnswer:
         returncode = 0
         stdout = '{"data": {"r0": null, "r1": {"pullRequests": null}}}'
@@ -299,6 +302,7 @@ def selftest(case):
     assert "no answer" in write_pool(pool, root, lambda argv: NoAnswer()), "a null repo never overwrites a copy"
     assert read("valentinyeo/house-rules", 900, time.time(), root)["prs"][0]["number"] == 11
     assert read("valentinyeo/house-rules", 900, time.time(), root)["prs"][0]["headRefName"] == "runner-4/x"
+    assert read("valentinyeo/house-rules", 900, time.time(), root)["prs"][0]["baseRefName"] == "master"
     assert write_pool(pool, root, lambda argv: Bad(), retry_delay=0).startswith("gh failed")
     assert write_pool([], root, lambda argv: Bad()) == "no pool repositories"
     print("pr-snapshot self-test ok")
