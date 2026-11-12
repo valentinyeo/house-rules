@@ -25,3 +25,4 @@ jobs:
       - run: python3 -m unittest tests.test_runner_chat -v
       - run: python3 -m unittest tests.test_rules_drift -v
       - run: python3 -m unittest tests.test_ticket_gate_label -v
+      - run: python3 -m unittest tests.test_slo_watch_open_prs -v
