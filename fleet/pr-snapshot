@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """One shared on-disk copy of the app's open pull requests (HYCI-278).
 
-    fleet/pr-snapshot write [--repo owner/name] [--limit N]
+    fleet/pr-snapshot write [--repo owner/name] [--limit N] [--app-only]
     fleet/pr-snapshot read [--repo owner/name] [--max-age SECONDS]
     fleet/pr-snapshot --self-test [--case bad-copy]
 
 `write` makes one `gh pr list` call and stores every open pull request with the
-fields the fleet readers need. `read` prints `{"at","repo","fields","prs"}` and
+fields the fleet readers need, then writes one copy per runner pool repository
+in a single GraphQL call (`--app-only` skips that). A failed GitHub answer is
+retried; it never overwrites the last good copy. `read` prints `{"at","repo","fields","prs"}` and
 exits 0 only when the copy exists, names the same repository, is not in the
 future, is no older than `--max-age`, and lists unique pull request numbers.
 Anything else exits 2, so the caller reads GitHub live.
@@ -27,6 +29,8 @@ REPO = "hypertask-ai/hypertask"
 LIMIT = 300
 FIELDS = ["number", "title", "url", "author", "labels", "isDraft", "baseRefName", "createdAt", "updatedAt",
           "headRefName", "headRefOid", "mergeStateStatus", "autoMergeRequest", "statusCheckRollup"]
+POOL_EXTRA = ["valentinyeo/house-rules", "valentinyeo/poteto-2-advisor"]
+POOL_FIELDS = ["number", "title", "url", "isDraft", "author"]
 SKEW = 120
 
 
@@ -34,9 +38,13 @@ def path_for(repo, root=None):
     return os.path.join(root or DIR, "open-prs-" + repo.replace("/", "-") + ".json")
 
 
-def gh_out(args, timeout=180):
+def gh_out(args, timeout=180, token="app"):
     token_file = os.path.expanduser("~/.local/bin/gh-app-token")
     env = dict(os.environ, PATH=os.path.expanduser("~/.local/bin") + ":" + os.environ.get("PATH", ""))
+    if token != "app":
+        env.pop("GH_TOKEN", None)
+        env["GH_NO_APP_TOKEN"] = "1"
+        return subprocess.run(["gh", *args], capture_output=True, text=True, env=env, timeout=timeout)
     if os.path.exists(token_file):
         try:
             token = subprocess.run([token_file], capture_output=True, text=True, timeout=60).stdout.strip()
@@ -61,7 +69,9 @@ def valid(body, repo, now, max_age, root=None):
     if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
         return None
     prs = body.get("prs")
-    if not isinstance(prs, list) or not prs:
+    if not isinstance(prs, list):
+        return None
+    if not prs and body.get("allow_empty") is not True:
         return None
     seen = set()
     for pr in prs:
@@ -84,7 +94,25 @@ def read(repo, max_age, now=None, root=None):
     return valid(body, repo, now, max_age, root)
 
 
-def write(repo=REPO, limit=LIMIT, root=None, runner=gh_out):
+def gh_reason(got):
+    return "gh failed: " + ((got.stderr or "").strip().splitlines() or ["no output"])[-1][:200]
+
+
+def store(root, repo, prs, fields):
+    body = {"at": time.time(), "repo": repo, "fields": fields, "prs": prs}
+    if not prs:
+        body["allow_empty"] = True
+    if valid(body, repo, body["at"], 0, root) is None:
+        return f"{repo}: unusable list"
+    tmp = os.path.join(root, f"{os.path.basename(path_for(repo, root))}.tmp-{os.getpid()}")
+    with open(tmp, "w") as handle:
+        json.dump(body, handle, separators=(",", ":"))
+    os.replace(tmp, path_for(repo, root))
+    return f"wrote {len(prs)} {repo} pull requests"
+
+
+def write(repo=REPO, limit=LIMIT, root=None, runner=gh_out, attempts=3, retry_delay=2):
+    """One flaky gh answer is not allowed to leave the fleet reading live for two cycles."""
     root = root or DIR
     os.makedirs(root, exist_ok=True)
     with open(os.path.join(root, "write.lock"), "w") as lock:
@@ -92,24 +120,91 @@ def write(repo=REPO, limit=LIMIT, root=None, runner=gh_out):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return "busy: another writer holds the lock"
-        got = runner(["pr", "list", "-R", repo, "--state", "open", "--limit", str(limit),
-                      "--json", ",".join(FIELDS)])
-        if got.returncode != 0:
-            return "gh failed: " + ((got.stderr or "").strip().splitlines() or ["no output"])[-1][:200]
+        reason = "gh returned no JSON"
+        for attempt in range(attempts):
+            if attempt and retry_delay:
+                time.sleep(retry_delay)
+            got = runner(["pr", "list", "-R", repo, "--state", "open", "--limit", str(limit),
+                          "--json", ",".join(FIELDS)])
+            if got.returncode != 0:
+                reason = gh_reason(got)
+                continue
+            try:
+                prs = json.loads(got.stdout)
+            except ValueError:
+                reason = "gh returned no JSON"
+                continue
+            if not isinstance(prs, list) or not prs:
+                return "gh returned no open pull requests"
+            stamped = {"at": time.time(), "repo": repo, "fields": FIELDS, "prs": prs}
+            if valid(stamped, repo, stamped["at"], 0, root) is None:
+                return "gh returned an unusable list"
+            return store(root, repo, prs, FIELDS) + f" to {path_for(repo, root)}"
+        return reason
+
+
+def pool_repos():
+    """The app plus every repo the runner pool ships to: fleet/pick owns that list."""
+    repos = [REPO] + POOL_EXTRA
+    try:
+        import importlib.machinery
+        pick = importlib.machinery.SourceFileLoader(
+            "pr_snapshot_pick", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pick")).load_module()
+        repos += [f"valentinyeo/{name}" for name in sorted(set(pick.SF_REPOS.values()))]
+    except (OSError, AttributeError, ImportError, SyntaxError, ValueError):
+        pass
+    return list(dict.fromkeys(repos))
+
+
+def pool_query(repos):
+    parts = []
+    for index, repo in enumerate(repos):
+        owner, name = repo.split("/", 1)
+        parts.append(
+            f"r{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ "
+            "pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) { "
+            "nodes { number title url isDraft author { login } } } }")
+    return "query { " + " ".join(parts) + " }"
+
+
+def write_pool(repos=None, root=None, runner=None, attempts=3, retry_delay=2):
+    """Every pool repo in one GraphQL call, so flow_metrics stops asking GitHub once per repo."""
+    root = root or DIR
+    runner = runner or (lambda argv: gh_out(argv, token="user"))
+    repos = [repo for repo in (repos if repos is not None else pool_repos()) if repo != REPO]
+    if not repos:
+        return "no pool repositories"
+    os.makedirs(root, exist_ok=True)
+    with open(os.path.join(root, "pool.lock"), "w") as lock:
         try:
-            prs = json.loads(got.stdout)
-        except ValueError:
-            return "gh returned no JSON"
-        if not isinstance(prs, list) or not prs:
-            return "gh returned no open pull requests"
-        body = {"at": time.time(), "repo": repo, "fields": FIELDS, "prs": prs}
-        if valid(body, repo, body["at"], 0, root) is None:
-            return "gh returned an unusable list"
-        tmp = path_for(repo, root) + f".tmp-{os.getpid()}"
-        with open(tmp, "w") as handle:
-            json.dump(body, handle, separators=(",", ":"))
-        os.replace(tmp, path_for(repo, root))
-        return f"wrote {len(prs)} open pull requests to {path_for(repo, root)}"
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return "busy: another writer holds the lock"
+        reason = "gh returned no JSON"
+        for attempt in range(attempts):
+            if attempt and retry_delay:
+                time.sleep(retry_delay)
+            got = runner(["api", "graphql", "-f", "query=" + pool_query(repos)])
+            try:
+                data = json.loads(got.stdout).get("data")
+            except (ValueError, AttributeError):
+                data = None
+            if not isinstance(data, dict):
+                reason = gh_reason(got) if got.returncode != 0 else "gh returned no JSON"
+                continue
+            written = []
+            for index, repo in enumerate(repos):
+                node = data.get(f"r{index}")
+                nodes = ((node or {}).get("pullRequests") or {}).get("nodes") if isinstance(node, dict) else None
+                if not isinstance(nodes, list):
+                    written.append(f"{repo}: no answer")
+                    continue
+                prs = [{"number": pull.get("number"), "title": pull.get("title"), "url": pull.get("url"),
+                        "isDraft": bool(pull.get("isDraft")), "author": pull.get("author") or {}}
+                       for pull in nodes if isinstance(pull, dict)]
+                written.append(store(root, repo, prs, POOL_FIELDS))
+            return "; ".join(written)
+        return reason
 
 
 def selftest(case):
@@ -159,6 +254,49 @@ def selftest(case):
         stdout = "[]"
         stderr = ""
     assert write(REPO, 300, root, lambda argv: Empty()).startswith("gh returned no open")
+    class Flaky:
+        calls = 0
+        def __call__(self, argv):
+            Flaky.calls += 1
+            return Flaky.first if Flaky.calls == 1 else Ok()
+    Flaky.first = Bad()
+    assert write(REPO, 300, root, Flaky(), retry_delay=0).startswith("wrote 2")
+    assert Flaky.calls == 2, "a failed call is retried once"
+    class Truncated:
+        calls = 0
+        def __call__(self, argv):
+            Truncated.calls += 1
+            if Truncated.calls == 1:
+                class Cut:
+                    returncode = 0
+                    stdout = '{"unterminated'
+                    stderr = ""
+                return Cut()
+            return Ok()
+    assert write(REPO, 300, root, Truncated(), retry_delay=0).startswith("wrote 2")
+    assert write(REPO, 300, root, lambda argv: Bad(), retry_delay=0).startswith("gh failed")
+    pool = ["valentinyeo/house-rules", "valentinyeo/one-empty"]
+    assert pool_query(pool).count("repository(owner:") == 2
+    assert '"valentinyeo"' in pool_query(pool) and "r1:" in pool_query(pool)
+    class Pool:
+        returncode = 0
+        stderr = ""
+        stdout = json.dumps({"data": {
+            "r0": {"pullRequests": {"nodes": [{"number": 11, "title": "t", "url": "u", "isDraft": False,
+                                               "author": {"login": "runner"}}]}},
+            "r1": {"pullRequests": {"nodes": []}}}})
+    out = write_pool(pool, root, lambda argv: Pool())
+    assert "house-rules" in out and "one-empty" in out, out
+    assert read("valentinyeo/one-empty", 900, time.time(), root)["prs"] == [], "an empty pool copy is an answer"
+    assert read("valentinyeo/house-rules", 900, time.time(), root)["prs"][0]["number"] == 11
+    class NoAnswer:
+        returncode = 0
+        stdout = '{"data": {"r0": null, "r1": {"pullRequests": null}}}'
+        stderr = ""
+    assert "no answer" in write_pool(pool, root, lambda argv: NoAnswer()), "a null repo never overwrites a copy"
+    assert read("valentinyeo/house-rules", 900, time.time(), root)["prs"][0]["number"] == 11
+    assert write_pool(pool, root, lambda argv: Bad(), retry_delay=0).startswith("gh failed")
+    assert write_pool([], root, lambda argv: Bad()) == "no pool repositories"
     print("pr-snapshot self-test ok")
     return 0
 
@@ -174,7 +312,9 @@ def main():
         limit = int(args[args.index("--limit") + 1]) if "--limit" in args else LIMIT
         out = write(repo, limit)
         print(out, file=sys.stderr if out.startswith(("busy", "gh", "unusable")) else sys.stdout)
-        return 0 if out.startswith("wrote") or out.startswith("busy") else 1
+        pool = "app only" if "--app-only" in args else write_pool()
+        print(pool, file=sys.stderr if pool.startswith(("busy", "gh", "no pool")) else sys.stdout)
+        return 0 if (out.startswith("wrote") or out.startswith("busy")) else 1
     if args[:1] == ["read"]:
         max_age = int(args[args.index("--max-age") + 1]) if "--max-age" in args else 900
         body = read(repo, max_age)
