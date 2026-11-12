@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Find scheduled jobs that start an Opus model. House rule 2026-11-12 (HARD script first): a chat with Valentin may run
+on Opus; its timers, crons and loops may not. Reads every systemd user timer's service and the user crontab, follows the
+command to its script file, and prints one line per Opus hit. Exit 1 when any hit. --self-test checks the matcher."""
+import pathlib, re, shlex, subprocess, sys
+
+HOME = pathlib.Path.home()
+UNITS = HOME / ".config/systemd/user"
+OPUS = re.compile(r"""(--model[ =]+["']?(opus|claude-opus)|\bmodel\s*=\s*["']?(opus|claude-opus)|MODEL\s*=\s*["']claude-opus)""")
+ALLOW = "opus-scan: allow"  # a line carrying this marker is the hardest-case escalation step, kept on purpose
+
+
+def hits(text):
+    return [l.strip() for l in text.splitlines() if OPUS.search(l) and ALLOW not in l and not l.lstrip().startswith("#")]
+
+
+def script_of(cmd):
+    for part in shlex.split(cmd.replace("%h", str(HOME)), posix=True):
+        p = pathlib.Path(part.lstrip("-@").replace("$HOME", str(HOME))).expanduser()
+        if p.is_file():
+            try:
+                if p.stat().st_size < 400_000 and b"\0" not in p.read_bytes()[:1024]:
+                    return p
+            except OSError:
+                pass
+    return None
+
+
+def jobs():
+    for t in sorted(UNITS.glob("*.timer")):
+        svc = UNITS / (re.search(r"^Unit=(.+)$", t.read_text(), re.M) or [None, t.stem + ".service"])[1]
+        if svc.is_file():
+            for m in re.finditer(r"^ExecStart=(.+)$", svc.read_text(), re.M):
+                yield t.stem, m.group(1)
+    cron = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+    for l in cron.splitlines():
+        if l.strip() and not l.startswith("#"):
+            yield "cron", " ".join(l.split()[5:])
+
+
+def main():
+    out = []
+    for name, cmd in jobs():
+        found = hits(cmd)
+        s = script_of(cmd)
+        if s:
+            found += [f"{s}: {h}" for h in hits(s.read_text(errors="ignore"))]
+        out += [f"opus-timer: {name}  {h[:160]}" for h in found]
+    print("\n".join(out) or "opus-scan: no scheduled job starts Opus")
+    return 1 if out else 0
+
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        assert hits('model=opus') and hits('claude -p --model claude-opus-5-5') and hits('MODEL = "claude-opus-5-5"')
+        assert not hits('model=sonnet') and not hits('# model=opus') and not hits('--model opus  # opus-scan: allow')
+        print("self-test ok"); sys.exit(0)
+    sys.exit(main())
