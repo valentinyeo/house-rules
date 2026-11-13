@@ -1905,8 +1905,11 @@ def park_ledger():
 
 def parkable(t, ledger=None):
     """Is t, the unfinished ticket that blocks a runner, due a park job? It must sit in a building column and be nobody else's claim.
-    A ticket gets one job per REST_MAX, so a park run that did not park cannot be retried within the rest window."""
-    if t["section"] not in BOARDS[t["board"]][1] or t["key"] in SKIP[0].hard:
+    A ticket gets one job per REST_MAX, so a park run that did not park cannot be retried within the rest window.
+    A ticket whose latest run ended WAIT_CHECK under JUST_WAITED_S ago gets no park job, whatever its PR shows: the run set its own
+    recheck, and a red check is fix work for its own run after the rest, not a hand-back (13 Nov 20:22: SOFT-1968 park job 49s after
+    WAIT_CHECK, PR 963 red at 20:19:40, the model handed it back, an empty run)."""
+    if t["section"] not in BOARDS[t["board"]][1] or t["key"] in SKIP[0].hard or just_waited(t["key"]):
         return False
     when = stamp_time((park_ledger() if ledger is None else ledger).get(t["key"], ""))
     return when is None or (dt.datetime.now(dt.timezone.utc) - when).total_seconds() > REST_MAX
@@ -3218,6 +3221,15 @@ def self_test():
     SKIP[0] = Skip({"HTPR-1"}, set())
     assert not parkable(t, {}), "another runner's claim is never parked"
     SKIP[0] = Skip(set(), set())
+    saved_ledger = list(_LEDGER)
+    try:
+        just = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=50)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _LEDGER[:] = [[{"ticket": "HTPR-9", "state": "WAIT_CHECK", "ts": just}]]
+        assert not parkable({**t, "key": "HTPR-9"}, {}), "a run that ended WAIT_CHECK 50s ago gets no park job, even on a red PR (SOFT-1968)"
+        _LEDGER[:] = [[{"ticket": "HTPR-9", "state": "WAIT_CHECK", "ts": old}]]
+        assert parkable({**t, "key": "HTPR-9"}, {}), "an old WAIT_CHECK no longer holds the park job back"
+    finally:
+        _LEDGER[:] = saved_ledger
     job = render(5, t, "park")
     assert job["source"] == "park" and job["model"] == "grok-4.7-medium" and job["brain"] == "brain-light"
     assert "PARK RUN" in job["brief"] and "fleet/park <TICKET> --waits-on" in job["brief"] and "$n" not in job["brief"]
