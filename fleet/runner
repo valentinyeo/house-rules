@@ -16,6 +16,9 @@ PICK_GATE=$HERE/tool-gate.py
 SESS_PFX=${FLEET_RUNNER_SESS_PREFIX:-ht-or-runner}
 START_PAUSE=${FLEET_RUNNER_START_PAUSE:-20}
 sess_name() { echo "${SESS_PFX}-$1"; }
+# One ticket, one run, one PR (13 Nov, Valentin: "ticket to run to pr is a one to one to one must"): no model starts without
+# a ticket key from fleet/pick. An empty or odd key ends the pick as IDLE_NO_TICKET, never a FAULT, and starts nothing.
+ticket_key_ok() { [[ "$1" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; }
 FIRST=${FLEET_RUNNER_FIRST:-1}
 LAST=${FLEET_RUNNER_LAST:-}
 [ -z "$LAST" ] && LAST=$(jq -r '.runners // 20' "$HERE/roster.json" 2>/dev/null || echo 20)
@@ -385,6 +388,18 @@ case "${1:-}" in
     SHIP_CLAIM_RESUME="tmux attach -t $(sess_name "$n") (Cursor Grok RUNNER $n)"
     run_brief "$n" "$(cat)" ;;
   check) python3 "$PICK_GATE" pick >/dev/null && "$(python3 "$PICK_GATE" pick)" --check-access ;;
+  ticket-selftest)
+    # The one-run guard, proved without a model call: only a real ticket key starts a run; an empty pick is IDLE, not a FAULT.
+    bad=0
+    expect() { [ "$2" = "$3" ] || { echo "ticket self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    for k in HTPR-1 HYCI-352 IGSH-1693; do ticket_key_ok "$k"; expect "$k starts a run" "$?" 0; done
+    for k in '' null cursor 'HTPR-' 'htpr-1' 'HTPR-1 x'; do ticket_key_ok "$k"; expect "'$k' starts nothing" "$?" 1; done
+    ticket_key_ok "$(jq -r .ticket <<< '{"ticket":null}')"; expect 'a pick with a null ticket starts nothing' "$?" 1
+    row=$(python3 "$HERE/runner-state.py" --pick-fail --runner 1 --note 'one-run: pick returned no ticket key, no model started' --wip '')
+    grep -q '"state": "IDLE_NO_TICKET"' <<< "$row" || { echo "ticket self-test FAILED: an empty pick is not IDLE_NO_TICKET: $row" >&2; bad=1; }
+    grep -q '"ticket": ""' <<< "$row" || { echo "ticket self-test FAILED: the idle row names a ticket: $row" >&2; bad=1; }
+    [ "$bad" = 0 ] && echo 'fleet/runner ticket self-test ok'
+    exit "$bad" ;;
   reply-cap-selftest)
     # The reply cap, proved without a model call: a chatty attempt is kept, a silent one is killed with its tool calls.
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -669,7 +684,7 @@ TM
       printf '%s\n' "$out" | tail -5
       grep -q RUNNER_LAUNCH_OK <<< "$out" && echo "launch-check ok: $eng $model $effort" || { echo "launch-check FAILED: exit $rc"; exit 1; }
     fi ;;
-  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | reply-cap-selftest | loop-selftest | fail-tail-selftest | transcript-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
+  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | ticket-selftest | reply-cap-selftest | loop-selftest | fail-tail-selftest | transcript-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
   *)
     n=$1
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
@@ -704,6 +719,12 @@ TM
         sleep 900; continue
       fi
       IFS=$'\t' read -r pick_ticket pick_engine pick_model pick_effort pick_source pick_repo < <(jq -r '[.ticket,(.engine // "cursor"),.model,.effort,.source,.repo] | @tsv' <<< "$pick")
+      if ! ticket_key_ok "$pick_ticket"; then
+        note="one-run: pick returned no ticket key, no model started"
+        echo "$(date -u +%FT%TZ) $note" >> "$rlog"
+        python3 "$HERE/runner-state.py" --pick-fail --runner "$n" --note "$note" --wip "" --ledger "$STATE/run-ledger.jsonl" >>"$rlog" 2>&1 || true
+        sleep 900; continue
+      fi
       [ -d "$pick_repo" ] || pick_repo=$HOME/projects/hypertask
       harness_base=$pick_engine
       pi_login_heal "$harness_base" "$rlog" && echo "$(date -u +%FT%TZ) harness: Pi Codex login renewed from the Codex CLI login, back on Pi" >> "$rlog"

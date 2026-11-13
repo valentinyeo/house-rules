@@ -62,6 +62,12 @@ pick already holds, so it costs no GitHub or board call. Cap 6 hours (Urgent 1 h
 observe is held until its stated recheck time, else 30 minutes. A run that built and left the ticket in AI Review or QA is held
 too while its PR's checks run at the first pick (canary HYCI-358: the next run only found them running). Unreadable or late data, and any error, hold nothing.
 fleet/pick --replay-waits [DAYS] counts what it would have held in the run ledger. The park lane is not gated.
+One ticket, one run, one PR (13 Nov): a ticket whose open PR has pending or green checks, no conflict and no change request
+is held from every lane (through resting()) and logged as "one-run: <KEY> PR open, checks pending|green"; a script owns the check
+watch, the merge and the live check (HYCI-352), and a model wakes on the ticket only when the PR is red, conflicting or has a
+change request. Read from the shared open-PR list, so no extra GitHub call. Live only when ~/.local/state/fleet/one-run.on exists:
+no script merges green hypertask-ai/hypertask PRs before HYCI-352 ships, so until then the line is a shadow log and nothing is
+held. A PR untouched for 6 hours (Urgent 1) is released. An incident is never held. fleet/runner refuses a launch with no ticket key.
 Cannot be built yet (HYCI-355): a new-work ticket that says it needs Valentin, a key only he or an admin can place, access,
 a design sign-off or a person at a PC is refused before any model starts ("cannot be built yet: <what>"). Text only, no
 board read. An incident and a ticket with an open PR are never held. bin/replay-built [DAYS] counts the first runs since
@@ -118,6 +124,11 @@ SHORT_REST = 2 * 3600
 # WAIT_CHECK or FAULT (wait past 30 min, or parked to the lead) where the launcher once wrote IDLE.
 REST_RESULTS = {"IDLE", "WAIT_CHECK", "FAULT"}
 URGENT_REST = 600
+# 13 Nov, Valentin: "ticket to run to pr is a one to one to one must". A ticket whose open PR waits on checks, or whose checks are
+# green, needs a script (check watch, merge, live check: HYCI-352), never a model. The hold below is switched on by this file,
+# because no script merges green hypertask-ai/hypertask PRs yet: the runner that built the PR did it, so holding the ticket
+# before HYCI-352 ships would leave green PRs unmerged. The file is created when HYCI-352 lands.
+ONE_RUN_FLAG = Path(os.environ.get("FLEET_ONE_RUN_FLAG", HOME / ".local/state/fleet/one-run.on"))
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
 # HYCI-342: bin/factory-breaker writes this record when burn, runs and merged PRs stop matching. Present and not cleared: only incidents go out.
@@ -865,7 +876,7 @@ def resting(n, dry):
         if t.get("prio") == "Urgent" and not t["waiting"] and t["section"] != "Valentin Review" and (now - when).total_seconds() > URGENT_REST:
             continue
         rest.add(key)
-    return rest | set(waits_until(now)) | wait_gate(dry, now)
+    return rest | set(waits_until(now)) | wait_gate(dry, now) | one_run_hold(dry, now)
 
 
 class Skip:
@@ -1199,6 +1210,7 @@ WAIT_FAULT = re.compile(r"WAIT_CHECK exceeded|\bchecks?\b|\bCI\b|\bPR\b|BlockedB
 WAIT_CI = re.compile(r"\bchecks?\b|\bCI\b|pending|in flight|deploy|running|required", re.I)
 RECHECK_HM = re.compile(r"recheck(?: at)?\s+(\d{1,2}):(\d\d)\s*Z", re.I)
 _GATE = {}
+_ONE_RUN = {}
 
 
 def wait_end(r):
@@ -1372,6 +1384,66 @@ def wait_gate(dry, now=None):
     _GATE.update(memo=memo, held=held)
     return held
 
+
+
+def one_run_state(p):
+    """(word, script's) for one open PR: what it needs next. Pending or green checks need a script (the check watch and the
+    merge), not a model. Red, conflicting, change-requested, draft and unreadable PRs need a model, so they are never held:
+    an empty or missing check list fails open, as every gate in this file does."""
+    checks = p.get("checks")
+    if p.get("draft"):
+        return "draft", False
+    if not checks:
+        return "unread", False
+    if p.get("red") or any(FAILED_CHECK.search(c) for c in checks):
+        return "red", False
+    if p.get("mergeable") == "CONFLICTING":
+        return "conflicting", False
+    if p.get("review") == "CHANGES_REQUESTED":
+        return "change request", False
+    return ("pending", True) if any(RUNNING_CHECK.search(c) for c in checks) else ("green", True)
+
+
+def one_run_hold(dry, now=None):
+    """One ticket, one run, one PR (13 Nov). Tickets whose open PR has pending or green checks, no conflict and no change
+    request: no lane hands them to a model (they all read resting()). A script watches the checks, merges green and does the
+    live check (HYCI-352); a model wakes on the ticket again only when the PR is red, conflicting or has a change request.
+    Read from the open-PR list the pick already holds (shared 10-minute cache): no new GitHub call. An incident is never
+    held, and a PR untouched for gate_cap(t) (6 hours, Urgent 1 hour) is released so a stalled merge gets looked at.
+    Off unless ONE_RUN_FLAG exists: the log line is written either way ("shadow" when off) so the effect is measurable first."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    memo = (id(SNAP), dry, ONE_RUN_FLAG.exists())
+    if _ONE_RUN.get("memo") == memo:
+        return _ONE_RUN["held"]
+    on, held = memo[2], set()
+    try:
+        by = defaultdict(list)
+        for p in open_prs():
+            key = pr_ticket(p)
+            if key:
+                by[key].append(p)
+        for key, prs in sorted(by.items()):
+            t = by_key(key)
+            if t is None or INCIDENT_LABEL in t["labels"]:
+                continue
+            states = [one_run_state(p) for p in prs]
+            if not all(s[1] for s in states):
+                continue
+            stamps = [stamp_time(p.get("updated", "")) for p in prs]
+            newest = max((x for x in stamps if x), default=None)
+            if newest is None or (now - newest).total_seconds() > gate_cap(t):
+                continue
+            word = "pending" if any(s[0] == "pending" for s in states) else "green"
+            msg = f"one-run: {key} PR open, checks {word}"
+            log(msg if on else f"{msg} (shadow: {ONE_RUN_FLAG} missing, not skipped)")
+            if on:
+                held.add(key)
+                note(key, f"one-run: PR open, checks {word}")
+    except Exception as e:
+        log(f"one-run: error, nothing held ({type(e).__name__}: {str(e)[:80]})")
+        held = set()
+    _ONE_RUN.update(memo=memo, held=held)
+    return held
 
 
 def replay_waits(days=7, out=print):
@@ -1820,6 +1892,9 @@ def try_claim(n, t, source, dry):
             return False
         if mine and own not in SKIP[0] and not held_back(mine, own=True):
             raise Pick(mine, "own")
+        if mine and mine["key"] in one_run_hold(dry):
+            log(f"hold {t['key']}: own {own} waits on its PR's checks or merge (one-run); a script owns it, no park job")
+            return False
         if mine and parkable(mine):  # parking clears both holds: ship-claim lets a parked ticket's open PR go too
             raise Pick(mine, "park")
         if mine:
@@ -2875,6 +2950,64 @@ def wait_gate_self_test():
         _GATE.clear()
 
 
+def one_run_self_test():
+    """One ticket, one run, one PR: pending or green checks hold the ticket from every lane once the flag file exists; red,
+    conflicting, change-requested, draft, unread, incident and stalled PRs are never held; off, the skip is only logged."""
+    global SNAP, ONE_RUN_FLAG, log
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    ago = lambda m: (now - dt.timedelta(minutes=m)).strftime(fmt)
+    tk = lambda key, labels=(), prio="Medium": {
+        "key": key, "board": "15", "section": "AI Review", "title": "x", "labels": list(labels), "prio": prio, "holders": [],
+        "waiting": False, "updated": ago(360), "created": ago(9999)}
+    pr = lambda num, key, checks=("ci=SUCCESS",), updated=30, **kw: ({
+        "number": num, "title": f"{key} x", "branch": f"runner-1/{key.lower()}", "draft": False, "red": False, "updated": ago(updated),
+        "head": "aaa", "review": "", "mergeable": "MERGEABLE", "checks": None if checks is None else list(checks)} | kw)
+    saved_snap, saved_flag, saved_log, lines = SNAP, ONE_RUN_FLAG, log, []
+    log = lines.append
+    flag = Path(STATE) / "one-run.on"
+    ONE_RUN_FLAG = flag
+
+    def held(tickets, prs, dry=True):
+        global SNAP
+        SNAP = {"tickets": tickets, "rel": {}, "prs": prs, "incidents": []}
+        _ONE_RUN.clear()
+        lines.clear()
+        return one_run_hold(dry, now)
+
+    try:
+        flag.unlink(missing_ok=True)
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1")]) == set(), "flag off: nothing is held"
+        assert lines == [f"one-run: HTPR-1 PR open, checks green (shadow: {flag} missing, not skipped)"], lines
+        flag.write_text("")
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", ("ci=IN_PROGRESS", "e2e=SUCCESS"))]) == {"HTPR-1"}, "pending checks hold the ticket"
+        assert lines == ["one-run: HTPR-1 PR open, checks pending"], lines
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks green"], \
+            "green checks hold the ticket"
+        assert "HTPR-1" in resting(2, True) and "HTPR-1" in Skip(set(), resting(2, True)), "every lane reads the hold through resting()"
+        for why, extra in (("a failed check", {"checks": ["ci=FAILURE", "e2e=IN_PROGRESS"]}), ("a red flag", {"red": True}),
+                           ("a conflict", {"mergeable": "CONFLICTING"}), ("a change request", {"review": "CHANGES_REQUESTED"}),
+                           ("a draft", {"draft": True}), ("an unread check list", {"checks": []}), ("a REST-only list", {"checks": None}),
+                           ("a stalled PR", {"updated": 400})):
+            assert held([tk("HTPR-1")], [pr(1, "HTPR-1", **extra)]) == set() and not lines, f"{why} is a model's job: not held"
+        assert held([tk("HTPR-1", prio="Urgent")], [pr(1, "HTPR-1", updated=90)]) == set(), "an Urgent PR is released after an hour"
+        assert held([tk("HTPR-1", ("incident",))], [pr(1, "HTPR-1")]) == set(), "an incident is never held"
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1"), pr(2, "HTPR-1", ("ci=FAILURE",))]) == set(), "one red PR of two wakes the ticket"
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-9")]) == set(), "a PR whose ticket is not on the board holds nothing"
+        assert held([tk("HTPR-1"), tk("HTPR-2")], [pr(1, "HTPR-2", ("ci=PENDING",))]) == {"HTPR-2"}, "only the ticket with the PR is held"
+        SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "incidents": [], "prs": None}
+        _ONE_RUN.clear()
+        saved_open = globals()["open_prs"]
+        globals()["open_prs"] = lambda: (_ for _ in ()).throw(RuntimeError("GitHub unreachable"))
+        try:
+            assert one_run_hold(True, now) == set(), "an unreadable PR list holds nothing"
+        finally:
+            globals()["open_prs"] = saved_open
+    finally:
+        SNAP, ONE_RUN_FLAG, log = saved_snap, saved_flag, saved_log
+        _ONE_RUN.clear()
+
+
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
@@ -2886,6 +3019,8 @@ def self_test():
     ALLOCATION = STATE / "allocation.json"
     RUNNER_STATE = STATE
     WATCH = STATE
+    global ONE_RUN_FLAG
+    ONE_RUN_FLAG = STATE / "no-one-run.on"  # a live flag file on this server must not change test outcomes
     MEMBERS.update({b: None for b in BOARDS})  # membership unknown: the offline test offers every board
     t = {"key": "HTPR-1", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium"}
     SKIP[0] = Skip(set(), set())
@@ -3001,6 +3136,7 @@ def self_test():
     fair_self_test()
     wait_self_test()
     wait_gate_self_test()
+    one_run_self_test()
     factory_stop_self_test()
     stage_self_test()
     print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, probe and restart steps, "
