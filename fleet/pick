@@ -1532,6 +1532,19 @@ def blocks_known(t):
     return bool(rel) and any(is_open(k) for k in rel[1])
 
 
+def infra_count(n):
+    """Other runners running a Fleet CI & Infra ticket right now."""
+    return sum(1 for m in range(1, RUNNERS + 1) if m != n and (active_run(m) or "").startswith("HYCI-"))
+
+
+def infra_cap():
+    """Most runners on Fleet CI & Infra at once: 1 up to 5 live runners, else 2. Incidents are outside the cap.
+    Valentin 13 Nov: "the ratio should be heavily in favor of producing something productive. I don't mind one or two
+    runners on infrastructure stuff"."""
+    live = sum(1 for m in range(1, RUNNERS + 1) if live_runner(f"runner {m}"))
+    return 1 if live <= 5 else 2
+
+
 def other_on_blocker(n):
     """Ticket key another runner is running, or claimed in the last two minutes, when that ticket is checks or tools work.
     An older claim is not enough: the run may have ended and the slot has to be free again."""
@@ -2215,13 +2228,14 @@ def choose(n, dry):
             log(empty)
     else:
         if held:
-            cands = [t for t in cands if t["key"] != held]
-            if cands and held.startswith("HYCI-"):
-                units, workers, _ = pipeline()
-                if len(units) >= len(workers) and all(t["board"] == "11514" for t in cands):
-                    # house rule: at the cap, Urgent Fleet CI & Infra tickets still go out (HYCI-245 waited 3h, 11 Nov)
-                    cands = [t for t in cands if t["prio"] == "Urgent"]
-                    log("kept slot: at the cap, Urgent only" if cands else "kept slot: another runner is on checks work at the cap")
+            # one kept slot only: with a runner already on Fleet CI & Infra, the rest build app work. A second runner
+            # joins only for an incident or a ticket that blocks open app work (Valentin 13 Nov: "literally everything
+            # is on infrastructure")
+            full = infra_count(n) >= infra_cap()
+            cands = [t for t in cands if t["key"] != held and (INCIDENT_LABEL in t["labels"]
+                                                                or (blocks_known(t) and not full))]
+            log("kept slot: another runner holds it; this runner takes only blockers" if cands
+                else "kept slot: another runner holds it; app work first")
         if cands:
             got = take_kept_slot(n, me, cands, dry)
             if got:
