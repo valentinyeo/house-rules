@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""Renew Pi's Codex login from the Codex CLI login, without a browser.
+
+Pi stores its own openai-codex OAuth tokens in ~/.pi/agent/auth.json. The Codex CLI stores the same
+account's tokens in ~/.codex/auth.json and refreshes them whenever hax runs. Both files then hold one
+refresh token, and a refresh rotates it for the other: the loser gets
+
+    OAuth refresh failed for openai-codex: (401) "code": "invalid_refresh_token"
+
+That is why every Pi Codex run fell back to hax from 9 Nov (HYCI-349). Signing in to the Pi TUI needs
+a browser, so this script copies the CLI's live tokens into Pi's store instead. Pi's file keeps a
+fresh access token, never spends the shared refresh token, and the Codex CLI stays the only refresher.
+
+    fleet/pi-login              renew Pi's login when the CLI's tokens differ; prints what it did
+    fleet/pi-login --check      report only, write nothing
+    fleet/pi-login --quiet      say nothing on success (the launcher uses this)
+    fleet/pi-login --self-test  fake stores in a temp dir, no network
+
+Exit 0 when Pi holds the CLI's live tokens (renewed or already current), 1 when the CLI login itself
+is missing or expired. No token, refresh token or account id is ever printed.
+"""
+import base64
+import datetime as dt
+import json
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+PI_AUTH = Path(os.environ.get("PI_AUTH") or Path.home() / ".pi/agent/auth.json")
+CODEX_AUTH = Path(os.environ.get("CODEX_AUTH") or Path.home() / ".codex/auth.json")
+
+
+def claims(token):
+    part = token.split(".")[1]
+    part += "=" * (-len(part) % 4)
+    return json.loads(base64.urlsafe_b64decode(part))
+
+
+def read_json(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        return {}
+
+
+def cli_tokens(path):
+    tokens = read_json(path).get("tokens") or {}
+    access, refresh = tokens.get("access_token"), tokens.get("refresh_token")
+    if not access or not refresh:
+        return None, "the Codex CLI login has no tokens; run hax once or sign the CLI in again"
+    try:
+        exp = int(claims(access)["exp"])
+    except (KeyError, IndexError, ValueError):
+        return None, "the Codex CLI access token has no expiry; sign the CLI in again"
+    if exp <= time.time():
+        return None, "the Codex CLI access token has expired; run hax once so the CLI refreshes it"
+    return {"access": access, "refresh": refresh, "expires": exp * 1000,
+            "accountId": tokens.get("account_id")}, None
+
+
+def entry_for(tokens, old):
+    account = tokens.get("accountId") or old.get("accountId")
+    entry = {"type": "oauth", "access": tokens["access"], "refresh": tokens["refresh"],
+             "expires": tokens["expires"]}
+    if account:
+        entry["accountId"] = account
+    return entry
+
+
+def write_store(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup = path.with_name(path.name + ".bak-login-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
+    if path.exists():
+        backup.write_bytes(path.read_bytes())
+        os.chmod(backup, 0o600)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".auth-", suffix=".json")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return backup
+
+
+def renew(pi_path, codex_path, check=False):
+    tokens, why = cli_tokens(codex_path)
+    if not tokens:
+        return 1, why
+    store = read_json(pi_path)
+    old = store.get("openai-codex") or {}
+    if old.get("accountId") and tokens.get("accountId") and old["accountId"] != tokens["accountId"]:
+        return 1, "the Codex CLI is signed in to a different account than Pi; not mixing them"
+    new = entry_for(tokens, old)
+    when = dt.datetime.fromtimestamp(tokens["expires"] / 1000, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if old.get("access") == new["access"] and old.get("refresh") == new["refresh"]:
+        return 0, f"Pi already holds the Codex CLI login, valid to {when}"
+    if check:
+        return 0, f"Pi's login differs from the Codex CLI's and can be renewed, valid to {when}"
+    store["openai-codex"] = new
+    write_store(pi_path, store)
+    return 0, f"Pi renewed from the Codex CLI login, valid to {when}"
+
+
+def self_test():
+    bad = 0
+    tmp = Path(tempfile.mkdtemp())
+    pi_path, codex_path = tmp / "pi/auth.json", tmp / "codex/auth.json"
+
+    def token(exp):
+        body = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        return f"x.{body}.y"
+
+    def expect(what, got, want):
+        nonlocal bad
+        if got != want:
+            print(f"pi-login self-test FAILED: {what}: got {got!r}, want {want!r}", file=sys.stderr)
+            bad = 1
+
+    codex_path.parent.mkdir(parents=True, exist_ok=True)
+    codex_path.write_text(json.dumps({"tokens": {"access_token": token(int(time.time()) + 3600),
+                                                 "refresh_token": "r1", "account_id": "acc-1"}}))
+    pi_path.parent.mkdir(parents=True, exist_ok=True)
+    pi_path.write_text(json.dumps({"openai-codex": {"type": "oauth", "access": token(1), "refresh": "dead",
+                                                    "expires": 1000, "accountId": "acc-1"}}))
+    rc, msg = renew(pi_path, codex_path, check=True)
+    expect("a check renews nothing", rc, 0)
+    expect("a check leaves the store alone", json.loads(pi_path.read_text())["openai-codex"]["refresh"], "dead")
+    expect("the check says it can renew", "can be renewed" in msg, True)
+    rc, msg = renew(pi_path, codex_path)
+    expect("a renew succeeds", rc, 0)
+    expect("the store now holds the CLI tokens", json.loads(pi_path.read_text())["openai-codex"]["refresh"], "r1")
+    expect("the account is kept", json.loads(pi_path.read_text())["openai-codex"]["accountId"], "acc-1")
+    backups = list(pi_path.parent.glob("auth.json.bak-login-*"))
+    expect("the old store is backed up once", len(backups), 1)
+    expect("the backup is private", oct(backups[0].stat().st_mode)[-3:], "600")
+    expect("the store is private", oct(pi_path.stat().st_mode)[-3:], "600")
+    expect("a token is never printed", "r1" in msg, False)
+    rc, msg = renew(pi_path, codex_path)
+    expect("a second run is a no-op", "already holds" in msg, True)
+    expect("a no-op writes no backup", len(list(pi_path.parent.glob("auth.json.bak-login-*"))), 1)
+    codex_path.write_text(json.dumps({"tokens": {"access_token": token(int(time.time()) - 10),
+                                                 "refresh_token": "r2", "account_id": "acc-1"}}))
+    rc, msg = renew(pi_path, codex_path)
+    expect("an expired CLI token fails", rc, 1)
+    expect("and says why", "expired" in msg, True)
+    codex_path.write_text(json.dumps({"tokens": {"access_token": token(int(time.time()) + 3600),
+                                                 "refresh_token": "r3", "account_id": "acc-2"}}))
+    rc, msg = renew(pi_path, codex_path)
+    expect("a different account is refused", rc, 1)
+    codex_path.unlink()
+    rc, msg = renew(pi_path, codex_path)
+    expect("a missing CLI login fails", rc, 1)
+    print("fleet/pi-login self-test ok" if not bad else "fleet/pi-login self-test FAILED")
+    return bad
+
+
+def main(argv):
+    if "--self-test" in argv:
+        return self_test()
+    check = "--check" in argv
+    quiet = "--quiet" in argv
+    rc, msg = renew(PI_AUTH, CODEX_AUTH, check=check)
+    if not quiet or rc:
+        print(msg, file=sys.stderr if rc else sys.stdout)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

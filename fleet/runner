@@ -82,6 +82,17 @@ pi_mark_auth_failure() {
   printf '%s %s\n' "$(date -u +%FT%TZ)" "$why" > "$(pi_down_mark "$eng")"
 }
 harness() { local want=$2; [ "$(cat "$STATE/harness-$1" 2>/dev/null)" = pi ] || { echo "$want"; return; }; case $want in codex|opencode) pi_down "$want" && echo "$want" || echo "pi-$want" ;; *) echo "$want" ;; esac; }
+# The Codex CLI and Pi share one refresh token, and a refresh rotates it for the other, so Pi's copy dies
+# whenever the CLI gets there first: 9 Nov to 13 Nov of Pi Codex runs fell back to hax on exactly that (HYCI-349).
+# Pi has no login of its own; fleet/pi-login copies the CLI's live tokens in, which makes the login file newer
+# than the mark, and the pick after it runs in Pi again. No browser, no human.
+pi_login_heal() {
+  local base=$1 rlog=$2
+  [ "$base" = codex ] || return 1
+  [ -f "$(pi_down_mark codex)" ] || return 1
+  python3 "$HERE/pi-login" --quiet >>"$rlog" 2>&1 || return 1
+  rm -f "$(pi_down_mark codex)"
+}
 
 # A provider that refuses the work is busy, not broken (HYCI-255): 429 "The inference service is overloaded" crashed four
 # DeepSeek runners on 2026-11-11 and each restart walked back into the same wall. One overload marks that plan busy for 15
@@ -481,6 +492,18 @@ case "${1:-}" in
     expect 'a mark older than six hours retries Pi' "$(harness 1 codex)" pi-codex
     printf 'tests failed\n' > "$tmp/run3.log"
     pi_mark_auth_failure pi-codex "$tmp/run3.log" && { echo 'harness self-test FAILED: a normal failure marked the engine down' >&2; bad=1; } || echo 'mark: a normal failure leaves Pi alone'
+    # A rejected refresh token no longer waits for a human: the launcher copies the Codex CLI's live tokens in (HYCI-349).
+    expect 'a heal with no mark does nothing' "$(pi_login_heal codex "$tmp/heal.log" && echo healed || echo idle)" idle
+    printf 'OAuth refresh failed for openai-codex: (401): "code": "invalid_refresh_token"\n' > "$tmp/run4.log"
+    pi_mark_auth_failure pi-codex "$tmp/run4.log"
+    expect 'a rejected refresh token keeps the slot on hax' "$(harness 1 codex)" codex
+    printf '{"tokens":{"access_token":"x.%s.y","refresh_token":"r9","account_id":"acc-1"}}\n' \
+      "$(python3 -c 'import base64,json,time;print(base64.urlsafe_b64encode(json.dumps({"exp":int(time.time())+3600}).encode()).decode().rstrip("="))')" > "$tmp/codex-auth.json"
+    printf '{"openai-codex":{"type":"oauth","access":"old","refresh":"dead","expires":1,"accountId":"acc-1"}}\n' > "$PI_AUTH"
+    CODEX_AUTH=$tmp/codex-auth.json; export CODEX_AUTH
+    pi_login_heal codex "$tmp/heal.log" || { echo 'harness self-test FAILED: the launcher did not renew the dead Pi login' >&2; bad=1; }
+    expect 'a renewed login holds the CLI tokens' "$(python3 -c "import json;print(json.load(open('$PI_AUTH'))['openai-codex']['refresh'])")" r9
+    expect 'a renewed login puts the slot back on Pi' "$(harness 1 codex)" pi-codex
     [ "$bad" = 0 ] && echo 'fleet/runner harness self-test ok'
     exit "$bad" ;;
   top-up)
@@ -562,6 +585,7 @@ case "${1:-}" in
       IFS=$'\t' read -r pick_ticket pick_engine pick_model pick_effort pick_source pick_repo < <(jq -r '[.ticket,(.engine // "cursor"),.model,.effort,.source,.repo] | @tsv' <<< "$pick")
       [ -d "$pick_repo" ] || pick_repo=$HOME/projects/hypertask
       harness_base=$pick_engine
+      pi_login_heal "$harness_base" "$rlog" && echo "$(date -u +%FT%TZ) harness: Pi Codex login renewed from the Codex CLI login, back on Pi" >> "$rlog"
       pick_engine=$(harness "$n" "$pick_engine"); pick=$(jq -c --arg e "$pick_engine" '.engine = $e' <<< "$pick")
       if [ "$(cat "$STATE/harness-$n" 2>/dev/null)" = pi ] && [ "$pick_engine" = "$harness_base" ] && [ -f "$(pi_down_mark "$harness_base")" ]; then
         echo "$(date -u +%FT%TZ) harness: pi-$harness_base login is down, this pick runs on hax $harness_base" >> "$rlog"
