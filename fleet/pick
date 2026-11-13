@@ -883,7 +883,12 @@ def resting(n, dry):
         if t.get("prio") == "Urgent" and not t["waiting"] and t["section"] != "Valentin Review" and (now - when).total_seconds() > URGENT_REST:
             continue
         rest.add(key)
-    return rest | set(waits_until(now)) | wait_gate(dry, now) | one_run_hold(dry, now)
+    gate = wait_gate(dry, now)
+    # HYCI-410: a wait the gate tracks is the gate's call alone. The gate lifts when the PR checks or blockers change; this rest
+    # only lifts on a ticket edit or after two hours, so it held SOFT-2277 (Runner 3, 13 Nov 22:06) for two hours after PR 975
+    # turned red while the gate had already let it go.
+    rest -= _GATE.get("tracked", set())
+    return rest | set(waits_until(now)) | gate | one_run_hold(dry, now)
 
 
 class Skip:
@@ -1349,7 +1354,7 @@ def wait_gate(dry, now=None):
     memo = (id(SNAP), dry)
     if _GATE.get("memo") == memo:
         return _GATE["held"]
-    held = set()
+    held, tracked = set(), set()
     try:
         last = {}
         for r in ledger_rows():
@@ -1382,6 +1387,8 @@ def wait_gate(dry, now=None):
                         base["parts"][name] = parts[name]
                         dirty = True
             ok, cause = gate_verdict(t, when, row, base, parts, now)
+            if not base.get("late"):
+                tracked.add(key)
             if ok:
                 held.add(key)
             elif base.get("cause") != cause:
@@ -1392,8 +1399,8 @@ def wait_gate(dry, now=None):
             gate_save({k: v for k, v in state.items() if k in last})
     except Exception as e:
         log(f"wait gate: error, nothing held ({type(e).__name__}: {str(e)[:80]})")
-        held = set()
-    _GATE.update(memo=memo, held=held)
+        held, tracked = set(), set()
+    _GATE.update(memo=memo, held=held, tracked=tracked)
     return held
 
 
@@ -3048,6 +3055,18 @@ def wait_gate_self_test():
         assert held() == {"HTPR-1"}
         SNAP["prs"][0]["checks"] = ["ci=FAILURE", "e2e=IN_PROGRESS"]
         assert held() == set(), "a failed check lifts the hold while the rest still run"
+        # HYCI-410: a wait the gate tracks and released is not held two more hours by the IDLE rest (SOFT-2277, 13 Nov)
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        idle = RUNNER_STATE / "runner-2.idle"
+        idle.write_text(f"{ago(5)} HTPR-1\n")
+        try:
+            _GATE.clear()
+            assert "HTPR-1" in resting(2, True), "a tracked wait still rests while its checks run"
+            SNAP["prs"][0]["checks"] = ["ci=FAILURE"]
+            _GATE.clear()
+            assert "HTPR-1" not in resting(2, True), "red checks free a tracked wait at once, not after the two-hour rest"
+        finally:
+            idle.unlink()
 
         fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
         held()
