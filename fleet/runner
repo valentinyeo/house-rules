@@ -128,6 +128,33 @@ provider_busy_wait() {
   sleep "$left"
 }
 
+# 2026-11-13 canary: runner 6's pane restarted mid-run. The Pi process of the first run kept working under the same RUNNER 6
+# identity, and the new loop picked the same ticket and started a second run, which found a duplicate session and ended
+# empty. Every loop records its process group in loop-N.pgids. A group of an earlier loop that still has members is an
+# orphaned run: the new loop waits for it (up to ORPHAN_WAIT seconds, ORPHAN_TICK at a time) before it picks anything.
+ORPHAN_WAIT=${ORPHAN_WAIT:-3600}
+ORPHAN_TICK=${ORPHAN_TICK:-60}
+orphan_pids() {
+  local n=$1 f="$STATE/loop-$1.pgids" g keep=""
+  [ -f "$f" ] || return 0
+  for g in $(cat "$f"); do
+    [ "$g" = "$$" ] && { keep="$keep $g"; continue; }
+    ps -eo pid=,pgid= 2>/dev/null | awk -v g="$g" '$2 == g {print $1}' | grep -q . || continue
+    keep="$keep $g"; ps -eo pid=,pgid= | awk -v g="$g" '$2 == g {print $1}'
+  done
+  echo $keep | tr ' ' '\n' > "$f.tmp" && mv "$f.tmp" "$f"
+}
+orphan_run_wait() {
+  local n=$1 waited=0 pids
+  while [ "$waited" -lt "$ORPHAN_WAIT" ]; do
+    pids=$(orphan_pids "$n" | tr '\n' ' ')
+    [ -n "${pids// /}" ] || return 0
+    [ "$waited" = 0 ] && echo "$(date -u +%FT%TZ) orphan run: pid(s) ${pids}of an earlier RUNNER $n loop still run; no pick until they end" >> "$STATE/runner-$n.log"
+    sleep "$ORPHAN_TICK"; waited=$(( waited + ORPHAN_TICK ))
+  done
+  echo "$(date -u +%FT%TZ) orphan run: waited ${ORPHAN_WAIT}s, picking anyway" >> "$STATE/runner-$n.log"
+}
+
 # A reply that never comes burns the whole run: 9 of 88 DeepSeek runs hit the 3h limit on 2026-11-10, one after 89 minutes
 # of provider silence (HYCI-250). Pi writes a session record for every event, so its session file is a true heartbeat:
 # no new record for REPLY_CAP seconds means the provider sent nothing. That attempt is killed, retried once, then the run
@@ -373,6 +400,25 @@ case "${1:-}" in
       || { echo 'reply-cap self-test FAILED: a capped run is not classified as a fault with its reason' >&2; bad=1; }
     [ "$bad" = 0 ] && echo 'reply-cap self-test ok'
     exit "$bad" ;;
+  orphan-selftest)
+    # Proved without a model call: a leftover process of an earlier loop's group makes the loop wait; a gone group, the
+    # loop's own group and another runner's group do not; the wait ends at the cap.
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    STATE=$tmp; bad=0; ORPHAN_TICK=1
+    expect() { [ "$2" = "$3" ] || { echo "orphan self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    setsid sleep 30 & sleep 0.3
+    old=$(ps -eo pid=,pgid=,args= | awk '$3 == "sleep" && $4 == "30" {print $2; exit}')
+    printf '%s\n999999\n%s\n' "$old" "$$" > "$tmp/loop-6.pgids"
+    [ "$(orphan_pids 6 | wc -l)" -ge 1 ] || { echo 'orphan self-test FAILED: a stray member of an old group does not count' >&2; bad=1; }
+    expect 'only live groups stay on record' "$(wc -l < "$tmp/loop-6.pgids" | tr -d ' ')" 2
+    expect 'another runner sees nothing' "$(orphan_pids 7 | wc -l | tr -d ' ')" 0
+    ORPHAN_WAIT=2 orphan_run_wait 6
+    grep -q 'picking anyway' "$tmp/runner-6.log" || { echo 'orphan self-test FAILED: no give-up line' >&2; bad=1; }
+    kill "$old" 2>/dev/null; sleep 0.3
+    : > "$tmp/runner-6.log"; ORPHAN_WAIT=2 orphan_run_wait 6
+    [ -s "$tmp/runner-6.log" ] && { echo 'orphan self-test FAILED: waited with no orphan' >&2; bad=1; }
+    [ "$bad" = 0 ] && echo 'orphan self-test ok'
+    exit "$bad" ;;
   provider-busy-selftest)
     # Proved without a model call: an overload line writes a 15 minute mark for its plan only, the mark rests that plan,
     # a clean log marks nothing, and no engine file moves (HYCI-255).
@@ -564,6 +610,7 @@ case "${1:-}" in
     [ "$_ident" = "RUNNER $n" ] && [ -s "$_tokfile" ] || { echo "identity check failed for RUNNER $n" >&2; exit 1; }
     HT_TOKEN="$(cat "$_tokfile")"; export HT_TOKEN; unset _ident _tokfile
     self_mtime=$(stat -c %Y "$SELF")
+    echo "$$" >> "$STATE/loop-$n.pgids"
     while :; do
       # A launcher update (house-rules sync) reaches a running loop here, between tickets.
       if [ "$(stat -c %Y "$SELF" 2>/dev/null)" != "$self_mtime" ] && bash -n "$SELF" 2>/dev/null; then
@@ -571,6 +618,7 @@ case "${1:-}" in
       fi
       if [ -f "$STATE/PAUSED" ] || [ -f "$STATE/stop-$n" ]; then sleep 300; continue; fi
       provider_busy_wait "$(engine "$n")"
+      orphan_run_wait "$n"
       pick_bin=$(python3 "$PICK_GATE" pick 2>>"$rlog") || { echo "$(date -u +%FT%TZ) pick-gate: no runnable picker" >> "$rlog"; sleep 900; continue; }
       if ! pick=$("$pick_bin" "$n" --json 2>>"$rlog"); then
         echo "$(date -u +%FT%TZ) pick: nothing to start" >> "$rlog"
