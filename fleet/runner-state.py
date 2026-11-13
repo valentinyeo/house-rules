@@ -9,9 +9,13 @@
 
 An unknown state is a fault. flag approval is not a state. Waiting on a person is not a state.
 Any other RUNNER IDLE line is WAIT_CHECK.
+`RUNNER TOO HARD <KEY> | why: ...` is state TOO_HARD, the one valid leave a runner chooses itself (2026-11-13): fleet/park --too-hard
+raises the ticket's brain tag one step and a stronger runner takes it. fleet/valid-leaves.json lists every valid leave; `leave_verdict`
+reads it (bin/excess-run-watch and bin/heavy-tickets in poteto-2-advisor read the same file).
 The launcher writes `state` on run-ledger.jsonl. fleet-watch reads that field.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -27,6 +31,7 @@ STATES = (
     "IDLE_LOAD",
     "PROVIDER_BUSY",
     "PARKED",
+    "TOO_HARD",
     "STOPPED",
     "FAULT",
 )
@@ -40,6 +45,7 @@ HUMAN = re.compile(r"\bvalentin\b|flag approval", re.I)
 WAIT = re.compile(r"ci-blocked|checks pending|awaiting checks|\bCI pending\b|\brecheck\b", re.I)
 OWN = re.compile(r"\bOWN_PR\b|own PR", re.I)
 PARKED_LINE = re.compile(r"(?:^|\s)PARKED\s+\S+")
+TOO_HARD_LINE = re.compile(r"(?:^|\s)RUNNER TOO HARD\s+\S+")
 STALL = re.compile(r"no model reply|reply cap|reply stalled", re.I)
 TICKET_WAIT = re.compile(r"waits on|waiting on|parked on|BlockedBy", re.I)
 # Live proof that needs Valentin's PC or the check phone, while it is off (IGSH-1923, IGSH-1925, HYCI-256, 11 Nov night).
@@ -86,6 +92,8 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
         return _out("STOPPED", "STOPPED", detail=mark[:80])
     if DONE.search(line):
         return _out("BUILDING", "DONE", detail=line[:160])
+    if TOO_HARD_LINE.search(line):
+        return _out("TOO_HARD", "TOO_HARD", park="bump", detail=line[:300])
     if PARKED_LINE.search(line):
         return _out("PARKED", "PARKED", detail=line[:160])
     # The provider overloaded: nothing was built and nothing is broken, so the ticket must not read as a fault (HYCI-255).
@@ -129,6 +137,23 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
     if line:
         return _out("FAULT", "FAULT", park="lead", detail="unknown state")
     return _out("FAULT", "FAULT", park="lead", detail="unknown state")
+
+
+VALID_LEAVES = Path(os.environ.get("FLEET_VALID_LEAVES", Path(__file__).resolve().with_name("valid-leaves.json")))
+
+
+def leave_verdict(state, detail="", registry=None):
+    """("skip" | "valid" | "invalid", id, label) for one run's ending, read from fleet/valid-leaves.json. A run that ended in a
+    building state, an idle state or on a script-run wait is no leave at all (skip). The first valid leave whose states and detail
+    pattern both match wins; every other ending is invalid, and from the ticket's second run on it wakes a fixer."""
+    reg = registry if registry is not None else json.loads(VALID_LEAVES.read_text())
+    low = (detail or "").lower()
+    if state in reg["skip"] or (reg.get("skip_detail") and re.search(reg["skip_detail"], low)):
+        return "skip", "", ""
+    for v in reg["valid"]:
+        if state in v["states"] and (not v.get("detail") or re.search(v["detail"], low)):
+            return "valid", v["id"], v["label"]
+    return "invalid", state.lower(), reg["invalid"].get(state, "Unlisted ending")
 
 
 def classify_pick(note, wip):
@@ -354,9 +379,28 @@ def self_test():
         classify("PARKED HTPR-5", 0, 40, "", 0, "HTPR-5"),
         classify("", 0, 500, "manual", 0, ""),
         classify("RUNNER IDLE waiting on Valentin flag approval", 0, 500, "", 0, "HTPR-6"),
+        classify("RUNNER TOO HARD HTPR-7 | why: touches billing and auth together", 0, 500, "", 0, "HTPR-7"),
     ]
     assert {row["state"] for row in day} == set(STATES), sorted(row["state"] for row in day)
     assert all(row["state"] in STATES for row in day)
+    hard = classify("RUNNER TOO HARD HTPR-7 | why: touches billing and auth together", 0, 500, "", 0, "HTPR-7")
+    assert hard["state"] == "TOO_HARD" and hard["park"] == "bump" and "billing" in hard["detail"], hard
+    assert classify("CI RUNNER TOO HARD HYCI-7 | why: needs a stronger model", 0, 500, "", 0, "HYCI-7")["state"] == "TOO_HARD"
+    assert classify("RUNNER IDLE too hard", 0, 500, "", 0, "HYCI-7")["state"] == "WAIT_CHECK", "only the listed line is the valid leave"
+    reg = json.loads(VALID_LEAVES.read_text())
+    v = lambda state, detail="": leave_verdict(state, detail, reg)[:2]
+    assert v("BUILDING") == ("skip", "") and v("IDLE_CAP") == ("skip", ""), "building and idle endings are no leave"
+    assert v("WAIT_CHECK", "sf-wait: SOFT-1 pr: PR open") == ("skip", ""), "a script-run wait is no leave"
+    assert v("WAIT_CHECK", "RUNNER IDLE checks pending") == ("invalid", "wait_check"), "waited on checks is invalid"
+    assert v("PARKED", "PARKED HTPR-1 | why: Checks running. Not live yet.") == ("invalid", "parked")
+    assert v("FAULT", "unknown state") == ("invalid", "fault") and v("FAULT", "crash or run ended before it started") == ("invalid", "fault")
+    assert v("TOO_HARD", "RUNNER TOO HARD HTPR-7 | why: x") == ("valid", "too_hard")
+    assert v("PROVIDER_BUSY", "provider busy: the inference service is overloaded") == ("valid", "provider")
+    assert v("FAULT", "API error 503 from the provider") == ("valid", "provider"), "a 5xx is the provider, not the runner"
+    assert v("PARKED", "PARKED HTPR-2 | why: Valentin Review plus one Question; money") == ("valid", "valentin")
+    assert v("STOPPED", "removed from the roster") == ("valid", "removed") and v("STOPPED", "manual") == ("invalid", "stopped")
+    assert set(reg["invalid"]) <= set(STATES) and set(reg["skip"]) <= set(STATES), "the registry names listed states only"
+    assert all(s in STATES for x in reg["valid"] for s in x["states"])
     dirty = "\x1b[31mErr 401\x1b[0m\nAuthorization: Bearer abcDEF123456789xyz\nsecret=hunter2hunter2\nk sk-abcdefghijklmnop1234\njwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig\n"
     clean = redact(dirty)
     assert "Err 401" in clean and "\x1b" not in clean, clean

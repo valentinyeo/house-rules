@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "rule": "A runner that takes a ticket delivers it. Valid leaves only: provider outage, TOO HARD (brain up one step), runner removed, Valentin's own call. Every other leave, from the second run on, wakes a Sonnet fixer that fixes the cause at its source.",
+  "valid": [
+    {"id": "provider", "label": "Provider outage", "states": ["PROVIDER_BUSY", "FAULT", "WAIT_CHECK", "PARKED"],
+     "detail": "api error|\\b5\\d\\d\\b|rate.?limit|quota|overloaded|model (?:is )?unreachable|provider (?:busy|outage|down|unreachable)",
+     "then": "the same runner resumes when the provider is back; an outage over 30 minutes: the same brain on another plan takes it"},
+    {"id": "too_hard", "label": "TOO HARD", "states": ["TOO_HARD"],
+     "then": "fleet/park --too-hard raises the brain tag one step; a stronger runner takes it; at extra-hard it goes to the lead lane"},
+    {"id": "removed", "label": "Runner removed", "states": ["STOPPED"], "detail": "removed|dismantled|roster",
+     "then": "the ticket goes back to the queue as an orphan"},
+    {"id": "valentin", "label": "Valentin's own call", "states": ["PARKED", "WAIT_CHECK"],
+     "detail": "valentin review|needs valentin|question to valentin|waiting on valentin",
+     "then": "Valentin Review plus one marked Question; the runner keeps ownership"}
+  ],
+  "skip": ["BUILDING", "OWN_PR", "IDLE_NO_TICKET", "IDLE_CAP", "IDLE_PACER", "IDLE_LOAD"],
+  "skip_detail": "one-run:|sf-wait:|wait gate:|script owns",
+  "invalid": {
+    "WAIT_CHECK": "Waited on checks, release or timer",
+    "PARKED": "Parked or handed back",
+    "FAULT": "Fault: no end note, died, run limit, unknown end state",
+    "STOPPED": "Stopped by hand"
+  },
+  "causes": {
+    "Hit run limit": false,
+    "Board write refused": false,
+    "Died at start": false,
+    "Waited on checks": false,
+    "Waited on timer": false,
+    "Cross-QA not passed": false,
+    "Waited on approval": false,
+    "Blocked on access": false,
+    "Waited on release": false,
+    "Blocked on ticket": false,
+    "Unknown end state": false,
+    "Runner stopped": false,
+    "Handed back": false,
+    "Parked, no reason": false,
+    "No end note": false,
+    "Provider outage": true,
+    "TOO HARD": true,
+    "Runner removed": true,
+    "Valentin's own call": true,
+    "Shipped": true,
+    "Other": false
+  }
+}

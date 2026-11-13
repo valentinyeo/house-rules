@@ -41,6 +41,18 @@ class Owners:
             os.replace(tmp, path)
             return record
 
+    def release(self, key):
+        """Drop the owner record: the ticket is free for any runner again. True when a record existed (2026-11-13: TOO HARD hands
+        the ticket to a stronger runner, so the first runner's pin must go)."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with (self.directory / ".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                (self.directory / key).unlink()
+            except FileNotFoundError:
+                return False
+            return True
+
     def prepare(self, tickets, write=True):
         for ticket in tickets:
             record = self.read(ticket["key"])

@@ -10,6 +10,11 @@
                                                  and held by it, so the pool leaves it there
     fleet/park <TICKET> --release                another runner owns the work (you were co-assigned, e.g. a cross-check): unassigns only you,
                                                  the ticket and its column stay as they are
+    fleet/park <TICKET> --too-hard "<why>" [--dry-run] [--labels a,b]
+                                                 the one valid leave a runner chooses (final line `RUNNER TOO HARD <KEY> | why: ...`):
+                                                 the brain tag goes up one step (light, medium, hard, extra-hard), the owner pin and
+                                                 runner assignment drop, and a stronger runner takes the ticket. At extra-hard the
+                                                 ticket goes to its lead like --lead. --dry-run writes nothing; --labels fakes the tags.
     fleet/park --sweep [--apply] [--waits-on KEY=T1,T2 ...] [--valentin KEY[=COMMENT] ...]
     fleet/park --self-test
 
@@ -283,6 +288,60 @@ def park_lead(key, why, t=None):
     return f"{key} -> {home}, waiting on {name}, starting runner retained"
 
 
+BRAIN_LADDER = ("brain-light", "brain-medium", "brain-hard", "brain-extra-hard")
+
+
+def brain_levels(names):
+    return [n.lower() for n in names if n.lower() in BRAIN_LADDER]
+
+
+def next_brain(names):
+    """(old levels, next level or None). No tag counts as the medium brain (house rules), so it goes to hard."""
+    old = brain_levels(names)
+    now = max((BRAIN_LADDER.index(n) for n in old), default=1)
+    return old, (BRAIN_LADDER[now + 1] if now + 1 < len(BRAIN_LADDER) else None)
+
+
+def park_too_hard(key, why, t=None, dry=False, labels=None):
+    """RUNNER TOO HARD: not an abandonment but an escalation (2026-11-13). Raise the brain tag one step, write the agent-lane note,
+    drop the owner pin and the runner assignment so a stronger runner takes the ticket. Extra-hard: the lead lane, as --lead."""
+    if not why.strip():
+        raise RuntimeError("--too-hard needs a reason: what is beyond this brain")
+    t = t or ({"projectId": "", "labels": [{"name": n} for n in labels], "section": "In Progress", "pullRequests": [], "assignees": []}
+              if labels is not None else get(key))
+    if (t.get("section") or "").lower() in ("done", "archive", "archived"):
+        return f"{key} already {t.get('section')}, nothing to raise"
+    names = [l.get("name", "") for l in t.get("labels") or []]
+    old, new = next_brain(names)
+    if new is None:
+        if dry:
+            return f"{key}: already {', '.join(old)}; DRY RUN would park it on its lead (extra-hard has no stronger runner)"
+        return park_lead(key, f"TOO HARD at extra-hard, no stronger brain exists: {why.strip()}", t)
+    held = holders(t)
+    section = t.get("section")
+    if section in ("In Progress", "Doing"):
+        section = "AI Review" if t.get("pullRequests") else home_section(t.get("projectId"), names, t.get("title"))
+    plan = (f"{key}: {', '.join(old) or 'no brain tag'} -> {new}; unassign {', '.join(held) or 'nobody'}; "
+            f"owner pin dropped; column {section}")
+    if dry:
+        return "DRY RUN " + plan
+    args = ["vcc", "task", "update", key, "--project", str(t.get("projectId")), "--add-labels", new]
+    if old:
+        args += ["--remove-labels", ",".join(old)]
+    r = subprocess.run(args, capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        raise RuntimeError(f"vcc task update failed: {(r.stderr or r.stdout).strip()[-300:]}")
+    for name in held:
+        vcc("task", "unassign", key, "--agent", name, check=False)
+    store().release(key)
+    if section != t.get("section"):
+        vcc("task", "move", key, "--section", section)
+    free_claim(key)
+    note(key, f"TOO HARD, brain {', '.join(old) or 'none'} -> {new}: {why.strip()} {', '.join(held) or 'The runner'} released it; "
+              f"the owner pin is gone, so a stronger runner takes it next. Escalation, not an abandonment.")
+    return "DONE " + plan
+
+
 # ---------------------------------------------------------------- one-time sweep
 
 def run_lines(path):
@@ -495,6 +554,43 @@ def self_test():
             raise AssertionError("an unreadable blocker must refuse hand-back")
         assert not any(c.args[:2] == ("task", "unassign") for c in api.call_args_list)
     print("fleet/park completed-blocker owner-resume regression ok")
+    assert next_brain(["Bug", "brain-light"]) == (["brain-light"], "brain-medium")
+    assert next_brain(["brain-medium"]) == (["brain-medium"], "brain-hard")
+    assert next_brain(["brain-hard"]) == (["brain-hard"], "brain-extra-hard")
+    assert next_brain(["brain-extra-hard"]) == (["brain-extra-hard"], None), "nothing above extra-hard"
+    assert next_brain(["Bug"]) == ([], "brain-hard"), "no tag is the medium brain"
+    got = park_too_hard("HTPR-1", "billing and sign-in together", labels=["Bug", "brain-medium"], dry=True)
+    assert got.startswith("DRY RUN") and "brain-medium -> brain-hard" in got, got
+    assert "extra-hard" in park_too_hard("HTPR-1", "x", labels=["brain-extra-hard"], dry=True)
+    try:
+        park_too_hard("HTPR-1", " ", labels=["brain-medium"], dry=True)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("TOO HARD needs a reason")
+    import tempfile
+    from ticket_owner import Owners
+    state = Path(tempfile.mkdtemp())
+    roster = state / "roster.json"
+    roster.write_text('{"runners": 5}')
+    owners = Owners(state, roster)
+    owners.bind("HTPR-1", 4)
+    assert owners.read("HTPR-1")["runner"] == 4 and owners.release("HTPR-1") and owners.read("HTPR-1") is None
+    assert owners.release("HTPR-1") is False, "a second release finds nothing"
+    live = []
+    with patch(__name__ + ".subprocess.run") as run, patch(__name__ + ".vcc", side_effect=lambda *a, **k: live.append(a) or {"success": True}), \
+            patch(__name__ + ".note") as posted, patch(__name__ + ".free_claim"), patch(__name__ + ".store", return_value=owners):
+        run.return_value.returncode = 0
+        owners.bind("HTPR-1", 4)
+        t2 = {"projectId": 15, "section": "In Progress", "title": "x", "pullRequests": [], "labels": [{"name": "brain-medium"}, {"name": "Bug"}],
+              "assignees": [{"agent": {"displayName": "Runner 4"}}]}
+        out = park_too_hard("HTPR-1", "billing and sign-in together", t=t2)
+        cmd = run.call_args.args[0]
+        assert cmd[:4] == ["vcc", "task", "update", "HTPR-1"] and "brain-hard" in cmd and "brain-medium" in cmd, cmd
+        assert ("task", "unassign", "HTPR-1", "--agent", "Runner 4") in live and ("task", "move", "HTPR-1", "--section", "Backlog") in live, live
+        assert owners.read("HTPR-1") is None, "the owner pin is gone"
+        assert "brain-medium -> brain-hard" in posted.call_args.args[1] and out.startswith("DONE")
+    print("fleet/park too-hard brain bump ok")
     print("fleet/park self-test ok")
 
 
@@ -527,7 +623,7 @@ def main():
         return sweep(apply, forced)
     key = a[0]
     if not TICKET.match(key) or len(a) < 2:
-        sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\" | --lead --why TEXT")
+        sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\" | --too-hard \"why\" | --lead --why TEXT")
     try:
         if a[1] == "--waits-on" and len(a) > 2:
             print(park_waits(key, [x for x in a[2].split(",") if x]))
@@ -540,11 +636,14 @@ def main():
             print(park_release(key))
         elif a[1] == "--hand-back" and len(a) > 2:
             print(park_hand_back(key, " ".join(a[2:])))
+        elif a[1] == "--too-hard" and len(a) > 2:
+            labels = a[a.index("--labels") + 1].split(",") if "--labels" in a else None
+            print(park_too_hard(key, a[2], dry="--dry-run" in a, labels=labels))
         elif a[1] == "--lead":
             why = a[a.index("--why") + 1] if "--why" in a else "unknown state"
             print(park_lead(key, why))
         else:
-            sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\" | --lead --why TEXT")
+            sys.exit("usage: fleet/park <TICKET> --waits-on T1,T2 | --valentin [--comment ID] | --unstarted | --release | --hand-back \"what is left\" | --too-hard \"why\" | --lead --why TEXT")
     except RuntimeError as e:
         sys.exit(f"fleet/park: {e}")
 
