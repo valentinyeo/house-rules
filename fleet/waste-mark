@@ -123,7 +123,8 @@ class Board:
     def get(self, key):
         t = vcc("task", "get", key)["tasks"][0]
         names = [(x.get("name") if isinstance(x, dict) else str(x)) for x in t.get("labels") or []]
-        return {"key": t.get("ticketNumber") or key, "labels": names, "section": t.get("section"), "status": t.get("status"), "board": t.get("projectId")}
+        return {"key": t.get("ticketNumber") or key, "labels": names, "section": t.get("section"), "status": t.get("status"), "board": t.get("projectId"),
+                "open_pr": any((p.get("lifecycle") == "open") for p in t.get("pullRequests") or [])}
 
     def ensure_label(self, board):
         if board not in self.has_label:
@@ -152,8 +153,10 @@ def sweep(rows, since, board, dry=False, save=None):
         except Exception as e:
             errors.append(f"{key}: {e}")
             continue
-        if LABEL in t["labels"] or t["status"] != "Normal" or t["section"] not in COLUMNS.get(t["board"], ()):
-            since[key] = newest  # already marked, archived or out of the pool's columns: the next streak counts from here
+        # An open PR means the ticket is in the PR pipeline: the merge script and the picker's red/48h-idle rules own it, and its
+        # runs park while CI runs (the ledger source says board or orphan, not pr). Waiting on CI is not a wasted run.
+        if LABEL in t["labels"] or t["status"] != "Normal" or t["section"] not in COLUMNS.get(t["board"], ()) or t.get("open_pr"):
+            since[key] = newest  # already marked, archived, out of the pool's columns or waiting on an open PR: the next streak counts from here
             save and not dry and save(since)
             continue
         name = t.get("key") or key  # the ledger may hold an old prefix (IGSH-1274 is SOFT-1274 now): the board knows only the new one
@@ -233,14 +236,18 @@ def self_test():
                   "E-5": ticket(section="Done"), "F-6": ticket(),
                   "H-8": ticket(section="Agent Blocked", board=11514), "I-9": ticket(status="Archive"),
                   "J-1": ticket(key="K-2")})
+    rows += run("PR-1", "PARKED", 4, t0=0)
+    rows.sort(key=lambda r: r["ts"])
+    board.tickets["PR-1"] = ticket(open_pr=True)
     saves = []
     lines, since, errors = sweep(rows, {}, board, save=lambda m: saves.append(dict(m)))
-    assert [len(m) for m in saves] == [1, 2, 3, 4, 5, 6], saves              # the stamp is saved after every settled ticket
+    assert [len(m) for m in saves] == [1, 2, 3, 4, 5, 6, 7], saves              # the stamp is saved after every settled ticket
     marked = {l.split()[1] for l in lines}
     assert marked == {"A-1", "D-4", "K-2"}, lines     # 3 mark; 2 does not; BUILDING resets; Done ticket skipped; renamed ticket
     assert not errors and board.added == ["A-1", "D-4", "K-2"] and [k for k, _ in board.notes] == ["A-1", "D-4", "K-2"]
     assert "4 runs" in lines[1] and "opencode" in lines[1] and lines[1].count("same reason") == 1, lines[1]
     assert not {"E-5", "H-8", "I-9"} & marked and all(since[k] for k in ("E-5", "H-8", "I-9"))  # Done, Agent Blocked, archived: stamp only
+    assert "PR-1" not in marked and since["PR-1"]                   # open PR: parked runs while CI runs are not wasted
     assert "F-6" not in marked                                      # DONE after three empty runs reset the streak
 
     again, since2, _ = sweep(rows, since, board)                    # a second tick: nothing, no second label or note
