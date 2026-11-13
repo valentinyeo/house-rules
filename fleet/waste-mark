@@ -6,7 +6,7 @@ ticket needs to obviously be examined". Codex ended 1,871 runs 8 to 13 Nov and 1
 times in one day.
 
 Data shape: fleet/runner writes one line per ended run to the run ledger (ts, runner, ticket, engine, state, reason, detail).
-Per ticket, the run ends since its last progress (state BUILDING or DONE) are the streak. A run that ends WAIT_CHECK, FAULT
+Per ticket, the run ends since its last progress (state BUILDING or DONE) are the streak. A run with source "pr" (open PR, checks running) is waiting, never empty. A run that ends WAIT_CHECK, FAULT
 or PARKED is empty. Idle states and a run with no ticket are neither empty nor progress and are ignored. Three or more empty
 ends in a row, none of them before the "since" stamp kept for the ticket, mark it:
   - label "Wasted Runs" added through vcc (created on the board first when missing)
@@ -69,7 +69,7 @@ def streaks(rows, since):
         key = r["ticket"]
         if state in PROGRESS:
             run[key] = []
-        elif state in EMPTY:
+        elif state in EMPTY and r.get("source") != "pr":  # source "pr": open PR, checks running, runner waits for its recheck: not wasted
             run[key].append(r)
     return {k: [r for r in v if r["ts"] > since.get(k, "")] for k, v in run.items()}
 
@@ -217,7 +217,8 @@ def self_test():
     def ticket(**kw):
         return {"labels": [], "section": "In Progress", "status": "Normal", "board": 15, **kw}
 
-    rows = (run("A-1", "WAIT_CHECK", 3) + run("B-2", "FAULT", 2, t0=10) + run("C-3", "WAIT_CHECK", 2, t0=20)
+    pr_wait = [dict(x, source="pr") for x in run("P-9", "WAIT_CHECK", 4)]
+    rows = (pr_wait + run("A-1", "WAIT_CHECK", 3) + run("B-2", "FAULT", 2, t0=10) + run("C-3", "WAIT_CHECK", 2, t0=20)
             + [{"ts": "2026-11-13T00:30:00Z", "ticket": "C-3", "state": "BUILDING", "engine": "codex", "reason": ""}]
             + run("C-3", "PARKED", 2, t0=31) + run("D-4", "PARKED", 4, "opencode", "same reason", t0=40)
             + [{"ts": "2026-11-13T00:50:00Z", "ticket": "", "state": "IDLE_NO_TICKET"},
