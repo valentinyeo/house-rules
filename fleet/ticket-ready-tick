@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Hourly ticket-ready tick (HYCI-396). A script reads; a model wakes only for what the script cannot repair.
+
+Valentin, 14 Nov: "you need to review the tickets every hour at least to basically make sure that any new ticket is actually
+written in a way where it's doable to do it in one run."
+
+1. Read every pickable ticket of boards 15, 2060 and 11514 (skills/hypertask-triage/scripts/ticket-ready, no model) and write
+   ~/.local/state/fleet/ticket-ready.json. fleet/pick judges each ticket itself, so this file is for the page, the brief and
+   the fixer; the picker does not wait on it.
+2. Not Ready for a reason a script cannot fix (multi-step, needs Valentin, no done line, too vague): hand the first BUDGET
+   of them, most urgent first, to one Sonnet fixer through bin/job. Not Ready only for a BlockedBy or a missing brain tag
+   is not handed over: the blocker ships, bin/brain-tagger tags.
+3. A ticket handed over is left alone for HANDED_HOURS, and after MAX_TRIES tries it waits for a person (listed, not retried).
+4. One fixer at a time (job active). Each hand-over is one line in goal/decisions.jsonl.
+
+usage:
+  ticket-ready-tick                 the hourly run
+  ticket-ready-tick --dry-run       read the boards, print the brief and the job command, change nothing
+  ticket-ready-tick --log TICKET ACTION TEXT     the fixer's own line in goal/decisions.jsonl
+  ticket-ready-tick --self-test
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+
+HOME = Path.home()
+HERE = Path(__file__).resolve().parent
+if not (HERE / "briefs").is_dir():
+    HERE = Path(os.environ.get("FLEET_HOME", HOME / ".local/share/house-rules/fleet"))
+READY = HERE.parent / "skills/hypertask-triage/scripts/ticket-ready"
+STATE = Path(os.environ.get("TICKET_READY_TICK_STATE", HOME / ".local/state/fleet"))
+HANDED = STATE / "ticket-ready-handed.json"
+BRIEF_OUT = STATE / "ticket-fixer-brief.txt"
+JOB = Path(os.environ.get("TICKET_READY_JOB", HOME / "projects/poteto-2-advisor/bin/job"))
+DECISIONS = Path(os.environ.get("TICKET_READY_DECISIONS", HOME / "projects/poteto-2-advisor/goal/decisions.jsonl"))
+LOGDIR = HOME / ".local/state/fleet-watch"
+BUDGET = 10          # tickets per hour
+HANDED_HOURS = 6     # a ticket handed over rests this long before it is judged again
+MAX_TRIES = 3        # then it waits for a person
+JOB_NAME = "ticket-ready"
+TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def load():
+    loader = SourceFileLoader("ticket_ready", str(READY))
+    mod = module_from_spec(spec_from_loader("ticket_ready", loader))
+    loader.exec_module(mod)
+    return mod
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def stamp(t=None):
+    return (t or now()).strftime(TIME_FORMAT)
+
+
+def parse(text):
+    return dt.datetime.strptime(text, TIME_FORMAT).replace(tzinfo=dt.timezone.utc)
+
+
+def read_json(path, default):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path, doc):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}")
+    tmp.write_text(json.dumps(doc, indent=1))
+    os.replace(tmp, path)
+
+
+def decide(res, handed, tr, at=None):
+    """(tickets to hand over, tickets waiting for a person, pruned handed record). Pure: the self-test drives it."""
+    at = at or now()
+    fix = tr.fixable(res)
+    handed = {k: v for k, v in handed.items() if k in fix}  # fixed, moved or archived tickets drop out
+    rest, waiting, take = dt.timedelta(hours=HANDED_HOURS), [], []
+    for k in fix:
+        h = handed.get(k)
+        if h and h.get("tries", 0) >= MAX_TRIES:
+            waiting.append(k)
+        elif h and at - parse(h["at"]) < rest:
+            continue
+        elif len(take) < BUDGET:
+            take.append(k)
+    return take, waiting, handed
+
+
+def table(res, keys):
+    lines = []
+    for k in keys:
+        v = res[k]
+        why = "; ".join(f"{c}: {v['why'][c]}" for c in v["codes"])
+        lines.append(f"- {k} | board {v['board']} | {v['section']} | {v.get('priority') or 'Medium'} | {v['title']}\n    {why}")
+    return "\n".join(lines)
+
+
+def brief(res, keys):
+    return (HERE / "briefs/ticket-fixer.txt").read_text().replace("{{TICKETS}}", table(res, keys))
+
+
+def decision_line(**row):
+    DECISIONS.parent.mkdir(parents=True, exist_ok=True)
+    with open(DECISIONS, "a") as f:
+        f.write(json.dumps({"ts": stamp(), "job": JOB_NAME, **row}) + "\n")
+
+
+def job(*args):
+    return subprocess.run([sys.executable, str(JOB), *args], capture_output=True, text=True)
+
+
+def run(dry):
+    tr = load()
+    res = tr.verdicts(tr.read_boards(list(tr.COLUMNS)))
+    if not dry:
+        tr.write_state(res)
+    c = tr.counts(res)
+    handed = read_json(HANDED, {})
+    take, waiting, handed = decide(res, handed, tr)
+    fixable = tr.fixable(res)
+    print(f"ticket-ready: {c['ready']} Ready, {c['not_ready']} Not Ready of {c['total']}; "
+          + ", ".join(f"{tr.TITLES[k]} {n}" for k, n in c["by_reason"].items())
+          + f"; fixer queue {len(fixable)}, handing over {len(take)}, waiting for a person {len(waiting)}")
+    if not dry:
+        job("fact", JOB_NAME, "ready_fixable", str(len(fixable)), "1" if not fixable else "0",
+            f"{len(fixable)} tickets Not Ready for a reason only a model can fix; {c['not_ready']} Not Ready in all of {c['total']}")
+    if not take:
+        if not dry:
+            write_json(HANDED, handed)
+        return 0
+    text = brief(res, take)
+    brief_file = BRIEF_OUT if not dry else Path(tempfile.gettempdir()) / "ticket-fixer-brief.dry.txt"
+    brief_file.parent.mkdir(parents=True, exist_ok=True)
+    brief_file.write_text(text)
+    cmd = [sys.executable, str(JOB), "wake", JOB_NAME, "--purpose",
+           "make each Not Ready ticket fit one run, or send it to Valentin with one Question",
+           "--brief-file", str(brief_file), "--fact", "ready_fixable", "--value", str(len(fixable)), "--floor", "2",
+           "--cwd", str(HERE.parent), "--log", str(LOGDIR / f"ticket-fixer-{now().strftime('%Y%m%dT%H%M')}.log")]
+    if dry:
+        print("\n--- brief the fixer would get ---\n" + text + "\n--- job command ---\n" + " ".join(cmd))
+        return 0
+    if job("active", JOB_NAME).returncode == 0:
+        print("ticket-ready: a fixer is already running, none started")
+        write_json(HANDED, handed)
+        return 0
+    LOGDIR.mkdir(parents=True, exist_ok=True)
+    done = subprocess.run(cmd, capture_output=True, text=True)
+    if done.returncode:
+        print(f"ticket-ready-tick: job wake failed (exit {done.returncode}): {(done.stderr or done.stdout).strip()[-400:]}",
+              file=sys.stderr)
+        return done.returncode
+    for k in take:
+        handed[k] = {"at": stamp(), "tries": handed.get(k, {}).get("tries", 0) + 1, "codes": res[k]["codes"]}
+    write_json(HANDED, handed)
+    decision_line(by="ticket-ready-tick", handed=take, codes={k: res[k]["codes"] for k in take},
+                  reason=f"{len(take)} tickets cannot ship in one run as written; one Sonnet fixer woken (budget {BUDGET} an hour)")
+    if waiting:
+        print(f"ticket-ready: {len(waiting)} tickets tried {MAX_TRIES} times and still Not Ready, waiting for a person: "
+              + ", ".join(waiting[:15]))
+    return 0
+
+
+def self_test():
+    global DECISIONS
+    tr = load()
+
+    def row(name, codes, prio="Medium", board="15"):
+        return {"board": board, "title": "t " + name, "section": "Backlog", "updated": None, "ready": not codes, "codes": codes,
+                "why": {c: "because" for c in codes}, "priority": prio}
+
+    res = {"HTPR-1": row("HTPR-1", ["multi-step"], "Low"), "HTPR-2": row("HTPR-2", ["blocked"]), "HTPR-3": row("HTPR-3", []),
+           "HTPR-4": row("HTPR-4", ["brain-tag"]), "HTPR-5": row("HTPR-5", ["no-done", "blocked"], "Urgent"),
+           "HYCI-6": row("HYCI-6", ["needs-valentin"], "High", "11514")}
+    take, waiting, pruned = decide(res, {}, tr)
+    assert take == ["HTPR-5", "HYCI-6", "HTPR-1"], take  # Urgent first; blocked-only, brain-only and Ready are not handed over
+    at = now()
+    fresh = {"HTPR-5": {"at": stamp(at - dt.timedelta(hours=1)), "tries": 1},
+             "HTPR-1": {"at": stamp(at - dt.timedelta(hours=7)), "tries": 1}, "GONE-9": {"at": stamp(at), "tries": 2}}
+    take, waiting, pruned = decide(res, fresh, tr, at)
+    assert take == ["HYCI-6", "HTPR-1"] and waiting == [] and "GONE-9" not in pruned, (take, waiting, pruned)
+    spent = {"HTPR-1": {"at": stamp(at - dt.timedelta(hours=9)), "tries": MAX_TRIES}}
+    take, waiting, _ = decide(res, spent, tr, at)
+    assert "HTPR-1" not in take and waiting == ["HTPR-1"], (take, waiting)
+    many = {f"HTPR-{i}": row(f"HTPR-{i}", ["multi-step"]) for i in range(100, 130)}
+    take, _, _ = decide(many, {}, tr)
+    assert len(take) == BUDGET, len(take)
+    text = brief(res, ["HTPR-5", "HYCI-6"])
+    assert "{{TICKETS}}" not in text and "- HTPR-5 | board 15 | Backlog | Urgent | t HTPR-5\n    no-done: because; blocked: because" in text, text[-400:]
+    assert "ticket-ready --ticket" in text and "never Valentin's login" in text and "BlockedBy" in text
+    saved = DECISIONS
+    with tempfile.TemporaryDirectory() as d:
+        DECISIONS = Path(d) / "goal/decisions.jsonl"
+        decision_line(by="self-test", handed=["HTPR-5"])
+        rec = json.loads(DECISIONS.read_text())
+        assert rec["job"] == JOB_NAME and rec["handed"] == ["HTPR-5"] and rec["ts"].endswith("Z"), rec
+    DECISIONS = saved
+    print("ticket-ready-tick self-test ok: queue order, rest and tries, pruning, budget, brief, decisions line")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--log", nargs=3, metavar=("TICKET", "ACTION", "TEXT"))
+    ap.add_argument("--self-test", action="store_true")
+    a = ap.parse_args()
+    if a.self_test:
+        return self_test()
+    if a.log:
+        ticket, action, text = a.log
+        decision_line(by="ticket fixer", ticket=ticket, action=action, reason=text)
+        return 0
+    return run(a.dry_run)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

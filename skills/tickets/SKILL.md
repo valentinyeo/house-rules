@@ -141,5 +141,7 @@ Then a fresh reviewer (spec + diff only) checks it.
 A verifier tests the user flows end to end.
 Subtasks under a feature are that runner's checklist.
 Helpers only review, test or look up. Never build part of a feature.
+
+Too big for one run? Split it before it is picked, never across runners at once. Each part is its own one-run ticket with one Done when line, linked BlockedBy the part before it, so one runner takes one part at a time. `ticket-ready` marks a ticket Not Ready when it has several deliverables, and `fleet/pick` skips it until the ticket is split or shortened (house rules, 14 Nov, HYCI-396).
 Many small tickets only for independent bugs or polish.
 Max one open PR per runner. Open PRs never exceed runner count.

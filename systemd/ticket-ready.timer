@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the ticket readiness check every hour at quarter past
+
+[Timer]
+OnCalendar=*:15
+Persistent=false
+
+[Install]
+WantedBy=timers.target

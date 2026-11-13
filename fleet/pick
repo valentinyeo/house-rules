@@ -88,6 +88,33 @@ if not (HERE / "briefs").is_dir():
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ticket_owner import Owners
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+
+
+def load_ticket_ready():
+    """skills/hypertask-triage/scripts/ticket-ready: the one definition of a ticket that fits one run (HYCI-396).
+    None when it cannot be loaded, so the picker never stops on it."""
+    for base in (HERE.parent, Path(__file__).resolve().parent.parent):
+        path = base / "skills/hypertask-triage/scripts/ticket-ready"
+        if path.is_file():
+            try:
+                loader = SourceFileLoader("ticket_ready", str(path))
+                mod = module_from_spec(spec_from_loader("ticket_ready", loader))
+                loader.exec_module(mod)
+                return mod
+            except Exception:
+                return None
+    return None
+
+
+TICKET_READY = load_ticket_ready()
+# 14 Nov, Valentin: "make sure that any new ticket is actually written in a way where it's doable to do it in one run."
+# A Not Ready ticket is skipped (log "not-ready: KEY reason"). This file switches the skip off; the log line stays.
+READY_OFF = Path(os.environ.get("FLEET_READY_OFF", Path.home() / ".local/state/fleet/ticket-ready.off"))
+# pick never judges these: it holds its own BlockedBy check (relations) and the brain tag has its own tagger, so a ticket
+# waiting for either is not a "not ready" ticket in the picker's log
+READY_SKIP_CODES = ("blocked",)
 
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
 STATE = Path(os.environ.get("FLEET_PICK_STATE", HOME / ".local/state/fleet-pick"))
@@ -341,6 +368,17 @@ def build_need(text):
     return next((why for rx, why in BUILD_NEED if rx.search(flat)), "")
 
 
+def not_ready_reasons(raw):
+    """HYCI-396: why a ticket cannot ship in one run, as "code: why" strings; [] when it can, when the record carries no
+    description (never read), or when ticket-ready cannot run. Never raises."""
+    if TICKET_READY is None or "description" not in raw:
+        return []
+    try:
+        return [f"{r['code']}: {r['why']}" for r in TICKET_READY.assess(raw)["reasons"] if r["code"] not in READY_SKIP_CODES]
+    except Exception:
+        return []
+
+
 def slim(t, board):
     holders = []
     for a in t.get("assignees") or []:
@@ -357,6 +395,7 @@ def slim(t, board):
                                                 or t.get("blockerCommentId")),
             "subs": bool(t.get("sub_tasks")), "paid": "paid" in (t.get("description") or "").lower(),
             "needs": build_need((t.get("title") or "") + " " + (t.get("description") or "")),
+            "ready": not_ready_reasons(t),
             "created": t.get("createdAt") or "", "updated": t.get("updatedAt") or ""}
 
 
@@ -932,6 +971,31 @@ def cannot_build(t):
     return "" if pr_ticket_for(t["key"]) else why
 
 
+READY_LOG_MAX = 15
+READY_SEEN = {}  # key -> reason, once per pick
+
+
+def ready_reason(t):
+    """HYCI-396: a ticket that cannot ship in one run is not offered. One log line per ticket per pick, the first
+    READY_LOG_MAX named and the rest counted by ready_summary. The off file keeps the line and drops the skip."""
+    why = t.get("ready") or []
+    if not why:
+        return None
+    detail = "; ".join(why)
+    if t["key"] not in READY_SEEN:
+        READY_SEEN[t["key"]] = detail
+        if len(READY_SEEN) <= READY_LOG_MAX:
+            log(f"not-ready: {t['key']} {detail}")
+    return None if READY_OFF.exists() else "not ready: " + detail
+
+
+def ready_summary():
+    """The one counting line after the new-work loop when more tickets were skipped than were named."""
+    if len(READY_SEEN) > READY_LOG_MAX:
+        log(f"not-ready: {len(READY_SEEN)} tickets skipped in all, {READY_LOG_MAX} named above"
+            + (" (off file present: logged only)" if READY_OFF.exists() else ""))
+
+
 def eligible_reason(t):
     """Why a runner may not start this ticket from its new-work column, or None when it may."""
     labels = set(t["labels"])
@@ -950,6 +1014,9 @@ def eligible_reason(t):
     need = cannot_build(t)
     if need:
         return "cannot be built yet: " + need
+    nr = ready_reason(t)
+    if nr:
+        return nr
     if t["board"] == "2060":
         return sf_reason(t)
     if t["board"] == "15" and not is_ci(t):
@@ -2526,6 +2593,7 @@ def choose(n, dry):
             note(t["key"], why)
         else:
             new.append(t)
+    ready_summary()
     new.sort(key=lambda t: (rank(t), t["created"]))
     focus = focus_projects(n)
     if focus:
@@ -3012,6 +3080,60 @@ def not_now_self_test():
         DEAD.pop("SOFT-2231", None)
 
 
+def ticket_ready_self_test():
+    """HYCI-396: a ticket that cannot ship in one run is not offered; one that can is; unread, incident and blocked-only
+    tickets are not judged here; the off file keeps the log line and drops the skip; the column table matches ticket-ready's."""
+    global log, READY_OFF
+    import tempfile
+    assert TICKET_READY is not None, "ticket-ready did not load"
+    assert {b: tuple(c[0]) for b, c in BOARDS.items()} == {b: tuple(c) for b, c in TICKET_READY.COLUMNS.items()}, \
+        "ticket-ready reads the same new-work columns as the picker"
+    good = ("<h2>Problem</h2><p>The board header hides the ticket count on small screens, so people cannot see how full a column is.</p>"
+            "<h2>Fix</h2><p>Show the count next to the column name at every width.</p>"
+            "<h2>Done when</h2><ul><li><p>The count shows on a phone-sized screen.</p></li></ul><h2>Decision</h2><p>None.</p>")
+    raw = {"ticketNumber": "HTPR-1", "uniqueIndex": 1, "title": "Show the ticket count on small screens", "description": good,
+           "labels": [{"name": "brain-medium"}], "section": "Backlog", "sub_tasks": [], "blockingTasks": []}
+    saved_log, saved_off, lines = log, READY_OFF, []
+    log = lines.append
+    try:
+        READY_OFF = Path("/nonexistent/ticket-ready.off")
+        READY_SEEN.clear()
+        t = slim(raw, "15")
+        assert t["ready"] == [] and eligible_reason(t) is None, "a one-run ticket is offered"
+        plan = slim(dict(raw, ticketNumber="HTPR-2", sub_tasks=[{}] * 9), "15")
+        assert plan["ready"] and plan["ready"][0].startswith("multi-step: "), plan["ready"]
+        assert eligible_reason(plan).startswith("not ready: multi-step"), "a plan is not offered"
+        assert eligible_reason(plan) and lines == [f"not-ready: HTPR-2 {plan['ready'][0]}"], lines
+        eligible_reason(plan)
+        assert len(lines) == 1, "one log line per ticket"
+        assert eligible_reason(slim(dict(raw, ticketNumber="HTPR-3", labels=[]), "15")).startswith("not ready: brain-tag"), \
+            "no brain tag: held until the tagger runs"
+        assert eligible_reason(slim(dict(raw, ticketNumber="HTPR-4", labels=[{"name": "incident"}], sub_tasks=[{}] * 9), "15")) is None, \
+            "an incident always runs"
+        blocked_only = slim(dict(raw, ticketNumber="HTPR-5", blockingTasks=[{"ticketNumber": "HTPR-9", "status": "Normal", "section": "Backlog"}]), "15")
+        assert blocked_only["ready"] == [], "BlockedBy is the picker's own check, not ticket-ready's"
+        unread = slim({"ticketNumber": "HTPR-6", "uniqueIndex": 6, "title": "x", "section": "Backlog"}, "15")
+        assert unread["ready"] == [] and eligible_reason(unread) is None, "a record with no description is not judged"
+        assert eligible_reason(dict(plan, section="In Progress")) == "not in a new-work column", "a started ticket keeps its runner"
+        READY_SEEN.clear()
+        del lines[:]
+        for i in range(20):
+            eligible_reason(dict(plan, key=f"HTPR-{100 + i}"))
+        assert len(lines) == READY_LOG_MAX, "the log names the first READY_LOG_MAX"
+        ready_summary()
+        assert lines[-1] == f"not-ready: 20 tickets skipped in all, {READY_LOG_MAX} named above", lines[-1]
+        with tempfile.TemporaryDirectory() as d:
+            READY_OFF = Path(d) / "off"
+            READY_OFF.write_text("")
+            READY_SEEN.clear()
+            del lines[:]
+            assert eligible_reason(plan) is None and lines == [f"not-ready: HTPR-2 {plan['ready'][0]}"], \
+                "off file: the ticket is offered again, the line stays"
+    finally:
+        log, READY_OFF = saved_log, saved_off
+        READY_SEEN.clear()
+
+
 def one_run_self_test():
     """One ticket, one run, one PR: pending or green checks hold the ticket from every lane once the flag file exists; red,
     conflicting, change-requested, draft, unread, incident and stalled PRs are never held; off, the skip is only logged."""
@@ -3362,7 +3484,8 @@ def self_test():
     one_run_self_test()
     sf_release_self_test()
     not_now_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, 38 wait-gate checks, not-now skip")
+    ticket_ready_self_test()
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, 38 wait-gate checks, not-now skip, not-ready skip")
 
 
 def escalate_self_test():

@@ -9,6 +9,9 @@ No cap on filing (Valentin, 8 Nov: "A cap doesn't really make sense for CI and i
 filed, then reviewed; pileup-watch archives what goes stale.
 Board 4060 (old Fleet Infra) is archived (Valentin, 8 Nov): a ticket for it is refused, file on 11514.
 A ticket labelled Incident skips both: outage filers (production-red-alert, fleet-watch) keep their own dedupe.
+Every pickable board (15, 2060, 11514): a new ticket that ticket-ready would call Not Ready (HYCI-396) gets a warning on stderr
+with the reasons. The warning never blocks and makes no network call. It reads the description from --description or
+--description-file only.
 Any other board, or any other command: allowed, no network call.
 A board read that fails lets the ticket through with a warning, so a rate limit never blocks an outage.
 
@@ -62,6 +65,16 @@ def create_args(argv):
     return board, flags.get("title", [""])[-1], labels
 
 
+def ready_warning(argv):
+    """ticket-ready's warning for a new ticket that would be Not Ready, or "". Never raises: a broken check lets the ticket through."""
+    try:
+        ready = importlib.machinery.SourceFileLoader("ticket_ready", os.path.join(HERE, "ticket-ready")).load_module()
+        return ready.check_create(argv)
+    except Exception as e:  # noqa: BLE001
+        print(f"filing-gate: ticket-ready check skipped ({type(e).__name__}: {e})", file=sys.stderr)
+        return ""
+
+
 def numbers(title):
     return set(re.findall(r"\d+", title))
 
@@ -89,6 +102,10 @@ def main():
     if parsed and parsed[0] in RETIRED and "incident" not in parsed[2]:
         print(f"REFUSE board {parsed[0]} is archived: file on board {RETIRED[parsed[0]]} (Fleet CI & Infra)")
         return REFUSE
+    if parsed:
+        warning = ready_warning(args)
+        if warning:
+            print(warning, file=sys.stderr)
     if not parsed or parsed[0] not in BOARDS:
         return 0
     board, title, labels = parsed
