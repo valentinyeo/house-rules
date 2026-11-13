@@ -150,6 +150,14 @@ CI_LABELS = {"ci", "hypertask ci"}
 BASE_SKIP = set()
 WASTED = "wasted runs"  # fleet/waste-mark adds it after three empty runs in a row; every lane leaves the ticket for its owner
 WASTED_WHY = "wasted runs: examine the ticket"
+# 13 Nov, Valentin: "whatever is in there is not being touched by the runners". A ticket in the Not now column, on any board, is
+# parked by Valentin: no lane takes it, its open PR is not offered, and it does not count toward the pipeline. The pick columns
+# never list that column; these guards also cover a ticket read by key (the ticket of a PR) and any column that is renamed later.
+NOT_NOW = "not now"
+
+
+def in_not_now(t):
+    return (t.get("section") or "").strip().lower() == NOT_NOW
 # HYCI-352: a ticket on Fleet CI & Infra labelled Stop Fix fixes the cause of the factory stop itself, so the probe may run it
 # during a stop, one at a time across the pool. Any other 11514 ticket still waits for the stop to clear. Lower case: labels are read lower case.
 STOP_FIX = "stop fix"
@@ -390,6 +398,7 @@ def list_incidents():
                 break
         out += [slim(t, board) for t in rows
                 if TICKET.fullmatch(t.get("ticketNumber") or "") and not t.get("sectionIsDone")
+                and (t.get("section") or "").strip().lower() != NOT_NOW
                 and (t.get("status") or "Normal") == "Normal" and (t.get("section") or "").lower() not in INCIDENT_DONE]
     return out
 
@@ -569,7 +578,7 @@ def pc_waits():
 
 def skipped(t):
     """This runner's engine does not take t, or t waits on Valentin's PC while it is off."""
-    return bool(set(t["labels"]) & SKIP_ALL) or WASTED in t["labels"] or timed_out_here(t) or t["key"] in pc_waits()
+    return bool(set(t["labels"]) & SKIP_ALL) or WASTED in t["labels"] or in_not_now(t) or timed_out_here(t) or t["key"] in pc_waits()
 
 
 def hand_back_timeouts(n, dry):
@@ -774,6 +783,10 @@ def fetch_ticket(key):
         return None
     if t["board"] not in BOARDS:
         return None
+    if in_not_now(t):
+        log(f"not-now: {key}")
+        DEAD[key] = "not now: parked by Valentin"
+        return None
     # an archived or finished ticket has no work left, and ship-claim's domain admission refuses it every time (HYCI tickets
     # skip admission, so their open PRs stay offered)
     status = raw.get("status") or "Normal"
@@ -942,6 +955,8 @@ def cannot_build(t):
 def eligible_reason(t):
     """Why a runner may not start this ticket from its new-work column, or None when it may."""
     labels = set(t["labels"])
+    if in_not_now(t):
+        return "not now: parked by Valentin"
     if WASTED in labels:
         return WASTED_WHY
     if labels & SKIP_ALL:
@@ -2239,6 +2254,8 @@ def pipeline_reason(t, skip_brains, pr, rest=frozenset()):
     """Why t is not a unit of the pool's pipeline, or None when it is. A unit is work some lane that stays open under the
     cap can take (own, orphan, cross-qa, PR queue, finish), so a closed cap can always drain."""
     labels = set(t["labels"])
+    if in_not_now(t):
+        return "not now"
     if INCIDENT_LABEL in labels:
         return "incident"
     if WASTED in labels:
@@ -3022,6 +3039,37 @@ def wait_gate_self_test():
         _GATE.clear()
 
 
+def not_now_self_test():
+    """13 Nov, Valentin: a ticket in Not now is parked; runners never take it, on any board, by any lane."""
+    global SNAP, ht, log
+    base = {"key": "SOFT-1", "board": "2060", "idx": 1, "title": "x", "labels": [], "prio": "Urgent", "holders": [],
+            "waiting": False, "subs": False, "paid": False, "updated": "2026-01-01T00:00:00Z",
+            "created": "2026-01-01T00:00:00Z"}
+    parked, live = dict(base, section="Not now"), dict(base, section="Todo")
+    assert eligible_reason(live) is None, "the same ticket in Todo is new work"
+    assert eligible_reason(parked) == "not now: parked by Valentin" and skipped(parked) and not eligible_new(parked), \
+        "not now: no new-work lane takes it, Urgent or not"
+    assert pipeline_reason(parked, set(), True) == "not now", "not now: it is no unit of the pool's pipeline, even with an open PR"
+    assert eligible_reason(dict(parked, section="NOT NOW ", board="15", key="HTPR-1")) == "not now: parked by Valentin", \
+        "not now: any board, any case"
+    saved_snap, saved_ht, saved_log, lines = SNAP, ht, log, []
+    SNAP, log = {"tickets": [], "rel": {}, "prs": [], "incidents": []}, lines.append
+    row = {"ticketNumber": "SOFT-2231", "uniqueIndex": 2231, "projectId": 2060, "title": "x", "status": "Normal", "labels": [],
+           "section": "Not now"}
+    try:
+        ht = lambda *a: {"tasks": [row]}
+        assert fetch_ticket("SOFT-2231") is None and lines == ["not-now: SOFT-2231"] and SNAP["tickets"] == [], \
+            "not now: the ticket of an open PR is not read as work, so its draft or red PR is not offered"
+        assert DEAD["SOFT-2231"] == "not now: parked by Valentin"
+        ht = lambda *a: {"tasks": [dict(row, ticketNumber="HTPR-6", labels=[{"name": "incident"}])]}
+        assert list_incidents() == [], "not now: an incident ticket parked in Not now is not an incident to run"
+        ht = lambda *a: {"tasks": [dict(row, ticketNumber="HTPR-7", section="Doing", labels=[{"name": "incident"}])]}
+        assert [t["key"] for t in list_incidents()] == ["HTPR-7", "HTPR-7"], "an incident in a live column still counts"
+    finally:
+        SNAP, ht, log = saved_snap, saved_ht, saved_log
+        DEAD.pop("SOFT-2231", None)
+
+
 def one_run_self_test():
     """One ticket, one run, one PR: pending or green checks hold the ticket from every lane once the flag file exists; red,
     conflicting, change-requested, draft, unread, incident and stalled PRs are never held; off, the skip is only logged."""
@@ -3228,10 +3276,11 @@ def self_test():
     wait_self_test()
     wait_gate_self_test()
     one_run_self_test()
+    not_now_self_test()
     factory_stop_self_test()
     stage_self_test()
     print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, probe and restart steps, "
-          "38 wait-gate checks")
+          "38 wait-gate checks, not-now skip")
 
 
 def factory_stop_self_test():
