@@ -46,8 +46,9 @@ hands it to starts it again. A ticket a lead or another agent holds is not new w
 waiting on an agent (HYCI-276: a lead-parked board alarm came back to four runners).
 Wait gate (13 Nov): a ticket whose last run ended WAIT_CHECK, or FAULT naming CI, a PR or a blocker, is also held from every lane
 that reads resting() (own, orphan, kept slot, board, PR queue, incident, the pipeline count) until what it waits on changes: the PR
-head commit, review decision, mergeable state or check states, a BlockedBy ticket or its column, or the ticket itself (edited more
-than a minute after the end). The fingerprint is kept at the first pick after the end in STATE/wait-gate.json and read from data the
+head commit, review decision, mergeable state, or its checks (read as "running" until the last one finishes or one fails, so a
+check finishing under seven still running is not news), a BlockedBy ticket or its column, or the ticket itself (edited more than a
+minute after the end). The fingerprint is kept at the first pick after the end in STATE/wait-gate.json and read from data the
 pick already holds, so it costs no GitHub or board call. Cap 6 hours (Urgent 1 hour, incident 20 minutes); a wait with nothing to
 observe is held until its stated recheck time, else 30 minutes. Unreadable or late data, and any error, hold nothing.
 fleet/pick --replay-waits [DAYS] counts what it would have held in the run ledger. The park lane is not gated.
@@ -1129,7 +1130,8 @@ def gate_parts(key):
                 log(f"wait gate: open PR list unreadable ({str(e)[:60]}); PR part not compared")
         if SNAP["prs"] is not None:
             # GitHub sets every open PR to UNKNOWN for a while after each push to its base: only CONFLICTING counts as news
-            prs = sorted([p["number"], p.get("head"), p.get("review"), p.get("mergeable") == "CONFLICTING", p.get("checks")]
+            prs = sorted([p["number"], p.get("head"), p.get("review"), p.get("mergeable") == "CONFLICTING",
+                          gate_checks(p.get("checks"))]
                          for p in SNAP["prs"] if pr_ticket(p) == key)
     rel = SNAP.get("rel", {}).get(key)
     if rel is None:
@@ -1183,7 +1185,7 @@ def gate_verdict(t, when, row, base, parts, now):
     seen = base["parts"].get("pr"), base["parts"].get("blk")
     text = WAIT_PREFIX.sub("", str(row.get("reason", "")))
     # the wait names CI and the PR's checks had all finished when first read: the CI wait is over, a run has work to do
-    if seen[0] and not any("IN_PROGRESS" in c or "PENDING" in c or "QUEUED" in c for p in seen[0] for c in p[4] or []) \
+    if seen[0] and any((p[4] or [""])[0] == "finished" for p in seen[0]) \
             and WAIT_CI.search(text) and not re.search(r"review", text, re.I):
         return False, "checks already finished"
     if not seen[0] and not seen[1]:
@@ -1665,6 +1667,22 @@ def check_states(rollup):
     reads IN_PROGRESS or PENDING, so a finishing check changes the list."""
     return sorted({f"{c.get('name') or c.get('context') or '?'}={c.get('conclusion') or c.get('state') or c.get('status') or '?'}"
                    for c in rollup or []})
+
+
+RUNNING_CHECK = re.compile(r"=(?:IN_PROGRESS|PENDING|QUEUED|EXPECTED|WAITING|REQUESTED)$")
+FAILED_CHECK = re.compile(r"=(?:FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|ERROR|STARTUP_FAILURE)$")
+
+
+def gate_checks(checks):
+    """What a run can act on, not the raw list (HYCI-343). A check that finishes while seven still run changes the raw list
+    and woke the pool on a ticket with nothing to do: held reads "work still running" whatever finishes underneath. The part
+    moves only when a run has a reason to act: the last check finishes, or one fails."""
+    if checks is None:
+        return None
+    failed = sorted(c for c in checks if FAILED_CHECK.search(c))
+    if any(RUNNING_CHECK.search(c) for c in checks):
+        return ["running"] + failed
+    return ["finished"] + failed
 
 
 def open_prs():
@@ -2432,6 +2450,19 @@ def wait_gate_self_test():
             assert held() == set(), f"{why} lifts the hold"
             SNAP["prs"][0][field] = pr(1, "HTPR-1")[field]
             assert held() == set(), "the lift stays when the fingerprint flips back"
+        # HYCI-343: one of eight checks finishing is not news, and a wake per check transition is a run that burns
+        eight = [f"c{i}=IN_PROGRESS" for i in range(7)] + ["c7=SUCCESS"]
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1", checks=eight)])
+        assert held() == {"HTPR-1"}
+        SNAP["prs"][0]["checks"] = [f"c{i}=IN_PROGRESS" for i in range(6)] + ["c6=SUCCESS", "c7=SUCCESS"]
+        assert held() == {"HTPR-1"}, "a check finishing while six still run does not wake the pool"
+        SNAP["prs"][0]["checks"] = [f"c{i}=SUCCESS" for i in range(8)]
+        assert held() == set(), "checks that all finished lift the hold: a run has the merge to do"
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        assert held() == {"HTPR-1"}
+        SNAP["prs"][0]["checks"] = ["ci=FAILURE", "e2e=IN_PROGRESS"]
+        assert held() == set(), "a failed check lifts the hold while the rest still run"
+
         fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
         held()
         SNAP["prs"][0]["mergeable"] = "UNKNOWN"
@@ -2636,7 +2667,7 @@ def self_test():
     wait_self_test()
     wait_gate_self_test()
     factory_stop_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, 33 wait-gate checks")
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, 38 wait-gate checks")
 
 
 def factory_stop_self_test():
