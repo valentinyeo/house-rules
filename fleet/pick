@@ -56,7 +56,8 @@ head commit, review decision, mergeable state, or its checks (read as "running" 
 check finishing under seven still running is not news), a BlockedBy ticket or its column, or the ticket itself (edited more than a
 minute after the end). The fingerprint is kept at the first pick after the end in STATE/wait-gate.json and read from data the
 pick already holds, so it costs no GitHub or board call. Cap 6 hours (Urgent 1 hour, incident 20 minutes); a wait with nothing to
-observe is held until its stated recheck time, else 30 minutes. Unreadable or late data, and any error, hold nothing.
+observe is held until its stated recheck time, else 30 minutes. A run that built and left the ticket in AI Review or QA is held
+too while its PR's checks run at the first pick (canary HYCI-358: the next run only found them running). Unreadable or late data, and any error, hold nothing.
 fleet/pick --replay-waits [DAYS] counts what it would have held in the run ledger. The park lane is not gated.
 Cannot be built yet (HYCI-355): a new-work ticket that says it needs Valentin, a key only he or an admin can place, access,
 a design sign-off or a person at a PC is refused before any model starts ("cannot be built yet: <what>"). Text only, no
@@ -1174,6 +1175,16 @@ def wait_end(r):
     return bool(WAIT_FAULT.search(text))
 
 
+BUILT_PR_END = re.compile(r"\b(AI Review|QA)\b", re.I)
+
+
+def built_pr_end(r):
+    """A run that built and left its ticket in AI Review or QA (PR open). Its next run only merges, so it has nothing to do
+    until the PR's checks finish (canary HYCI-358, 13 Nov: DONE at 10:56, picked again at once, 135 s run, WAIT_CHECK on
+    still-running checks). Held only while the PR's checks read "running" at the first pick; see gate_verdict."""
+    return r.get("state") == "BUILDING" and bool(BUILT_PR_END.search(str(r.get("reason", ""))))
+
+
 def gate_cap(t):
     """How long a wait may be held, by ticket type."""
     if INCIDENT_LABEL in t["labels"]:
@@ -1246,6 +1257,10 @@ def gate_verdict(t, when, row, base, parts, now):
         if parts[name] is not None and base["parts"].get(name) is not None and parts[name] != base["parts"][name]:
             return False, f"{name} changed"
     seen = base["parts"].get("pr"), base["parts"].get("blk")
+    if built_pr_end(row):  # held only while a PR's checks run at the first look; no PR or finished checks: a run has work
+        if seen[0] and any((p[4] or [""])[0] == "running" for p in seen[0]):
+            return True, "held"
+        return False, "no checks running"
     text = WAIT_PREFIX.sub("", str(row.get("reason", "")))
     # the wait names CI and the PR's checks had all finished when first read: the CI wait is over, a run has work to do
     if seen[0] and any((p[4] or [""])[0] == "finished" for p in seen[0]) \
@@ -1282,7 +1297,7 @@ def wait_gate(dry, now=None):
                 last[key] = (when, r)
         state, dirty = gate_load(), False
         for key, (when, row) in last.items():
-            if not wait_end(row) or (now - when).total_seconds() > WAIT_GATE_CAP:
+            if not (wait_end(row) or built_pr_end(row)) or (now - when).total_seconds() > WAIT_GATE_CAP:
                 if key in state and not dry:
                     del state[key]
                     dirty = True
@@ -2668,6 +2683,18 @@ def wait_gate_self_test():
         assert held() == set(), "CI named as the wait but every check had finished at the first look: not held"
         fresh([wait("HTPR-1", 5, "RUNNER IDLE waiting on human review")], [tk("HTPR-1")], [pr(1, "HTPR-1", checks=("ci=SUCCESS",))])
         assert held() == {"HTPR-1"}, "a review wait with green checks is held until the review changes"
+        # a run that built and left the PR in AI Review waits for its checks (canary HYCI-358)
+        built = lambda key, m, reason="DONE AI Review": wait(key, m, reason, "BUILDING")
+        fresh([built("HTPR-1", 1)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        assert held() == {"HTPR-1"}, "a build that left running checks on its PR is held"
+        SNAP["prs"][0]["checks"] = ["ci=SUCCESS"]
+        assert held() == set(), "its checks finishing releases it"
+        fresh([built("HTPR-1", 1)], [tk("HTPR-1")], [pr(1, "HTPR-1", checks=("ci=SUCCESS",))])
+        assert held() == set(), "a build whose checks had finished is not held"
+        fresh([built("HTPR-1", 1)], [tk("HTPR-1")])
+        assert held() == set(), "a build with no PR is not held"
+        fresh([built("HTPR-1", 1, "DONE Done")], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        assert held() == set(), "a build that ended in another column is not a PR wait"
         # nothing to observe: the stated recheck time, else 30 minutes
         fresh([wait("HTPR-4", 5, f"RUNNER IDLE production deploy in flight, recheck {(now + dt.timedelta(minutes=30)).strftime('%H:%M')}Z")], [tk("HTPR-4")])
         assert held() == {"HTPR-4"} and held(now + dt.timedelta(minutes=29)) == {"HTPR-4"} and held(now + dt.timedelta(minutes=31)) == set(), \
