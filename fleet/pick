@@ -42,6 +42,9 @@ step 3 all; the log line "factory restart step K/3: N runner(s)" names the cap a
 Probe (HYCI-359): a stop that idles every runner cannot build the replay its own clear needs. While the record says stopped,
 one runner per plan (the step 1 cap) takes clean tickets: the log names it and a second runner on the same plan gets
 "none: factory stopped: R1; probe, 1 runner(s) per plan". bin/factory-breaker clears the stop itself at 90% of 10 runs.
+Stop fix (HYCI-352): the stop exists to fix each empty run at its source, so the probe may also take one open Fleet CI & Infra (11514)
+ticket labelled Stop Fix (the kept slot, any lane). One at a time across the pool; any other 11514 ticket still waits for the clear.
+The log line is "probe: stop fix <KEY>".
 One runner holds one ticket until it is live. brain-extra-hard runs on the codex engine (Sol high) or the claude engine (Opus high); every other engine skips it.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
@@ -136,6 +139,9 @@ CI_LABELS = {"ci", "hypertask ci"}
 BASE_SKIP = set()
 WASTED = "wasted runs"  # fleet/waste-mark adds it after three empty runs in a row; every lane leaves the ticket for its owner
 WASTED_WHY = "wasted runs: examine the ticket"
+# HYCI-352: a ticket on Fleet CI & Infra labelled Stop Fix fixes the cause of the factory stop itself, so the probe may run it
+# during a stop, one at a time across the pool. Any other 11514 ticket still waits for the stop to clear. Lower case: labels are read lower case.
+STOP_FIX = "stop fix"
 # HYCI-355: a ticket that says up front it cannot be built yet never starts a model. Valentin 2026-11-13: "the biggest
 # group of empty runs: a runner picks a ticket that cannot be built yet. It waits on a person, sits in Backlog, or needs a
 # key." The waits on a person, a lead or an open ticket are read from the board (waiting, BlockedBy, Valentin Review). These
@@ -1531,6 +1537,42 @@ def open_blocked_by(t):
 PICKER = [0]  # the runner number this pick runs for
 
 
+def stop_fix_label(t):
+    """A declared stop fix: a Fleet CI & Infra ticket labelled Stop Fix (HYCI-352)."""
+    return t["board"] == "11514" and STOP_FIX in (t.get("labels") or [])
+
+
+def stop_fix_in_work(n):
+    """Key of a Stop Fix ticket another runner works on right now, or None. One at a time across the pool: a live runner holds it
+    in a building column, runs it, or claimed it in the last two minutes (the run may not show in its log yet)."""
+    keys = {t["key"] for t in SNAP["tickets"] if stop_fix_label(t)}
+    if not keys:
+        return None
+    me = f"runner {n}"
+    for t in SNAP["tickets"]:
+        if t["key"] in keys and t["section"] in BOARDS[t["board"]][1] and any(live_runner(h) and h != me for h in names(t)):
+            return t["key"]
+    for m in range(1, RUNNERS + 1):
+        if m != n and running(m) in keys:
+            return running(m)
+    now_s = time.time()
+    try:
+        for path in (STATE / "claims").iterdir():
+            if path.name.startswith(".") or now_s - path.stat().st_mtime >= FRESH_CLAIM:
+                continue
+            who, key = path.read_text().split("\t")[:2]
+            if who != str(n) and key in keys:
+                return key
+    except OSError:
+        pass
+    return next((key for key, who in virtual_claims().items() if who != str(n) and key in keys), None)
+
+
+def stop_fix_ok(t, n):
+    """May runner n take t as a probe during a stop? Only a Stop Fix ticket, and only when no other runner has one in work."""
+    return bool(factory_stopped()) and stop_fix_label(t) and stop_fix_in_work(n) is None
+
+
 def infra_closed(t):
     """Features first (Valentin 13 Nov: "they are still only on infra"). A Fleet CI & Infra ticket is new work for this runner
     only under the infra cap, and never while the factory is stopped: the probe must prove features (HYCI-376).
@@ -1538,6 +1580,9 @@ def infra_closed(t):
     if not t["key"].startswith("HYCI-") or INCIDENT_LABEL in t["labels"]:
         return None
     if factory_stopped():
+        if stop_fix_label(t):
+            busy = stop_fix_in_work(PICKER[0])
+            return f"stop fix: one at a time, {busy} is in work" if busy else None
         return "features first: factory stopped, probe takes app work only"
     if infra_count(PICKER[0]) >= infra_cap():
         return f"features first: {infra_cap()} runner(s) already on Fleet CI & Infra"
@@ -2299,16 +2344,20 @@ def choose(n, dry):
             # joins only for an incident or a ticket that blocks open app work (Valentin 13 Nov: "literally everything
             # is on infrastructure")
             full = infra_count(n) >= infra_cap()
-            cands = [t for t in cands if t["key"] != held and (INCIDENT_LABEL in t["labels"]
+            cands = [t for t in cands if t["key"] != held and (INCIDENT_LABEL in t["labels"] or stop_fix_ok(t, n)
                                                                 or (blocks_known(t) and not full))]
             log("kept slot: another runner holds it; this runner takes only blockers" if cands
                 else "kept slot: another runner holds it; app work first")
         if factory_stopped():
-            cands = [t for t in cands if INCIDENT_LABEL in t["labels"]]
-            log("kept slot: incident only" if cands else "kept slot: factory stopped, probe takes app work only")
+            cands = [t for t in cands if INCIDENT_LABEL in t["labels"] or stop_fix_ok(t, n)]
+            fixes = any(INCIDENT_LABEL not in t["labels"] for t in cands)
+            log(("kept slot: incident or stop fix only" if fixes else "kept slot: incident only") if cands
+                else "kept slot: factory stopped, probe takes app work only")
         if cands:
             got = take_kept_slot(n, me, cands, dry)
             if got:
+                if factory_stopped() and stop_fix_label(got[0]):
+                    log(f"probe: stop fix {got[0]['key']}")
                 return got
             own = any(me in names(t) and t["section"] in BOARDS[t["board"]][1] for t in SNAP["tickets"])
             if not own and not held:
@@ -2998,6 +3047,7 @@ def factory_stop_self_test():
                 return str(e)
 
         saved_log, saved_snap, saved_inc, saved_eng, saved_n = log, SNAP, incident_step, runner_engine, RUNNERS
+        saved_claim = try_claim
         lines = []
         globals()["log"], globals()["incident_step"] = lines.append, lambda n, dry: None
         globals()["SNAP"] = {"tickets": [], "rel": {}, "prs": [], "incidents": [], "open": {}}
@@ -3040,9 +3090,58 @@ def factory_stop_self_test():
                                   "opencode runners 2 already in a run"), exit_msg(1)
             assert exit_msg(4).startswith("none: factory stopped: R2; probe, 1 runner(s) per plan"), "runner 4 is the same plan"
             assert "factory stopped" not in exit_msg(5), "codex probes with a runner of its own plan"
-            RUNNING.clear()
+            # HYCI-352: a declared stop fix (11514, label Stop Fix) runs during a stop, one at a time; a plain 11514 ticket does not.
+            claims = []
+            MEMBERS.update({b: None for b in BOARDS})  # membership unknown: every board is offered
+            LOGGED.clear()
+            globals()["try_claim"] = lambda n, t, source, dry: claims.append(t["key"]) or True
+            ticket = lambda key, labels=(), section="Backlog", holders=(): {
+                "key": key, "idx": int(key.split("-")[1]), "board": "11514", "section": section, "title": "x",
+                "labels": ["brain-medium", *labels], "prio": "Urgent", "holders": [list(h) for h in holders], "waiting": False,
+                "subs": False, "paid": False, "created": "2026-11-13T01:00:00Z", "updated": "2026-11-13T01:00:00Z"}
+
+            def stopped_pick(n, *tickets):
+                globals()["SNAP"] = {"tickets": list(tickets), "rel": {t["key"]: [[], []] for t in tickets}, "prs": [],
+                                     "incidents": [], "open": {}}
+                RUNNING.clear()
+                RUNNING.update({m: None for m in engines})
+                lines.clear()
+                claims.clear()
+                try:
+                    got = choose(n, True)
+                    return got[0]["key"], got[1]
+                except SystemExit as e:
+                    return str(e)
+
+            fix, plain = ticket("HYCI-901", ["stop fix"]), ticket("HYCI-902")
+            assert stopped_pick(1, fix) == ("HYCI-901", "kept-slot"), "stopped plus a Stop Fix ticket: the probe takes it"
+            assert "probe: stop fix HYCI-901" in lines, lines
+            assert claims == ["HYCI-901"], claims
+            assert factory_stopped() == "R2", "taking the fix leaves the record stopped"
+            got = stopped_pick(1, plain)
+            assert isinstance(got, str) and got.startswith("none:"), got
+            assert not claims and not any(l.startswith("probe: stop fix") for l in lines), "a plain 11514 ticket is not a stop fix"
+            got = stopped_pick(1, plain, fix)
+            assert got == ("HYCI-901", "kept-slot"), f"a plain ticket beside a Stop Fix one: only the fix goes, got {got}"
+            # one at a time: a live runner holds the first, so the second waits
+            second = ticket("HYCI-903", ["stop fix"])
+            held = ticket("HYCI-901", ["stop fix"], "In Progress", [("runner 2", True)])
+            got = stopped_pick(1, held, second)
+            assert isinstance(got, str) and got.startswith("none:") and not claims, f"a second Stop Fix ticket must wait, got {got}"
+            PICKER[0] = 1
+            assert stop_fix_in_work(1) == "HYCI-901" and stop_fix_in_work(2) is None, "the holder itself is not blocked by its own ticket"
+            assert infra_closed(second) == "stop fix: one at a time, HYCI-901 is in work"
+            assert not stop_fix_ok(second, 1) and stop_fix_ok(held, 2)
+            # a running run counts too, and a stop that has cleared leaves the label with no effect
+            globals()["SNAP"]["tickets"] = [fix, second]
+            RUNNING[3] = "HYCI-901"
+            assert stop_fix_in_work(1) == "HYCI-901" and stop_fix_in_work(3) is None
+            RUNNING[3] = None
             tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {"at": "y", "by": "t", "why": "t"}}))
+            assert not stop_fix_ok(fix, 1), "no stop: nothing to fix, the label opens no lane"
+            RUNNING.clear()
         finally:
+            globals()["try_claim"] = saved_claim
             globals()["log"], globals()["SNAP"], globals()["incident_step"] = saved_log, saved_snap, saved_inc
             globals()["runner_engine"], globals()["RUNNERS"] = saved_eng, saved_n
             RUNNING.clear()
