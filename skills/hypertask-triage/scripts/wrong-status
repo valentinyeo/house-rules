@@ -115,21 +115,31 @@ def save_states():
 
 
 def pr_state(key):
-    """Returns (OPEN|MERGED|CLOSED|UNKNOWN, merge commit). Merged and closed PRs are read from GitHub once; only open ones are asked again."""
+    """Returns (OPEN|MERGED|CLOSED|UNKNOWN, merge commit, title and branch). Merged and closed PRs are read from GitHub
+    once; only open ones are asked again. The title and branch say which ticket a PR is for (see owns)."""
     now = time.time()
     hit = STATES.get(key)
-    if settled(hit, now):
-        return hit["state"], hit.get("merge")
+    if settled(hit, now) and "label" in hit:
+        return hit["state"], hit.get("merge"), hit["label"]
     repo, n = key.split("#")
-    r = subprocess.run(["gh", "pr", "view", n, "--repo", repo, "--json", "state,mergeCommit"], capture_output=True, text=True)
+    r = subprocess.run(["gh", "pr", "view", n, "--repo", repo, "--json", "state,mergeCommit,title,headRefName"],
+                       capture_output=True, text=True)
     try:
         d = json.loads(r.stdout)
     except ValueError:
-        return "UNKNOWN", False
+        return "UNKNOWN", False, ""
     state, merge = d.get("state", "UNKNOWN"), (d.get("mergeCommit") or {}).get("oid")
+    label = f"{d.get('title') or ''} {d.get('headRefName') or ''}"
     if state in ("MERGED", "CLOSED"):
-        STATES[key] = {"state": state, "merge": merge, "at": now}
-    return state, merge
+        STATES[key] = {"state": state, "merge": merge, "label": label, "at": now}
+    return state, merge, label
+
+
+def owns(ticket, label):
+    """A PR is this ticket's own when its title or branch names the ticket key (every PR carries one, house rules).
+    A note may link a sibling's PR ("Move 1 is complete with docs-rs#1"); that PR never moves this ticket.
+    HTPR-9182 went to QA on 13 Nov 22:06 off its sibling HTPR-9180's merged PR, with no PR of its own."""
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(ticket.lower())}(?![0-9])", (label or "").lower()))
 
 
 def production_sha(repo):
@@ -198,12 +208,13 @@ def run(board):
         raw = dict(zip(keys, ex.map(pr_state, keys)))
     save_states()
     # every merged newest PR, not only QA's: a merged ticket off board 15 goes to Done once its merge is live
+    links = [[k for k in ls if owns(t["ticketNumber"], raw[k][2])] for (_, t), ls in zip(tickets, links)]
     merged_newest = {ls[-1] for ls in links if ls and raw[ls[-1]][0] == "MERGED"}
     for repo in {k.split("#")[0] for k in merged_newest}:
         production_sha(repo)
     with ThreadPoolExecutor(4) as ex:
         live = dict(zip(merged_newest, ex.map(lambda k: in_production(k.split("#")[0], raw[k][1]), merged_newest)))
-    states = {k: (s, live.get(k, False)) for k, (s, _) in raw.items()}
+    states = {k: (s, live.get(k, False)) for k, (s, _, _) in raw.items()}
     rows = []
     for (col, t), prs in zip(tickets, links):
         v = verdict(col, prs, states, bool(t.get("blockerCommentId")))
@@ -239,6 +250,9 @@ def self_test():
     assert verdict("AI Review", [], s) == "NO-PR" and verdict("In Progress", [], s) is None
     assert verdict("Valentin Review", ["a#1"], s, waiting_on_him=True) is None, "open Question waits on him"
     assert verdict("Valentin Review", ["a#1"], s) == "MERGED-NOT-MOVED", "no Question: merged work must move"
+    assert owns("HTPR-9182", "HTPR-9182: plan only runner6/htpr-9182"), "own key in title or branch"
+    assert not owns("HTPR-9182", "HTPR-9180 Docs move 1 runner6/HTPR-9180"), "a sibling's PR is not this ticket's"
+    assert not owns("HTPR-91", "HTPR-9182 x") and owns("SOFT-12", "fix soft-12 crash") and not owns("X-1", ""), "whole key only"
     assert PR.findall("see https://github.com/hypertask-ai/hypertask/pull/2939.") == [("hypertask-ai/hypertask", "2939")]
     assert settled({"state": "MERGED", "at": 0}, 10 ** 9), "merged is final"
     assert settled({"state": "CLOSED", "at": 100}, 100 + CLOSED_TTL_S - 1) and not settled({"state": "CLOSED", "at": 100}, 100 + CLOSED_TTL_S)
