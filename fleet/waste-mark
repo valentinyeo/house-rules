@@ -67,7 +67,7 @@ def streaks(rows, since):
     for r in rows:
         state = r.get("state") or r.get("result")
         key = r["ticket"]
-        if state in PROGRESS:
+        if state in PROGRESS or (isinstance(r.get("progress"), int) and r["progress"] > 0):  # a run that pushed a commit or opened a PR (ledger progress >= 1) built something, even when it then waited on CI (SOFT-2273)
             run[key] = []
         elif state in EMPTY and r.get("source") != "pr":  # source "pr": open PR, checks running, runner waits for its recheck: not wasted
             run[key].append(r)
@@ -220,8 +220,9 @@ def self_test():
     def ticket(**kw):
         return {"labels": [], "section": "In Progress", "status": "Normal", "board": 15, **kw}
 
+    pushed = [dict(x, progress=1) for x in run("G-7", "WAIT_CHECK", 4)]  # pushed a commit then waited on CI: progress, never empty
     pr_wait = [dict(x, source="pr") for x in run("P-9", "WAIT_CHECK", 4)]
-    rows = (pr_wait + run("A-1", "WAIT_CHECK", 3) + run("B-2", "FAULT", 2, t0=10) + run("C-3", "WAIT_CHECK", 2, t0=20)
+    rows = (pushed + pr_wait + run("A-1", "WAIT_CHECK", 3) + run("B-2", "FAULT", 2, t0=10) + run("C-3", "WAIT_CHECK", 2, t0=20)
             + [{"ts": "2026-11-13T00:30:00Z", "ticket": "C-3", "state": "BUILDING", "engine": "codex", "reason": ""}]
             + run("C-3", "PARKED", 2, t0=31) + run("D-4", "PARKED", 4, "opencode", "same reason", t0=40)
             + [{"ts": "2026-11-13T00:50:00Z", "ticket": "", "state": "IDLE_NO_TICKET"},
