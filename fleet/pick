@@ -2184,12 +2184,15 @@ def busy_on_plan(n, plan):
             and ENGINES[runner_engine(m)]["plan"] == plan and running(m)]
 
 
+PROBE_CAPS = [Path.home() / ".local/state/fleet/probe-caps.json"]  # self-test points it at a missing file
+
+
 def probe_cap(plan):
     """Valentin's direct order may raise one plan's probe cap during a stop (13 Nov: "You can launch more agents again on the
     OpenCode Go plan ... make sure they don't just check"). ~/.local/state/fleet/probe-caps.json:
     {"<plan>": {"cap": N, "until": epoch, "why": "his words"}}. A stopped factory still takes app work only (infra_closed)."""
     try:
-        o = json.loads((Path.home() / ".local/state/fleet/probe-caps.json").read_text()).get(plan) or {}
+        o = json.loads(PROBE_CAPS[0].read_text()).get(plan) or {}
         if float(o.get("until", 0)) > time.time():
             return max(PROBE_CAP, int(o["cap"]))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -2773,6 +2776,7 @@ def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
     global STATE, ALLOCATION, RUNNER_STATE, WATCH, FACTORY_STOP
+    PROBE_CAPS[0] = Path("/nonexistent/probe-caps.json")  # a live order on this server must not change test outcomes
     import tempfile
     STATE = Path(tempfile.mkdtemp())
     FACTORY_STOP = STATE / "no-factory-stop.json"  # a live stop record must not change the offline test
