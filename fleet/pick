@@ -1736,8 +1736,14 @@ def opencode_timed_out(key):
     return False
 
 
+PARK_MERGE = 90  # seconds: a run's PARKED result and the fleet/park action it triggers are one park
+
+
 def park_event_times(key):
-    """Completed fleet/park actions, not the same run's WAIT_CHECK/PARKED result a second time."""
+    """Completed parks of one ticket: fleet/park actions plus runs that ended PARKED on their own. HYCI-413, 14 Nov: HYCI-358,
+    HYCI-352, HTPR-9106 and HTPR-9086 ended PARKED 3 to 5 times in 6 hours with no fleet/park action behind them, so the
+    three-parks rule never saw them and each was offered again (11 runs, 4 tickets). A PARKED result within PARK_MERGE
+    seconds of a fleet/park action is the same park, counted once; WAIT_CHECK and FAULT results are never parks."""
     out = []
     try:
         for line in open(STATE / "park-events"):
@@ -1748,7 +1754,16 @@ def park_event_times(key):
                     out.append(when)
     except OSError:
         pass
-    return out
+    for row in ledger_rows():
+        if row.get("ticket") == key and row.get("state") == "PARKED":
+            when = stamp_time(str(row.get("ts", "")))
+            if when:
+                out.append(when)
+    merged = []
+    for when in sorted(out):
+        if not merged or (when - merged[-1]).total_seconds() > PARK_MERGE:
+            merged.append(when)
+    return merged
 
 
 def board_lead(board):
@@ -2865,7 +2880,16 @@ def park_count_self_test():
             except SystemExit as error:
                 assert str(error).startswith("none:"), error
             events.write_text("")
-            assert park_event_times(t["key"]) == [], "a WAIT_CHECK result alone is not a completed park"
+            assert len(park_event_times(t["key"])) == 1, "a runner-ended PARKED result is a park even with no fleet/park action (HYCI-413)"
+            quiet = [r for r in rows if r["state"] != "PARKED"]
+            with patch.dict(globals(), _LEDGER=[quiet]):
+                assert park_event_times(t["key"]) == [], "a WAIT_CHECK result alone is not a completed park"
+            # HYCI-413 replay of HYCI-358 (13 Nov): five runner-ended PARKED rows, no fleet/park action, third park stops offers
+            five = [{"ticket": t["key"], "ts": iso(m), "state": "PARKED", "source": "orphan"} for m in (50, 40, 30, 20, 10)]
+            with patch.dict(globals(), _LEDGER=[five]):
+                assert len(park_event_times(t["key"])) == 5 and repark_suppressed(t), "PARKED rows alone stop offers after the third"
+                events.write_text(f"{iso(40)} {t['key']}\n")
+                assert len(park_event_times(t["key"])) == 5, "a fleet/park action beside its run's PARKED row counts once"
 
 
 def fair_self_test():
