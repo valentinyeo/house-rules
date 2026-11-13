@@ -1404,6 +1404,19 @@ def one_run_state(p):
     return ("pending", True) if any(RUNNING_CHECK.search(c) for c in checks) else ("green", True)
 
 
+def pr_checks_pending(key):
+    """Does ticket `key` have an open, non-draft PR whose checks are still running and that nothing else blocks (no conflict, no
+    change request, no red check)? Then a park job has nothing to do: the next run only merges once checks end. Not behind
+    ONE_RUN_FLAG: parks 10:49 and 11:01 UTC on 13 Nov (HYCI-352, HYCI-358) were 60 and 75 second runs on exactly this. Fails open."""
+    try:
+        for p in open_prs():
+            if pr_ticket(p) == key and one_run_state(p) == ("pending", True):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def one_run_hold(dry, now=None):
     """One ticket, one run, one PR (13 Nov). Tickets whose open PR has pending or green checks, no conflict and no change
     request: no lane hands them to a model (they all read resting()). A script watches the checks, merges green and does the
@@ -1894,6 +1907,9 @@ def try_claim(n, t, source, dry):
             raise Pick(mine, "own")
         if mine and mine["key"] in one_run_hold(dry):
             log(f"hold {t['key']}: own {own} waits on its PR's checks or merge (one-run); a script owns it, no park job")
+            return False
+        if mine and pr_checks_pending(mine["key"]):
+            log(f"hold {t['key']}: own {own} has an open PR whose checks are running; a park job has nothing to park (HYCI-352, HYCI-358 parks)")
             return False
         if mine and parkable(mine):  # parking clears both holds: ship-claim lets a parked ticket's open PR go too
             raise Pick(mine, "park")
@@ -2994,6 +3010,15 @@ def one_run_self_test():
         assert held([tk("HTPR-1", ("incident",))], [pr(1, "HTPR-1")]) == set(), "an incident is never held"
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1"), pr(2, "HTPR-1", ("ci=FAILURE",))]) == set(), "one red PR of two wakes the ticket"
         assert held([tk("HTPR-1")], [pr(1, "HTPR-9")]) == set(), "a PR whose ticket is not on the board holds nothing"
+        SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "prs": [pr(1, "HTPR-1", ("ci=IN_PROGRESS",))], "incidents": []}
+        flag.unlink(missing_ok=True)
+        assert pr_checks_pending("HTPR-1"), "running checks on an open PR: no park job, flag or not"
+        for why, extra in (("green checks", {"checks": ["ci=SUCCESS"]}), ("a failed check", {"checks": ["ci=FAILURE", "e2e=IN_PROGRESS"]}),
+                           ("a conflict", {"checks": ["ci=IN_PROGRESS"], "mergeable": "CONFLICTING"}), ("a draft", {"checks": ["ci=IN_PROGRESS"], "draft": True})):
+            SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "prs": [pr(1, "HTPR-1", **extra)], "incidents": []}
+            assert not pr_checks_pending("HTPR-1"), f"{why}: a model has work, park job allowed"
+        assert not pr_checks_pending("HTPR-2"), "another ticket's PR is not this ticket's wait"
+        flag.write_text("")
         assert held([tk("HTPR-1"), tk("HTPR-2")], [pr(1, "HTPR-2", ("ci=PENDING",))]) == {"HTPR-2"}, "only the ticket with the PR is held"
         SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "incidents": [], "prs": None}
         _ONE_RUN.clear()
