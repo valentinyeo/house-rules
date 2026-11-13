@@ -8,6 +8,7 @@ description: Shipping update for Valentin, any fleet. Verdict on pace first, the
 Read only. Gather, then answer in the shape below. Valentin, 2026-10-29: "i like this update a lot".
 
 ## Gather
+0. Runs against results: `~/.local/share/house-rules/fleet/yield`. One line per plan, 24h and 7d. Valentin, 2026-11-13: 1,871 Codex runs built 105 things while updates said "runners picked tickets".
 1. Pace: `~/.local/share/house-rules/skills/shipping-update/scripts/pace <owner/repo> [base] [days]`. Base defaults to the repo default branch. Counts merged PRs plus direct pushes (solo-dev). Today vs the same clock time on the last 3 days, last 1/3/6/24h, best hours, changes of the last 3h.
 2. Live: production CI on the base branch passed after those merges. Name the time it passed.
 3. Open PRs: red, green, pending; drafts. Compare with your last update ("down from X").
@@ -17,6 +18,7 @@ Read only. Gather, then answer in the shape below. Valentin, 2026-10-29: "i like
 
 ## Shape
 ```
+**Built: <fleet/yield lines, RED ones first, verbatim numbers>**
 **<Verdict: on track or not to beat changes/day of the last 3 days.>**
 
 **Highlights shipped in the last 3 hours** (all live; production checks passed at HH:MM your time)

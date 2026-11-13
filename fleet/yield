@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Runs against results per subscription, the first line of every check-in.
+
+Valentin 2026-11-13: 1,871 Codex runs built 105 things and every check-in said "runners picked tickets".
+Reads the run ledger; a run is any ended run that is not an IDLE pick, built is one that ended BUILDING.
+
+  fleet/yield              one line per plan: 24h and 7d runs, built, share; RED under 30%
+  fleet/yield --self-test
+"""
+import collections
+import datetime as dt
+import json
+import os
+import sys
+from pathlib import Path
+
+LEDGER = Path(os.environ.get("FLEET_RUNNER_STATE", Path.home() / ".local/state/ht-or-runners")) / "run-ledger.jsonl"
+PLANS = {"codex": "Codex", "pi-codex": "Codex", "cursor": "Cursor", "opencode": "OpenCode", "pi-opencode": "OpenCode",
+         "claude": "Claude"}
+LINE = 30
+
+
+def tally(rows, now):
+    out = collections.defaultdict(lambda: {"24h": [0, 0], "7d": [0, 0]})
+    for r in rows:
+        plan = PLANS.get(r.get("engine"))
+        try:
+            when = dt.datetime.fromisoformat(r["ts"].replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            continue
+        if not plan or str(r.get("state", "")).startswith("IDLE"):
+            continue
+        age = (now - when).total_seconds()
+        for span, secs in (("24h", 86400), ("7d", 7 * 86400)):
+            if 0 <= age < secs:
+                out[plan][span][0] += 1
+                out[plan][span][1] += r.get("state") == "BUILDING"
+    return out
+
+
+def lines(t):
+    def cell(runs, built):
+        return f"{built} of {runs} built ({round(100 * built / runs)}%)" if runs else "no runs"
+    rows = []
+    for plan in sorted(t, key=lambda p: -t[p]["7d"][0]):
+        runs, built = t[plan]["7d"]
+        flag = "RED " if runs >= 10 and 100 * built / runs < LINE else ""
+        rows.append(f"{flag}{plan}: 24h {cell(*t[plan]['24h'])}; 7d {cell(runs, built)}")
+    return rows or ["no runs in 7 days"]
+
+
+def self_test():
+    now = dt.datetime(2026, 11, 13, tzinfo=dt.timezone.utc)
+    at = lambda h: (now - dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = [{"engine": "codex", "ts": at(1), "state": "WAIT_CHECK"}] * 19 + [{"engine": "pi-codex", "ts": at(30), "state": "BUILDING"}] \
+        + [{"engine": "opencode", "ts": at(2), "state": "BUILDING"}] * 4 + [{"engine": "opencode", "ts": at(2), "state": "IDLE_NO_TICKET"}] \
+        + [{"engine": "cursor", "ts": at(200), "state": "BUILDING"}]
+    out = lines(tally(rows, now))
+    assert out[0] == "RED Codex: 24h 0 of 19 built (0%); 7d 1 of 20 built (5%)", out
+    assert out[1] == "OpenCode: 24h 4 of 4 built (100%); 7d 4 of 4 built (100%)", "an IDLE pick is not a run"
+    assert len(out) == 2, "a run older than 7 days is not counted"
+    print("fleet/yield self-test ok")
+
+
+def main():
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
+    rows = []
+    try:
+        for line in open(LEDGER):
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        print("no run ledger")
+        return
+    print("\n".join(lines(tally(rows, dt.datetime.now(dt.timezone.utc)))))
+
+
+if __name__ == "__main__":
+    main()
