@@ -97,7 +97,9 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
     if int(rc) == 124 or int(elapsed) >= 3 * 3600 - 10:
         return _out("FAULT", "FAIL", detail="timeout: hit the 3h run limit")
     if not line and (int(rc) != 0 or int(elapsed) < 120):
-        return _out("FAULT", "FAIL", detail="crash or run ended before it started")
+        if int(elapsed) < 120:
+            return _out("FAULT", "FAIL", detail="crash or run ended before it started")
+        return _out("FAULT", "FAIL", detail=f"run died mid-work: no final line after {int(elapsed)}s (rc {int(rc)})")
     if line:
         return _out("FAULT", "FAULT", park="lead", detail="unknown state")
     return _out("FAULT", "FAULT", park="lead", detail="unknown state")
@@ -147,6 +149,10 @@ def self_test():
     assert busy["state"] == "PROVIDER_BUSY" and busy["result"] == "PROVIDER_BUSY" and busy["park"] == "", busy
     assert "provider busy" in busy["detail"], busy
     assert classify("", 1, 30, "", 0, "HYCI-1")["state"] == "FAULT", "without the overload read it is still a crash"
+    early = classify("", 1, 10, "", 0, "HYCI-1")
+    assert "before it started" in early["detail"], "a run under 2 min keeps the early-death label"
+    mid = classify("", 1, 1500, "", 0, "HYCI-1")
+    assert mid["result"] == "FAIL" and "before it started" not in mid["detail"] and "1500s" in mid["detail"], "a long run that died is not 'before it started'"
     assert classify("RUNNER IDLE checks pending", 0, 400, "", 0, "HYCI-1", overload=True)["state"] == "WAIT_CHECK", \
         "a run that got its own final line keeps that ending"
     stall = classify("RUNNER IDLE no model reply for 600s twice, run ended", 124, 700, "", 0, "HYCI-1")
