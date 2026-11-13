@@ -285,17 +285,24 @@ def _arg(name, default=""):
 
 
 PARK_WHY = re.compile(r"park|block|wait|\bred\b|fail|cannot|can't|nothing|untouched|already|duplicate|checks|ci\b|hand|slice|step", re.I)
-PARK_NOISE = re.compile(r"^(?:parked [A-Z]+-\d+|detail |connection lost|retry attempt|chat listen|the (?:runner )?chat listener|gates:|blocker:|decisions?:)", re.I)
+PARK_NOISE = re.compile(r"^(?:parked [A-Z]+-\d+|detail |connection lost|retry attempt|chat listen|the (?:runner )?chat listener|gates:|blocker:|decisions?:|warning:)", re.I)
+# the runner's own words after the key on the final line: `PARKED HTPR-2 why: the PR is red` (whitespace required, a glued suffix is not a reason)
+PARKED_INLINE = re.compile(r"^PARKED\s+[A-Z]{2,6}-\d+\s+[|:\-]*\s*(?P<why>\S.*)$")
 
 
 def park_reason(text, limit=160):
     """Why a run ended PARKED, in the model's own words (13 Nov: 28 PARKED rows, none with a reason, so nobody could say why).
-    The last line before the final `PARKED KEY` line that reads like a reason, markdown stripped. A run that wrote nothing before
-    it says so: that is itself the finding."""
+    The text after the key on the final `PARKED KEY why` line, else the last line before it that reads like a reason, markdown
+    stripped. Lines the harness prints (`Warning:` banners, listener and retry noise) are never the runner's reason, and a run with
+    no words of its own gets "" (reason unset): HYCI-388, 13 Nov, SOFT-1966's reason was Claude's sign-in banner, HYCI-404's said
+    "no reason written", and the next picker could not tell a real block from noise."""
     lines = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", l).strip() for l in (text or "").splitlines()]
     end = next((i for i in range(len(lines) - 1, -1, -1) if PARKED_LINE.search(lines[i]) and lines[i].startswith("PARKED")), None)
     if end is None:
         return ""
+    inline = PARKED_INLINE.match(lines[end])
+    if inline and not PARK_NOISE.match(inline["why"]):
+        return re.sub(r"[*`#]+", "", inline["why"]).strip()[:limit]
     cleaned = []
     for l in lines[:end]:
         l = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", l)
@@ -305,7 +312,7 @@ def park_reason(text, limit=160):
             cleaned.append(l)
     cleaned = cleaned[-10:]
     if not cleaned:
-        return "no reason written"
+        return ""
     why = next((l for l in reversed(cleaned) if PARK_WHY.search(l)), cleaned[-1])
     return why[:limit]
 
@@ -314,10 +321,17 @@ def self_test():
     log = ("\x1b[1mwork\x1b[0m\n- Boundary fix pushed. Nothing deployed.\n- Parked pending [CI repair](https://x/y/390).\n"
            "- Demo removal remains.\n\nPARKED SOFT-1\n")
     assert park_reason(log) == "Parked pending CI repair.", park_reason(log)
-    assert park_reason("PARKED HTPR-1\n") == "no reason written", "a bare PARKED line says so"
+    assert park_reason("PARKED HTPR-1\n") == "", "a bare PARKED line leaves the reason unset (HYCI-404, 13 Nov)"
     assert park_reason("1. **Why:** the PR is red.\nConnection lost, reconnecting (attempt 1)...\nPARKED HTPR-2The chat listener stopped.\n") == "Why: the PR is red.", \
         "noise lines are skipped and a glued suffix on the PARKED line does not matter"
     assert park_reason("no final line here") == "", "no PARKED line: nothing to add"
+    banner = ("Warning: this sign-in can end at any time from now until 2026-11-16. Renewing it does not move that date. "
+              "Run claude auth login now, or use claude setup-token for unattended jobs.\nPARKED SOFT-1966\n")
+    assert park_reason(banner) == "", "SOFT-1966 (13 Nov): the sign-in banner is not the runner's reason"
+    assert park_reason("- the PR is red and I cannot fix it.\n" + banner) == "the PR is red and I cannot fix it.", "a real line before the banner still wins"
+    assert park_reason("PARKED HTPR-3 why: **checks** red on PR 9") == "why: checks red on PR 9", "the runner's own text on the PARKED line is the reason"
+    assert park_reason("PARKED HTPR-3 | waits on HYCI-9") == "waits on HYCI-9" and park_reason("PARKED HTPR-3The chat listener stopped.") == ""
+    assert park_reason("PARKED HTPR-3 Warning: sign-in ends soon") == "", "a banner glued behind the key is still not a reason"
     assert len(park_reason("x" * 400 + " parked\nPARKED K-1")) == 160
     human = classify("RUNNER IDLE waiting on Valentin flag approval", 0, 600, "", 0, "HTPR-1")
     assert human["state"] == "FAULT" and human["park"] == "lead", human

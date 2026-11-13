@@ -17,6 +17,12 @@ For every ticket in Doing or AI Review whose app label is in APPS (apps with an 
 The result is written to STATE/sf-release-wait.json. fleet/pick reads it and does not hand a ticket in state pr or release to
 a model (one_run_hold / sf_wait_rows): it makes no GitHub call of its own. A file older than 15 minutes holds nothing.
 
+HYCI-388 (14 Nov): Fleet CI & Infra (11514) tickets in In Progress or AI Review get the same hold when their PR lives in one of
+EXTRA_REPOS (house-rules, read with the default gh login: the runner App cannot see that private repo). Only an open PR counts:
+pending checks are state pr (a script waits), anything else is attention. No release, no merge by this script: a green house-rules
+PR has no script that merges it, so it reads attention and a model merges it. HYCI-404 ran again after its 30 blind minutes because
+only hypertask-ai/hypertask PRs were visible to the picker.
+
 The ticket key on the board is SOFT-2273 while the PR title and the release note say IGSH-2273. Both prefixes are board 2060,
 so every match goes by the number.
 """
@@ -37,6 +43,10 @@ BOARD = "2060"
 COLUMNS = ("Doing", "AI Review")
 # ticket label -> (GitHub repository, release tag prefix). Only apps whose release workflow runs on merge belong here.
 APPS = {"multiprompt": "valentinyeo/multiprompt", "wazig": "valentinyeo/postbox", "postbox": "valentinyeo/postbox"}
+# Fleet CI & Infra tickets whose PR is not in a Software Factory app repo (HYCI-388). SF_EXTRA_REPOS overrides, comma separated.
+EXTRA_REPOS = [r for r in (os.environ.get("SF_EXTRA_REPOS") or "valentinyeo/house-rules").split(",") if r]
+EXTRA_BOARD = "11514"
+EXTRA_COLUMNS = ("In Progress", "AI Review")
 LOOKBACK_S = 24 * 3600  # a PR merged longer ago than this is not this ticket's release wait
 STALL_S = 3 * 3600  # a release this late is a model's job
 SF_PREFIXES = ("IGSH", "SOFT")
@@ -82,6 +92,22 @@ def check_word(pr):
     if any(s in RUNNING or s == "" for s in states):
         return "pending"
     return "pending" if pr.get("mergeStateStatus") == "BLOCKED" else "green"
+
+
+def classify_extra(key, prs):
+    """One Fleet CI & Infra ticket against the open PRs of its extra repos. Returns (state, detail, since): pr only while checks are
+    pending (a script is waiting), attention for every other open PR, none when no open PR names the ticket."""
+    pat = re.compile(rf"\b{re.escape(key)}\b", re.I)
+    live = [p for p in prs if p["state"] == "OPEN" and (pat.search(p.get("title") or "") or pat.search(p.get("headRefName") or ""))]
+    if not live:
+        return "none", "", ""
+    words = [check_word(p) for p in live]
+    since = iso(max(epoch(p["updatedAt"]) for p in live))
+    nums = ", ".join(f"#{p['number']}" for p in live)
+    bad = next((w for w in words if w != "pending"), None)
+    if bad:
+        return "attention", f"PR {nums} is {bad}" + (", no script merges it" if bad == "green" else ""), since
+    return "pr", f"PR {nums} open, checks pending", since
 
 
 def classify(number, prs, releases, contains, notes, run_failed, now, section="AI Review"):
@@ -155,9 +181,11 @@ class Hub:
     def have(tool):
         return any(os.access(os.path.join(d, tool), os.X_OK) for d in os.environ.get("PATH", "").split(":"))
 
-    def gh(self, *args):
+    def gh(self, *args, plain=False):
+        """plain: the default gh login, for private repos the runner App cannot see (EXTRA_REPOS)."""
+        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")} if plain else self.token_env()
         for attempt in (1, 2):  # GitHub's GraphQL answers 502 and 504 now and then: one retry, then the ticket reads attention
-            r = subprocess.run(["gh", *args], capture_output=True, text=True, env=self.token_env(), timeout=120)
+            r = subprocess.run(["gh", *args], capture_output=True, text=True, env=env, timeout=120)
             if r.returncode == 0 or attempt == 2:
                 break
             time.sleep(10)
@@ -165,25 +193,26 @@ class Hub:
             raise RuntimeError(f"gh {' '.join(args[:3])}: {(r.stderr or '').strip()[:100]}")
         return json.loads(r.stdout) if r.stdout.strip() else None
 
-    def tickets(self):
-        """(key, number, labels, section) of board 2060 tickets in COLUMNS."""
+    def tickets(self, board=BOARD, columns=COLUMNS):
+        """(key, number, labels, section) of a board's tickets in `columns` (board 2060 in COLUMNS unless asked)."""
         out = []
-        for section in COLUMNS:
-            r = subprocess.run(["hypertask", "--json", "task", "list", "--project", BOARD, "--section", section, "--limit", "100"],
+        for section in columns:
+            r = subprocess.run(["hypertask", "--json", "task", "list", "--project", board, "--section", section, "--limit", "100"],
                                capture_output=True, text=True, timeout=300)
             try:
                 rows = json.loads(r.stdout[r.stdout.index("{"):])["tasks"]
             except (ValueError, KeyError):
-                raise RuntimeError(f"board {BOARD} column {section} unreadable")
+                raise RuntimeError(f"board {board} column {section} unreadable")
             for t in rows:
-                n = number_of(t.get("ticketNumber"))
+                n = number_of(t.get("ticketNumber")) if board == BOARD else int(str(t.get("ticketNumber") or "x-0").rpartition("-")[2] or 0)
                 if n:
                     out.append((t["ticketNumber"], n, {(l.get("name") or "").strip().lower() for l in t.get("labels") or []}, section))
         return out
 
     def prs(self, repo):
         return self.gh("pr", "list", "-R", repo, "--state", "all", "--limit", "30", "--json",
-                       "number,title,headRefName,state,isDraft,mergedAt,mergeCommit,updatedAt,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus")
+                       "number,title,headRefName,state,isDraft,mergedAt,mergeCommit,updatedAt,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus",
+                       plain=repo in EXTRA_REPOS)
 
     def releases(self, repo):
         rows = self.gh("release", "list", "-R", repo, "--limit", "20", "--json", "tagName,publishedAt,isDraft,isPrerelease")
@@ -267,7 +296,24 @@ def sweep(hub, now):
                 state, detail, since = "attention", f"watch error: {e}"[:140], iso(now)
             if state != "none":
                 out[key] = {"state": state, "detail": detail, "since": since}
+    sweep_extra(hub, now, out)
     return {"at": int(now), "tickets": {k: v for k, v in out.items() if v["state"] != "done"}}, moved, merged
+
+
+def sweep_extra(hub, now, out):
+    """Fleet CI & Infra tickets with a PR in EXTRA_REPOS (HYCI-388). A failed read adds nothing: the Software Factory rows stand and
+    these tickets are simply not held (fails open, never a stuck ticket)."""
+    try:
+        rows = hub.tickets(EXTRA_BOARD, EXTRA_COLUMNS)
+        prs = []
+        for repo in EXTRA_REPOS:
+            prs += hub.prs(repo)
+    except RuntimeError:
+        return
+    for key, _, _, section in rows:
+        state, detail, since = classify_extra(key, prs)
+        if state != "none":
+            out[key] = {"state": state, "detail": detail, "since": since}
 
 
 def write(path, doc):
@@ -346,8 +392,8 @@ def self_test():
             super().__init__(False)
             self._prs, self._rel, self._tk, self.done, self.merged = prs, releases, tickets, [], []
 
-        def tickets(self):
-            return self._tk
+        def tickets(self, board=BOARD, columns=COLUMNS):
+            return self._tk if board == BOARD else getattr(self, "_extra", [])
 
         def prs(self, repo):
             return self._prs
@@ -399,6 +445,29 @@ def self_test():
     hub = Fake([pr_merged, other], [old, new], [("SOFT-2273", 2273, {"multiprompt"}, "Doing")])
     doc, moved, merged = sweep(hub, t(21, 43))
     assert moved == [] and not hub.done and doc["tickets"] == {}, (moved, doc)
+    # HYCI-388 (HYCI-404): a Fleet CI & Infra ticket with a house-rules PR whose checks run is held as a script's wait; every other state is a model's
+    hy = {"number": 441, "title": "HYCI-404: runner keeps its ticket", "headRefName": "hyci-404-owner", "state": "OPEN", "isDraft": False, "mergedAt": None,
+          "mergeCommit": None, "updatedAt": "2026-11-13T21:36:00Z", "statusCheckRollup": checks("SUCCESS", "RUN"), "reviewDecision": "",
+          "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED"}
+    assert classify_extra("HYCI-404", [hy, other]) == ("pr", "PR #441 open, checks pending", "2026-11-13T21:36:00Z"), classify_extra("HYCI-404", [hy])
+    assert classify_extra("HYCI-40", [hy])[0] == "none" and classify_extra("HYCI-4040", [hy])[0] == "none", "a longer key is another ticket"
+    assert classify_extra("HYCI-404", [dict(hy, statusCheckRollup=checks("FAILURE", "RUN"))])[0] == "attention", "red is a model's job"
+    assert classify_extra("HYCI-404", [dict(hy, statusCheckRollup=checks("SUCCESS"), mergeStateStatus="CLEAN")])[0:2] == \
+        ("attention", "PR #441 is green, no script merges it"), "green: nobody merges a house-rules PR, a model does"
+    assert classify_extra("HYCI-404", [dict(hy, state="MERGED")])[0] == "none", "a merged PR is no wait"
+    hub = Fake([pr_open], [], [board[0]])
+    hub._extra = [("HYCI-404", 404, set(), "AI Review"), ("HYCI-9", 9, set(), "In Progress")]
+    hub.prs = lambda repo: [hy] if repo in EXTRA_REPOS else [pr_open]
+    doc, moved, merged = sweep(hub, t(21, 40))
+    assert doc["tickets"]["HYCI-404"]["state"] == "pr" and "HYCI-9" not in doc["tickets"] and doc["tickets"]["SOFT-2273"]["state"] == "pr", doc
+    assert not hub.merged and not hub.done, "an extra repo is never merged or moved by the script"
+
+    def unreadable(repo):
+        if repo in EXTRA_REPOS:
+            raise RuntimeError("house-rules unreadable")
+    hub.prs = lambda repo: unreadable(repo) or [pr_open]
+    doc, _, _ = sweep(hub, t(21, 40))
+    assert "HYCI-404" not in doc["tickets"] and doc["tickets"]["SOFT-2273"]["state"] == "pr", "an unreadable extra repo holds nothing and breaks nothing"
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "x" / "wait.json"
         write(path, doc)
