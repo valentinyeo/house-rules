@@ -55,6 +55,10 @@ minute after the end). The fingerprint is kept at the first pick after the end i
 pick already holds, so it costs no GitHub or board call. Cap 6 hours (Urgent 1 hour, incident 20 minutes); a wait with nothing to
 observe is held until its stated recheck time, else 30 minutes. Unreadable or late data, and any error, hold nothing.
 fleet/pick --replay-waits [DAYS] counts what it would have held in the run ledger. The park lane is not gated.
+Cannot be built yet (HYCI-355): a new-work ticket that says it needs Valentin, a key only he or an admin can place, access,
+a design sign-off or a person at a PC is refused before any model starts ("cannot be built yet: <what>"). Text only, no
+board read. An incident and a ticket with an open PR are never held. bin/replay-built [DAYS] counts the first runs since
+and how many of them the hold refuses.
 A runner whose own unfinished ticket rests or waits (ship-claim HOLD names it) gets that ticket back with source "park" and
 briefs/park-job.txt: decide the fleet/park mode, run it, end. A ticket is handed back at most once per REST_MAX (ledger
 STATE/parks, any runner, written when the job is handed out), so a park run that fails to park cannot loop.
@@ -125,6 +129,26 @@ CI_LABELS = {"ci", "hypertask ci"}
 BASE_SKIP = set()
 WASTED = "wasted runs"  # fleet/waste-mark adds it after three empty runs in a row; every lane leaves the ticket for its owner
 WASTED_WHY = "wasted runs: examine the ticket"
+# HYCI-355: a ticket that says up front it cannot be built yet never starts a model. Valentin 2026-11-13: "the biggest
+# group of empty runs: a runner picks a ticket that cannot be built yet. It waits on a person, sits in Backlog, or needs a
+# key." The waits on a person, a lead or an open ticket are read from the board (waiting, BlockedBy, Valentin Review). These
+# phrases catch the rest: a ticket that needs Valentin's go, a secret only he can put in place, access only an admin has,
+# a design sign-off or a person at a PC. Narrow on purpose: a wrong skip only delays a ticket, but a ticket that says
+# "no paid service" or quotes "access denied" is still buildable, so the words alone are not enough.
+BUILD_NEED = (
+    (re.compile(r"\bneeds? (?:valentin|(?:valentin'?s )?(?:go|yes|approval|sign-?off|decision|signature))\b"), "needs Valentin"),
+    (re.compile(r"\b(?:waiting|waits|blocked) on valentin\b"), "needs Valentin"),
+    (re.compile(r"\bneeds? (?:a |an |the )?(?:[\w.-]+ ){0,3}?(?:key|token|credential|login|password|secret)s?"
+                r"\s+(?:from|in|out of)\s+(?:1password|valentin|the (?:vault|password manager))\b"), "needs a key"),
+    (re.compile(r"\b(?:runners?|agents?) (?:cannot|can'?t) (?:get|obtain|read|reach) (?:the |a |an |any )?(?:[\w.-]+ ){0,2}?"
+                r"(?:key|token|credential|access|secret)s?\b"), "needs access"),
+    (re.compile(r"\b(?:key|token|credential|secret)s? (?:that |which )?only (?:valentin|an? (?:admin|owner)) (?:has|can|holds)\b"), "needs a key"),
+    (re.compile(r"\baccess (?:that |which )?only (?:valentin|an? (?:admin|owner)) (?:has|can|grants?)\b"), "needs access"),
+    (re.compile(r"\bonly (?:valentin|an? (?:admin|owner)) (?:can|may|has|holds|grants?)\b[^.]{0,40}?\b(?:key|token|credential|secret|access)\b"),
+     "needs access"),
+    (re.compile(r"\bneeds? (?:valentin|someone|a human|a person) at (?:his|the|their) (?:pc|machine|laptop)\b"), "needs a person at a PC"),
+    (re.compile(r"\bneeds? (?:a |an )?design (?:sign-?off|approval|decision|pass)\b"), "needs a design"),
+)
 BRAINS = ("light", "medium", "hard", "extra-hard")
 SKIP_ALL = {"brain-extra-hard"}  # cursor default; set_engine recomputes it per engine
 SKIP_APP = {"design-pass"}
@@ -287,6 +311,13 @@ def can_join(n, board):
 
 # ---------------------------------------------------------------- snapshot
 
+def build_need(text):
+    """The first reason this ticket says it cannot be built yet, or "". Text only: no board or GitHub read (HYCI-355)."""
+    flat = " ".join(re.sub(r"<[^>]+>", " ", text or "").replace("&#x27;", "'").replace("&quot;", '"')
+                    .replace("&amp;", "&").lower().split())
+    return next((why for rx, why in BUILD_NEED if rx.search(flat)), "")
+
+
 def slim(t, board):
     holders = []
     for a in t.get("assignees") or []:
@@ -302,6 +333,7 @@ def slim(t, board):
             "holders": holders, "waiting": bool(t.get("waitingOnUserId") or t.get("waitingOnAgentId")
                                                 or t.get("blockerCommentId")),
             "subs": bool(t.get("sub_tasks")), "paid": "paid" in (t.get("description") or "").lower(),
+            "needs": build_need((t.get("title") or "") + " " + (t.get("description") or "")),
             "created": t.get("createdAt") or "", "updated": t.get("updatedAt") or ""}
 
 
@@ -863,6 +895,25 @@ def sf_eligible(t):
     return sf_reason(t) is None
 
 
+def pr_ticket_for(key):
+    """The open PR that names this ticket, or None. Unreadable GitHub is no PR: a lost read never holds a ticket."""
+    try:
+        return next((p for p in open_prs() if pr_ticket(p) == key), None)
+    except Exception:
+        return None
+
+
+def cannot_build(t):
+    """Why this new-work ticket cannot be built yet, or "". A ticket that states it needs Valentin, a key only he or an
+    admin can place, access, a design sign-off or a person at a PC never starts a model (HYCI-355). An incident and a
+    ticket with an open PR are never held: the incident lane owns the first, the PR lane offers the second. Only new-work
+    tickets are asked, so a runner that already started a ticket keeps it."""
+    why = t.get("needs") or ""
+    if not why or INCIDENT_LABEL in (t.get("labels") or []):
+        return ""
+    return "" if pr_ticket_for(t["key"]) else why
+
+
 def eligible_reason(t):
     """Why a runner may not start this ticket from its new-work column, or None when it may."""
     labels = set(t["labels"])
@@ -876,6 +927,9 @@ def eligible_reason(t):
         return "waits on Valentin"
     if not t["section"] in BOARDS[t["board"]][0]:
         return "not in a new-work column"
+    need = cannot_build(t)
+    if need:
+        return "cannot be built yet: " + need
     if t["board"] == "2060":
         return sf_reason(t)
     if t["board"] == "15" and not is_ci(t):
@@ -2997,6 +3051,42 @@ def wip_self_test():
     wasted = tk("HYCI-9", "Backlog", labels=["wasted runs"])
     assert eligible_reason(wasted) == "wasted runs: examine the ticket" and skipped(wasted) \
         and pipeline_reason(wasted, set(), False) == "wasted runs", "three empty runs mark a ticket and every lane leaves it"
+
+    def need(key, text, section="Backlog", labels=(), prs=()):
+        """eligible_reason for a ticket whose title/body says text, with the open PR list given (HYCI-355)."""
+        t = slim({"ticketNumber": key, "section": section, "title": text, "labels": [{"name": l} for l in labels]},
+                 PREFIX_BOARD[key.split("-")[0]])
+        global SNAP
+        saved = SNAP
+        SNAP = {"tickets": [t], "rel": {}, "prs": list(prs), "incidents": [], "open": {}}
+        why = eligible_reason(t)
+        SNAP = saved
+        return why
+
+    assert need("HYCI-9", "Needs Valentin's go before any code") == "cannot be built yet: needs Valentin", \
+        "a ticket that says it needs Valentin never starts a model"
+    assert need("HYCI-9", "Keys", "Backlog") is None, "no such words: still new work"
+    assert need("HYCI-9", "Rotate the Stripe key from the vault") is None, \
+        "a build task that mentions a key is still buildable"
+    assert need("HYCI-9", "Security fixes need a fresh Vercel scan. Risk: no paid service. Undo any scan.") is None, \
+        "'no paid service' is not a need (HYCI-299)"
+    assert need("HYCI-9", 'The app answers "Project not found or access denied"') is None, \
+        "a quoted error is not a need (HYCI-271)"
+    assert need("HYCI-9", "Wireframe first", "Backlog") is None, "design work without the words is not held"
+    assert need("HYCI-9", "Session sidebar needs a design sign-off") == "cannot be built yet: needs a design", \
+        "a design sign-off holds the ticket (HYCI-355)"
+    assert need("HYCI-9", "Only an admin can place the token") == "cannot be built yet: needs access", \
+        "a secret only an admin can place holds the ticket"
+    assert need("HYCI-9", "Only the repo admin can merge it") is None, \
+        "an admin mention with no secret or access is not a need"
+    assert need("HYCI-9", "Runners cannot read the leaked-key warning") is None, \
+        "'runners cannot read' alone is not a need: it is the fix"
+    assert need("HYCI-9", "Needs Valentin's go", labels=["incident"], prs=()) is None, \
+        "an incident always runs (house rule)"
+    assert need("HYCI-9", "Needs Valentin's go", prs=[{"title": "HYCI-9 x", "branch": "runner-3/hyci-9"}]) is None, \
+        "a ticket with an open PR is offered by the PR lane, never held"
+    assert need("HYCI-9", "Needs Valentin's go", "In Progress") == "not in a new-work column", \
+        "only new work is asked: a runner that started a ticket keeps it"
 
     SNAP = {"tickets": [tk("HTPR-10", "In Progress"), tk("HTPR-11", "In Progress"), tk("HTPR-12", "In Progress", waiting=True)],
             "rel": {}, "prs": [], "incidents": []}

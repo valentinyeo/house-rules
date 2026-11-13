@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""replay-built: did the picker stop starting models on tickets that cannot be built yet?
+
+Valentin 2026-11-13 (HYCI-355): "Replay the last 7 days with bin/replay-built to show the effect." The run ledger holds
+one line per ended run (ts, runner, ticket, engine, state, reason, detail, progress). A FIRST run is the first run on a
+ticket inside the window; it is EMPTY when the run pushed nothing (state not BUILDING or OWN_PR and progress 0 or
+missing). The picker now refuses a ticket before any model starts when it waits on a person, on an open ticket, or says
+it needs a key, access, a design sign-off or someone at a PC (HYCI-355). The replay counts the empty first runs and splits
+them by why they were empty, so the effect is a number rather than a claim.
+
+  bin/replay-built [DAYS]          last 7 days by default
+  bin/replay-built --ledger PATH   another ledger (tests)
+  bin/replay-built --self-test     fixture ledger, no network
+
+Read only. No board call, no GitHub call, no model, no money.
+"""
+import collections
+import datetime as dt
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+LEDGER = Path(os.environ.get("FLEET_RUNNER_STATE", Path.home() / ".local/state/ht-or-runners")) / "run-ledger.jsonl"
+# The day the picker started refusing tickets that cannot be built yet (HYCI-355). Runs before it are the "before".
+GATE_DAY = dt.datetime(2026, 11, 13, tzinfo=dt.timezone.utc)
+PRODUCTIVE = ("BUILDING", "OWN_PR")
+FAMILIES = (
+    ("held by the picker already: waits on Valentin", re.compile(
+        r"valentin review|waits? on valentin|needs? valentin|valentin flag|question \d|unanswered question")),
+    ("held by the picker already: waits on a ticket", re.compile(r"waits?-?on |blocked-?by|waiting on [a-z]+-\d")),
+    ("caught by the new hold: needs a key, access or a PC", re.compile(
+        r"\bkey\b|access|credential|secret|1password|login|paid|permission")),
+    ("nothing built yet: no PR, no release", re.compile(
+        r"unbuilt|unstarted|awaiting implementation|implementation (?:needed|required)|no release|no fix|not live|"
+        r"no deployed|cross-?qa|no pr\b|unmerged")),
+    ("checks pending on its own PR", re.compile(r"checks|ci-|pr \d|ai.review|review pending|protected review|deploy")),
+    ("no model reply, no session, crash", re.compile(r"no model reply|missing session|crash|timeout|no reply")),
+)
+
+
+def when(row):
+    try:
+        return dt.datetime.fromisoformat(str(row.get("ts", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def empty(row):
+    """A first run that did not build: it did not end BUILDING or OWN_PR, and it pushed nothing when the run recorded
+    progress (the field is only in runs since 13 Nov, so an old check-wait reads as not built even when it pushed)."""
+    return row.get("state") not in PRODUCTIVE and not (row.get("progress") or 0)
+
+
+def family(row):
+    if not row.get("state") and not row.get("reason"):
+        return "no ending recorded (runs before 8 Nov wrote none)"
+    text = f"{row.get('reason') or ''} {row.get('detail') or ''}".lower()
+    return next((name for name, rx in FAMILIES if rx.search(text)), "other")
+
+
+def read_ledger(path):
+    rows = []
+    try:
+        for line in open(path):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("ticket") and when(row):
+                rows.append(row)
+    except OSError:
+        pass
+    return sorted(rows, key=when)
+
+
+def replay(rows, now, days, out=print):
+    since = now - dt.timedelta(days=days)
+    window = [r for r in rows if when(r) >= since]
+    seen, firsts = set(), []
+    for row in window:
+        if row["ticket"] not in seen:
+            seen.add(row["ticket"])
+            firsts.append(row)
+    empties = [r for r in firsts if empty(r)]
+    share = (100 * len(empties) // len(firsts)) if firsts else 0
+    out(f"replay: {days} days, {len(window)} runs on {len(seen)} tickets, {len(firsts)} first runs, "
+        f"{len(firsts) - len(empties)} built, {len(empties)} did not build ({share}%)")
+    known = [r for r in firsts if "progress" in r]
+    if known:
+        out(f"  of the {len(known)} first runs that recorded progress, {sum(1 for r in known if not (r.get('progress') or 0))} "
+            f"pushed nothing; earlier runs do not record it")
+    days_ = collections.defaultdict(lambda: [0, 0])
+    for row in firsts:
+        cell = days_[when(row).strftime("%d %b")]
+        cell[1] += 1
+        cell[0] += empty(row)
+    out("day       first  nobuild  %")
+    for day in sorted(days_, key=lambda d: dt.datetime.strptime(d, "%d %b").replace(year=now.year)):
+        held, all_ = days_[day]
+        out(f"{day:9} {all_:5} {held:8} {100 * held // all_ if all_ else 0:5}%")
+    before = [r for r in firsts if when(r) < GATE_DAY]
+    after = [r for r in firsts if when(r) >= GATE_DAY]
+    for label, group in (("before the hold (HYCI-355)", before), ("since the hold", after)):
+        if group:
+            held = sum(empty(r) for r in group)
+            out(f"{label}: {held} did not build of {len(group)} first runs ({100 * held // len(group)}%)")
+    caught = collections.Counter(family(r) for r in empties)
+    out(f"why the {len(empties)} first runs that did not build did not build:")
+    for name, count in caught.most_common():
+        out(f"  {count:4}  {name}")
+    new = sum(count for name, count in caught.items() if name.startswith("caught by the new hold"))
+    out(f"the new hold would have refused {new} of {len(empties)} of them before any model started")
+    return len(firsts), len(empties), new
+
+
+def self_test():
+    """A fixture ledger: two windows, one empty first run per family, one ticket with a second run."""
+    import tempfile
+    day = dt.datetime(2026, 11, 12, 12, tzinfo=dt.timezone.utc)
+
+    def row(at, key, state, reason="", progress=None):
+        r = {"ts": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "ticket": key, "state": state, "reason": reason, "detail": reason}
+        if progress is not None:
+            r["progress"] = progress
+        return r
+
+    rows = [row(day, "HTPR-1", "BUILDING"),                                        # built first run
+            row(day, "HTPR-2", "WAIT_CHECK", "RUNNER IDLE waits on Valentin"),      # held already
+            row(day, "HTPR-3", "WAIT_CHECK", "RUNNER IDLE ci-blocked HYCI-9"),      # checks
+            row(day, "HTPR-4", "WAIT_CHECK", "RUNNER IDLE needs the Stripe key"),   # new hold
+            row(day, "HTPR-5", "WAIT_CHECK", "RUNNER IDLE unstarted"),              # nothing built
+            row(day, "HTPR-5", "BUILDING"),                                         # a later run is not a first run
+            row(day, "HTPR-6", "WAIT_CHECK", "checks pending", progress=2),         # pushed: not empty
+            row(day, "", "IDLE_CAP", "none")]                                       # no ticket: ignored
+    path = Path(tempfile.mkdtemp()) / "run-ledger.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    got = read_ledger(path)
+    assert len(got) == 7, "a run with no ticket is not replayed"
+    lines = []
+    firsts, empties, new = replay(got, day + dt.timedelta(hours=1), 7, out=lines.append)
+    assert (firsts, empties, new) == (6, 4, 1), f"six first runs, four did not build, one the new hold catches: got {(firsts, empties, new)}"
+    text = "\n".join(lines)
+    assert "4 did not build (66%)" in text, text
+    assert re.search(r"1 +caught by the new hold: needs a key, access or a PC", text), text
+    assert "would have refused 1 of 4 of them" in text, text
+    assert replay(got, day + dt.timedelta(days=30), 7, out=lambda *_: None) == (0, 0, 0), "an empty window replays to zero"
+    print("replay-built self-test ok: first runs, first runs that did not build, the hold's share, an empty window")
+
+
+def main(argv):
+    if argv[:1] == ["--self-test"]:
+        return self_test() or 0
+    path = LEDGER
+    if argv[:1] == ["--ledger"]:
+        path = Path(argv[1])
+        argv = argv[2:]
+    days = int(argv[0]) if argv[:1] and argv[0].isdigit() else 7
+    rows = read_ledger(path)
+    if not rows:
+        print(f"replay: no runs in {path}")
+        return 1
+    replay(rows, dt.datetime.now(dt.timezone.utc), days)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
