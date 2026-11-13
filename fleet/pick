@@ -39,6 +39,9 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
 Restart in steps (HYCI-345): a stop cleared by bin/factory-breaker carries a ramp step. Step 1 lets one runner take work, step 2 three,
 step 3 all; the log line "factory restart step K/3: N runner(s)" names the cap and a runner past it gets
 "none: factory restart step K/3, N runner(s)". Steps are earned by 24 good hours, decided by bin/factory-breaker.
+Probe (HYCI-359): a stop that idles every runner cannot build the replay its own clear needs. While the record says stopped,
+one runner per plan (the step 1 cap) takes clean tickets: the log names it and a second runner on the same plan gets
+"none: factory stopped: R1; probe, 1 runner(s) per plan". bin/factory-breaker clears the stop itself at 90% of 10 runs.
 One runner holds one ticket until it is live. brain-extra-hard runs on the codex engine (Sol high) or the claude engine (Opus high); every other engine skips it.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
@@ -115,6 +118,7 @@ ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without 
 FACTORY_STOP = Path(os.environ.get("FLEET_FACTORY_STOP", HOME / ".local/state/fleet/factory-stop.json"))
 # HYCI-345: after a clear the pool comes back in steps (bin/factory-breaker walks them on 24 good hours); the picker holds the cap.
 RAMP_CAPS = (1, 3, None)
+PROBE_CAP = RAMP_CAPS[0]  # HYCI-359: a stopped factory probes with one runner per plan, the same cap as restart step 1
 
 # board -> (new-work columns, building columns)
 BOARDS = {
@@ -2124,6 +2128,27 @@ def in_restart(now=None):
     return ((now or dt.datetime.now(dt.timezone.utc)) - at).total_seconds() < RESTART_WINDOW_H * 3600
 
 
+def plan_of(n):
+    eng = runner_engine(n)
+    return ENGINES[eng]["plan"] if eng in ENGINES else "?"
+
+
+def busy_on_plan(n, plan):
+    return [m for m in range(1, RUNNERS + 1) if m != n and runner_engine(m) in ENGINES
+            and ENGINES[runner_engine(m)]["plan"] == plan and running(m)]
+
+
+def probe_gate(n, why):
+    """HYCI-359: a stop that idles every runner never fills the window its own clear reads, so the stop could only be lifted by
+    hand. While it is active one runner per plan takes clean tickets as a probe; bin/factory-breaker clears the stop itself once
+    those runs build 90% of 10. Under the line the stop holds."""
+    log(f"factory stopped: {why}; probe: {PROBE_CAP} runner(s) per plan take clean tickets")
+    busy = busy_on_plan(n, plan_of(n))
+    if len(busy) >= PROBE_CAP:
+        raise SystemExit(f"none: factory stopped: {why}; probe, {PROBE_CAP} runner(s) per plan: "
+                         f"{plan_of(n)} runners {' '.join(map(str, busy))} already in a run")
+
+
 def ramp_gate(n):
     """HYCI-345, Valentin 13 Nov ("one runner PER plan"): the ramp cap is per plan, not per runner number. Step 1 lets one runner per
     plan hold a run, step 2 three, step 3 all. Runner numbers say nothing about the plan: runner 1 may be a reserved plan's."""
@@ -2131,13 +2156,10 @@ def ramp_gate(n):
     if cap is None:
         return
     log(ramp_line(step, cap))
-    eng = runner_engine(n)
-    plan = ENGINES[eng]["plan"] if eng in ENGINES else "?"
-    busy = [m for m in range(1, RUNNERS + 1) if m != n and runner_engine(m) in ENGINES
-            and ENGINES[runner_engine(m)]["plan"] == plan and running(m)]
+    busy = busy_on_plan(n, plan_of(n))
     if len(busy) >= cap:
         raise SystemExit(f"none: factory restart step {step}/{len(RAMP_CAPS)}, {cap} runner(s) per plan: "
-                         f"{plan} runners {' '.join(map(str, busy))} already in a run")
+                         f"{plan_of(n)} runners {' '.join(map(str, busy))} already in a run")
 
 
 def staged_units(units):
@@ -2156,9 +2178,9 @@ def choose(n, dry):
         return hit
     why = factory_stopped()
     if why:
-        log(f"factory stopped: {why}")
-        raise SystemExit(f"none: factory stopped: {why}")
-    ramp_gate(n)
+        probe_gate(n, why)
+    else:
+        ramp_gate(n)
     hand_back_timeouts(n, dry)
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
@@ -2797,7 +2819,8 @@ def self_test():
     wait_gate_self_test()
     factory_stop_self_test()
     stage_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop and restart steps, 38 wait-gate checks")
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, probe and restart steps, "
+          "38 wait-gate checks")
 
 
 def factory_stop_self_test():
@@ -2821,15 +2844,8 @@ def factory_stop_self_test():
         assert factory_stopped() == "unreadable stop record", "an unreadable record stops the factory"
         assert factory_ramp() == (3, None), "an unreadable record caps nothing"
         tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": None}))
-        # choose() takes nothing: after the incident step, before any ticket work
-        saved_inc = incident_step
-        globals()["incident_step"] = lambda n, dry: None
-        try:
-            choose(5, True)
-            raise AssertionError("a stopped factory must take nothing")
-        except SystemExit as e:
-            assert str(e) == "none: factory stopped: R2", str(e)
         # an incident still goes out first
+        saved_inc = incident_step
         globals()["incident_step"] = lambda n, dry: ({"key": "I-1"}, "incident")
         assert choose(5, True)[1] == "incident", "a stopped factory still takes an incident"
         globals()["incident_step"] = saved_inc
@@ -2874,6 +2890,23 @@ def factory_stop_self_test():
             assert factory_ramp() == (3, None) and "factory restart" not in exit_msg(1), "the last step caps nothing"
             ramped(9)
             assert factory_ramp() == (3, None), "a step past the last is the last"
+
+            # HYCI-359: a stop no longer idles every runner. It probes with one runner per plan at the step 1 cap, so its own
+            # replay can fill; the record still says stopped until bin/factory-breaker clears it on 90% of 10 runs.
+            tmp.write_text(json.dumps({"at": "2026-11-13T09:00:00Z", "tripped_by": ["R2"], "cleared": None}))
+            RUNNING.clear()
+            lines.clear()
+            assert factory_stopped() == "R2", "a probe is not a clear"
+            assert "factory stopped" not in exit_msg(1), "a stopped factory lets its probe runner through"
+            assert "factory stopped: R2; probe: 1 runner(s) per plan take clean tickets" in lines, lines
+            assert factory_stopped() == "R2", "the probe leaves the record stopped"
+            RUNNING[2] = "HTPR-1"
+            assert exit_msg(1) == ("none: factory stopped: R2; probe, 1 runner(s) per plan: "
+                                  "opencode runners 2 already in a run"), exit_msg(1)
+            assert exit_msg(4).startswith("none: factory stopped: R2; probe, 1 runner(s) per plan"), "runner 4 is the same plan"
+            assert "factory stopped" not in exit_msg(5), "codex probes with a runner of its own plan"
+            RUNNING.clear()
+            tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {"at": "y", "by": "t", "why": "t"}}))
         finally:
             globals()["log"], globals()["SNAP"], globals()["incident_step"] = saved_log, saved_snap, saved_inc
             globals()["runner_engine"], globals()["RUNNERS"] = saved_eng, saved_n
