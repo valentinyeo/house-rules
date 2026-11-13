@@ -1497,12 +1497,30 @@ def open_blocked_by(t):
     return any(is_open(w) for w in relations(t["key"])[0])
 
 
+PICKER = [0]  # the runner number this pick runs for
+
+
+def infra_closed(t):
+    """Features first (Valentin 13 Nov: "they are still only on infra"). A Fleet CI & Infra ticket is new work for this runner
+    only under the infra cap, and never while the factory is stopped: the probe must prove features (HYCI-376).
+    Incidents are outside both. A runner's own held ticket is not new work."""
+    if not t["key"].startswith("HYCI-") or INCIDENT_LABEL in t["labels"]:
+        return None
+    if factory_stopped():
+        return "features first: factory stopped, probe takes app work only"
+    if infra_count(PICKER[0]) >= infra_cap():
+        return f"features first: {infra_cap()} runner(s) already on Fleet CI & Infra"
+    return None
+
+
 def held_reason(t, own=False):
     """Why no runner takes this ticket now, or None. It waits on someone: Valentin Review, a marked Question to Valentin
     (not for the runner's own ticket), an open BlockedBy link, or a ticket parked three times in six hours. The relation
     reads are capped per pick; out of reads, nothing unchecked is taken."""
     if repark_suppressed(t):
         return "parked three times in six hours"
+    if not own and infra_closed(t):
+        return infra_closed(t)
     if not own and t["section"] == "Valentin Review":
         return "in Valentin Review"
     if not own and t["waiting"]:
@@ -2201,6 +2219,7 @@ def staged_units(units):
 
 
 def choose(n, dry):
+    PICKER[0] = n
     hit = incident_step(n, dry)
     if hit:
         return hit
@@ -2236,6 +2255,9 @@ def choose(n, dry):
                                                                 or (blocks_known(t) and not full))]
             log("kept slot: another runner holds it; this runner takes only blockers" if cands
                 else "kept slot: another runner holds it; app work first")
+        if factory_stopped():
+            cands = [t for t in cands if INCIDENT_LABEL in t["labels"]]
+            log("kept slot: incident only" if cands else "kept slot: factory stopped, probe takes app work only")
         if cands:
             got = take_kept_slot(n, me, cands, dry)
             if got:
