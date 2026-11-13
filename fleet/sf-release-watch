@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""Software Factory release watch (HYCI-352). A script waits for the PR, the merge and the release. No model.
+
+    fleet/sf-release-watch [--dry-run]
+    fleet/sf-release-watch --self-test
+
+Why: a Software Factory ticket (board 2060) took five runs on one runner (SOFT-2273, 13 Nov): one wrote the code, four only
+waited for PR checks, the release queue and the changelog, and the last one only moved the ticket to Done. This script does
+that waiting every five minutes and costs nothing when no ticket is in Doing or AI Review.
+
+For every ticket in Doing or AI Review whose app label is in APPS (apps with an auto-release workflow on merge):
+  pr       an open PR, checks pending or green, no conflict, no change request. A person or the repo's automerge merges it.
+  release  the PR merged, no release contains the merge commit yet (and no release run failed).
+  done     a release contains the merge commit and its notes name the ticket: the ticket moves to Done, one agent-lane note.
+  attention  red or conflicting PR, change request, draft, failed release run, notes without the ticket, a release that is
+           over STALL_S late. A model has work, so nothing holds the ticket.
+The result is written to STATE/sf-release-wait.json. fleet/pick reads it and does not hand a ticket in state pr or release to
+a model (one_run_hold / sf_wait_rows): it makes no GitHub call of its own. A file older than 15 minutes holds nothing.
+
+The ticket key on the board is SOFT-2273 while the PR title and the release note say IGSH-2273. Both prefixes are board 2060,
+so every match goes by the number.
+"""
+import calendar
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+HOME = Path.home()
+STATE = Path(os.environ.get("FLEET_STATE") or HOME / ".local/state/fleet")
+OUT = Path(os.environ.get("SF_RELEASE_WAIT") or STATE / "sf-release-wait.json")
+BOARD = "2060"
+COLUMNS = ("Doing", "AI Review")
+# ticket label -> (GitHub repository, release tag prefix). Only apps whose release workflow runs on merge belong here.
+APPS = {"multiprompt": "valentinyeo/multiprompt", "wazig": "valentinyeo/postbox", "postbox": "valentinyeo/postbox"}
+LOOKBACK_S = 24 * 3600  # a PR merged longer ago than this is not this ticket's release wait
+STALL_S = 3 * 3600  # a release this late is a model's job
+SF_PREFIXES = ("IGSH", "SOFT")
+SESSION = os.environ.get("SHIP_SESSION_NAME") or "Multi Bot Opus Lead"
+FAILED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR", "STARTUP_FAILURE"}
+RUNNING = {"IN_PROGRESS", "PENDING", "QUEUED", "EXPECTED", "WAITING", "REQUESTED"}
+KEY = re.compile(r"\b(?:IGSH|SOFT)-(\d+)\b", re.I)
+
+
+def epoch(iso):
+    return calendar.timegm(time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S")) if iso else 0
+
+
+def iso(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def number_of(key):
+    m = re.fullmatch(r"(?:IGSH|SOFT)-(\d+)", key or "")
+    return int(m[1]) if m else None
+
+
+def names_ticket(text, number):
+    """Does this PR title, branch or release note name board 2060 ticket `number`, under either key prefix or by its link?"""
+    text = text or ""
+    return any(int(m[1]) == number for m in KEY.finditer(text)) or bool(re.search(rf"project-{BOARD}/{number}\b", text))
+
+
+def check_word(pr):
+    """pending, green or the reason a model has work (red, conflicting, change request, draft, unread)."""
+    if pr.get("isDraft"):
+        return "draft"
+    rows = pr.get("statusCheckRollup") or []
+    if not rows:
+        return "unread"
+    states = [(c.get("conclusion") or c.get("state") or c.get("status") or "").upper() for c in rows]
+    if any(s in FAILED for s in states):
+        return "red"
+    if pr.get("mergeable") == "CONFLICTING":
+        return "conflicting"
+    if pr.get("reviewDecision") == "CHANGES_REQUESTED":
+        return "change request"
+    if any(s in RUNNING or s == "" for s in states):
+        return "pending"
+    return "pending" if pr.get("mergeStateStatus") == "BLOCKED" else "green"
+
+
+def classify(number, prs, releases, contains, notes, run_failed, now):
+    """One ticket's state from what GitHub says. Pure: every GitHub answer comes in as an argument.
+    prs: the repo's recent PRs (gh pr list rows). releases: published releases, newest first. contains(sha, tag): does the tag
+    contain the commit. notes(tag): the release body. run_failed(sha): did a workflow run on that commit fail.
+    Returns (state, detail, since, release_tag, merge_sha); state is pr, release, done, attention or none."""
+    mine = [p for p in prs if names_ticket(p.get("title"), number) or names_ticket(p.get("headRefName"), number)]
+    live = [p for p in mine if p["state"] == "OPEN"]
+    if live:
+        words = [check_word(p) for p in live]
+        bad = next((w for w in words if w not in ("pending", "green")), None)
+        since = max(epoch(p["updatedAt"]) for p in live)
+        nums = ", ".join(f"#{p['number']}" for p in live)
+        if bad:
+            return "attention", f"PR {nums} is {bad}", iso(since), "", ""
+        word = "pending" if "pending" in words else "green"
+        return "pr", f"PR {nums} open, checks {word}", iso(since), "", ""
+    merged = sorted((p for p in mine if p["state"] == "MERGED" and p.get("mergedAt") and now - epoch(p["mergedAt"]) < LOOKBACK_S),
+                    key=lambda p: p["mergedAt"])
+    if not merged:
+        return "none", "", "", "", ""
+    pr = merged[-1]
+    sha, at = (pr.get("mergeCommit") or {}).get("oid") or "", epoch(pr["mergedAt"])
+    if not sha:
+        return "attention", f"PR #{pr['number']} merged but GitHub gave no merge commit", iso(at), "", ""
+    for rel in sorted((r for r in releases if epoch(r["publishedAt"]) >= at), key=lambda r: r["publishedAt"]):
+        if contains(sha, rel["tagName"]):
+            if names_ticket(notes(rel["tagName"]), number):
+                return "done", f"PR #{pr['number']} released as {rel['tagName']}, notes name the ticket", iso(at), rel["tagName"], sha
+            return "attention", f"{rel['tagName']} contains PR #{pr['number']} but its notes do not name the ticket", iso(at), rel["tagName"], sha
+    if run_failed(sha):
+        return "attention", f"a workflow run on the merge of PR #{pr['number']} failed", iso(at), "", sha
+    if now - at > STALL_S:
+        return "attention", f"PR #{pr['number']} merged {int((now - at) / 3600)}h ago and no release contains it", iso(at), "", sha
+    return "release", f"PR #{pr['number']} merged, release not out yet", iso(at), "", sha
+
+
+class Hub:
+    """Everything outside this process: GitHub, the board, vcc. Swapped out in the self-test."""
+
+    def __init__(self, dry):
+        self.dry = dry
+        self.env = None
+        self.notes_cache = {}
+
+    def token_env(self):
+        if self.env is None:
+            env = dict(os.environ)
+            for tool in ("gh-app-token-sf", "gh-app-token"):
+                tok = subprocess.run([tool], capture_output=True, text=True).stdout.strip() if self.have(tool) else ""
+                if tok:
+                    env["GH_TOKEN"] = tok
+                    break
+            self.env = env
+        return self.env
+
+    @staticmethod
+    def have(tool):
+        return any(os.access(os.path.join(d, tool), os.X_OK) for d in os.environ.get("PATH", "").split(":"))
+
+    def gh(self, *args):
+        for attempt in (1, 2):  # GitHub's GraphQL answers 502 and 504 now and then: one retry, then the ticket reads attention
+            r = subprocess.run(["gh", *args], capture_output=True, text=True, env=self.token_env(), timeout=120)
+            if r.returncode == 0 or attempt == 2:
+                break
+            time.sleep(10)
+        if r.returncode != 0:
+            raise RuntimeError(f"gh {' '.join(args[:3])}: {(r.stderr or '').strip()[:100]}")
+        return json.loads(r.stdout) if r.stdout.strip() else None
+
+    def tickets(self):
+        """(key, number, labels, section) of board 2060 tickets in COLUMNS."""
+        out = []
+        for section in COLUMNS:
+            r = subprocess.run(["hypertask", "--json", "task", "list", "--project", BOARD, "--section", section, "--limit", "100"],
+                               capture_output=True, text=True, timeout=300)
+            try:
+                rows = json.loads(r.stdout[r.stdout.index("{"):])["tasks"]
+            except (ValueError, KeyError):
+                raise RuntimeError(f"board {BOARD} column {section} unreadable")
+            for t in rows:
+                n = number_of(t.get("ticketNumber"))
+                if n:
+                    out.append((t["ticketNumber"], n, {(l.get("name") or "").strip().lower() for l in t.get("labels") or []}, section))
+        return out
+
+    def prs(self, repo):
+        return self.gh("pr", "list", "-R", repo, "--state", "all", "--limit", "30", "--json",
+                       "number,title,headRefName,state,isDraft,mergedAt,mergeCommit,updatedAt,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus")
+
+    def releases(self, repo):
+        rows = self.gh("release", "list", "-R", repo, "--limit", "20", "--json", "tagName,publishedAt,isDraft,isPrerelease")
+        return [r for r in rows if not r["isDraft"] and not r["isPrerelease"] and r.get("publishedAt")]
+
+    def contains(self, repo, sha, tag):
+        return self.gh("api", f"repos/{repo}/compare/{sha}...{tag}")["status"] in ("ahead", "identical")
+
+    def notes(self, repo, tag):
+        key = (repo, tag)
+        if key not in self.notes_cache:
+            self.notes_cache[key] = self.gh("release", "view", tag, "-R", repo, "--json", "body")["body"] or ""
+        return self.notes_cache[key]
+
+    def run_failed(self, repo, sha):
+        runs = self.gh("api", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=30")["workflow_runs"]
+        return any(r.get("conclusion") in ("failure", "timed_out", "startup_failure") for r in runs)
+
+    def finish(self, key, text):
+        """Agent-lane note, then Done. vcc assigns the mover; the session name is the Software Factory lead."""
+        if self.dry:
+            print(f"would: vcc activity add {key}; vcc task move {key} Done :: {text}")
+            return
+        env = dict(os.environ, SHIP_SESSION_NAME=SESSION)
+        vcc = str(HOME / ".local/bin/vcc")
+        a = subprocess.run([vcc, "activity", "add", key, "--text", text], capture_output=True, text=True, env=env, timeout=120)
+        m = subprocess.run([vcc, "task", "move", key, "Done"], capture_output=True, text=True, env=env, timeout=120)
+        if a.returncode or m.returncode:
+            raise RuntimeError(f"vcc failed for {key}: {((a.stderr or '') + (m.stderr or '')).strip()[:120]}")
+
+
+def sweep(hub, now):
+    """The whole state file: {"at", "tickets": {key: {state, detail, since, pr?}}}. Raises when the board is unreadable, so a
+    broken read leaves the last file to go stale (and hold nothing) instead of writing a false one."""
+    rows = [t for t in hub.tickets() if any(l in APPS for l in t[2])]
+    out, moved = {}, []
+    by_repo = {}
+    for key, n, labels, section in rows:
+        repo = next(APPS[l] for l in sorted(labels) if l in APPS)
+        by_repo.setdefault(repo, []).append((key, n))
+    for repo, tickets in sorted(by_repo.items()):
+        try:
+            prs, releases = hub.prs(repo), None
+        except RuntimeError as e:
+            for key, _ in tickets:
+                out[key] = {"state": "attention", "detail": f"GitHub unreadable: {e}"[:140], "since": iso(now)}
+            continue
+
+        def lazy_releases():
+            nonlocal releases
+            if releases is None:
+                releases = hub.releases(repo)
+            return releases
+
+        for key, n in tickets:
+            try:
+                state, detail, since, tag, sha = classify(
+                    n, prs, lazy_releases() if any(p["state"] == "MERGED" for p in prs) else [],
+                    lambda s, t: hub.contains(repo, s, t), lambda t: hub.notes(repo, t), lambda s: hub.run_failed(repo, s), now)
+                if state == "done":
+                    hub.finish(key, f"sf-release-watch (script, no model): {detail}. Moved to Done. Repo {repo}, release {tag}.")
+                    moved.append(key)
+            except RuntimeError as e:
+                state, detail, since = "attention", f"watch error: {e}"[:140], iso(now)
+            if state != "none":
+                out[key] = {"state": state, "detail": detail, "since": since}
+    return {"at": int(now), "tickets": {k: v for k, v in out.items() if v["state"] != "done"}}, moved
+
+
+def write(path, doc):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".sf-wait.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(doc, f)
+    os.replace(tmp, path)
+
+
+def main(dry):
+    now = time.time()
+    hub = Hub(dry)
+    doc, moved = sweep(hub, now)
+    if dry:
+        print(json.dumps(doc, indent=1))
+    else:
+        write(OUT, doc)
+    held = [k for k, v in doc["tickets"].items() if v["state"] in ("pr", "release")]
+    print(f"sf-release-watch: {len(doc['tickets'])} tickets, {len(held)} held for a script, {len(moved)} moved to Done {moved}")
+    return 0
+
+
+def self_test():
+    """SOFT-2273 (13 Nov): PR 961 titled IGSH-2273 merged 20:02, release v0.28.1689 published 21:20 with the note "IGSH-2273".
+    Four moments, each must read as a script's wait or as done, never as work for a model."""
+    t = lambda hh, mm: calendar.timegm((2026, 11, 13, hh, mm, 0))
+    checks = lambda *s: [{"name": f"c{i}", "conclusion": c if c != "RUN" else "", "status": "IN_PROGRESS" if c == "RUN" else "COMPLETED"}
+                         for i, c in enumerate(s)]
+    pr_open = {"number": 961, "title": "IGSH-2273: New shell sessions on servers disconnect at once", "headRefName": "igsh-2273-new-shell",
+               "state": "OPEN", "isDraft": False, "mergedAt": None, "mergeCommit": None, "updatedAt": "2026-11-13T19:10:00Z",
+               "statusCheckRollup": checks("SUCCESS", "RUN"), "reviewDecision": "", "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED"}
+    pr_merged = dict(pr_open, state="MERGED", mergedAt="2026-11-13T20:02:45Z", mergeCommit={"oid": "74e808b"},
+                     statusCheckRollup=checks("SUCCESS", "SUCCESS"))
+    other = {"number": 962, "title": "v0.28.884: release unpublished notes", "headRefName": "release/0.28.884", "state": "CLOSED",
+             "isDraft": False, "mergedAt": None, "mergeCommit": None, "updatedAt": "2026-11-13T20:05:00Z", "statusCheckRollup": [],
+             "reviewDecision": "", "mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"}
+    old = {"tagName": "v0.28.1686", "publishedAt": "2026-11-13T14:43:23Z"}
+    new = {"tagName": "v0.28.1689", "publishedAt": "2026-11-13T21:20:12Z"}
+    body = "- [IGSH-2272](https://app.hypertask.ai/detail/project-2060/2272) Check /clear works\n- [IGSH-2273](https://app.hypertask.ai/detail/project-2060/2273) New shell sessions\n"
+    never = lambda s, tag: False
+    in_new = lambda s, tag: tag == "v0.28.1689"
+    notes = lambda tag: body
+    ok = lambda s: False
+
+    def at(hh, mm, prs, releases, contains=never, nts=notes, failed=ok, number=2273):
+        return classify(number, prs, releases, contains, nts, failed, t(hh, mm))
+
+    moments = [
+        ("19:17 park job: PR open, one check running", at(19, 17, [pr_open, other], []), "pr"),
+        ("20:08 orphan run: PR merged 6 minutes ago, no release", at(20, 8, [pr_merged, other], [old]), "release"),
+        ("21:02 own run: release queued, not published", at(21, 2, [pr_merged, other], [old]), "release"),
+        ("21:43 own run: release published with the ticket in its notes", at(21, 43, [pr_merged, other], [old, new], in_new), "done"),
+    ]
+    for name, got, want in moments:
+        assert got[0] == want, f"{name}: {got[0]} != {want} ({got[1]})"
+    held = [n for n, g, w in moments if g[0] in ("pr", "release")]
+    assert len(held) == 3 and moments[3][1][0] == "done", held
+    # IGSH-27 must not match a note for IGSH-2273, and the board's SOFT prefix reads the same ticket
+    assert not names_ticket("IGSH-2273 x", 227) and names_ticket("SOFT-2273: x", 2273) and names_ticket("runner-7/soft-2273", 2273)
+    # what sends a ticket back to a model
+    assert at(19, 17, [dict(pr_open, statusCheckRollup=checks("FAILURE", "RUN"))], [])[0] == "attention", "red PR is a model's job"
+    assert at(19, 17, [dict(pr_open, mergeable="CONFLICTING")], [])[0] == "attention", "conflict is a model's job"
+    assert at(19, 17, [dict(pr_open, reviewDecision="CHANGES_REQUESTED")], [])[0] == "attention", "change request is a model's job"
+    assert at(19, 17, [dict(pr_open, isDraft=True)], [])[0] == "attention", "draft is a model's job"
+    assert at(19, 17, [dict(pr_open, statusCheckRollup=[])], [])[0] == "attention", "unread checks fail open"
+    assert at(19, 17, [dict(pr_open, mergeStateStatus="CLEAN", statusCheckRollup=checks("SUCCESS"))], [])[0:2] == ("pr", "PR #961 open, checks green"), "green PR waits for its merge"
+    assert at(21, 2, [pr_merged], [old], failed=lambda s: True)[0] == "attention", "a failed release run is a model's job"
+    assert at(21, 43, [pr_merged], [old, new], in_new, nts=lambda tag: "- IGSH-1: other\n")[0] == "attention", "notes without the ticket"
+    assert at(23, 30, [pr_merged], [old])[0] == "attention", "a release over three hours late is a model's job"
+    assert at(21, 2, [], [old])[0] == "none" and at(21, 2, [pr_merged], [old], number=2274)[0] == "none", "another ticket's PR is not this wait"
+    assert at(21, 2, [dict(pr_merged, mergedAt="2026-11-11T20:02:45Z")], [old])[0] == "none", "a PR merged two days ago is not a wait"
+
+    class Fake(Hub):
+        def __init__(self, prs, releases, tickets):
+            super().__init__(False)
+            self._prs, self._rel, self._tk, self.done = prs, releases, tickets, []
+
+        def tickets(self):
+            return self._tk
+
+        def prs(self, repo):
+            return self._prs
+
+        def releases(self, repo):
+            return self._rel
+
+        def contains(self, repo, sha, tag):
+            return tag == "v0.28.1689"
+
+        def notes(self, repo, tag):
+            return body
+
+        def run_failed(self, repo, sha):
+            return False
+
+        def finish(self, key, text):
+            self.done.append((key, text))
+
+    board = [("SOFT-2273", 2273, {"multiprompt", "bug"}, "AI Review"), ("SOFT-5", 5, {"triage"}, "Doing"), ("HTPR-1", 1, {"multiprompt"}, "Doing")]
+    hub = Fake([pr_merged, other], [old, new], [board[0], board[1]])
+    doc, moved = sweep(hub, t(21, 43))
+    assert moved == ["SOFT-2273"] and hub.done[0][0] == "SOFT-2273" and "v0.28.1689" in hub.done[0][1] and doc["tickets"] == {}, (moved, doc)
+    hub = Fake([pr_merged, other], [old], [board[0]])
+    doc, moved = sweep(hub, t(20, 8))
+    assert moved == [] and doc["tickets"]["SOFT-2273"]["state"] == "release" and not hub.done, doc
+    hub = Fake([pr_open], [], [board[0]])
+    doc, moved = sweep(hub, t(19, 17))
+    assert doc["tickets"]["SOFT-2273"]["state"] == "pr" and not moved, doc
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "x" / "wait.json"
+        write(path, doc)
+        assert json.loads(path.read_text()) == doc
+    print(f"sf-release-watch self-test ok: SOFT-2273 replay {[m[1][0] for m in moments]}, 3 of 4 runs held, 4th moved to Done by the script")
+
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        self_test()
+    else:
+        try:
+            sys.exit(main("--dry-run" in sys.argv))
+        except Exception as e:
+            print(f"sf-release-watch: {e}", file=sys.stderr)
+            sys.exit(1)

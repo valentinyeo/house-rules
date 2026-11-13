@@ -135,6 +135,8 @@ URGENT_REST = 600
 # because no script merges green hypertask-ai/hypertask PRs yet: the runner that built the PR did it, so holding the ticket
 # before HYCI-352 ships would leave green PRs unmerged. The file is created when HYCI-352 lands.
 ONE_RUN_FLAG = Path(os.environ.get("FLEET_ONE_RUN_FLAG", HOME / ".local/state/fleet/one-run.on"))
+SF_RELEASE_WAIT = Path(os.environ.get("FLEET_SF_RELEASE_WAIT", HOME / ".local/state/fleet/sf-release-wait.json"))  # written by fleet/sf-release-watch
+SF_WAIT_FRESH_S = 900  # an older file holds nothing: a dead watcher must not freeze tickets
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
 # HYCI-342: bin/factory-breaker writes this record when burn, runs and merged PRs stop matching. Present and not cleared: only incidents go out.
@@ -1465,12 +1467,12 @@ def pr_checks_pending(key, t=None):
     `t`: the ticket, so a Software Factory ticket's PR in its own app repo counts too (SOFT-2166, 13 Nov 17:01)."""
     try:
         prs = open_prs() + sf_open_prs(t)
-        if not any(pr_ticket(p) == key for p in prs) and just_waited(key):
+        if not any(ticket_id(pr_ticket(p)) == ticket_id(key) for p in prs) and just_waited(key):
             # The run ended on a PR it opened a minute ago, but the shared PR copy is up to ten minutes old and does not list it.
             # The park job then started on a PR nobody could see (13 Nov: HTPR-9099 18:01, HTPR-9106 18:33, HTPR-9130 19:47).
             prs = open_prs(fresh=True) + sf_open_prs(t)
         for p in prs:
-            if pr_ticket(p) == key and one_run_state(p) == ("pending", True):
+            if ticket_id(pr_ticket(p)) == ticket_id(key) and one_run_state(p) == ("pending", True):
                 return True
     except Exception:
         pass
@@ -1487,6 +1489,46 @@ def just_waited(key, now=None):
         return now - dt.datetime.strptime(last["ts"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp() < JUST_WAITED_S
     except (KeyError, ValueError, TypeError):
         return False
+
+
+def ticket_id(key):
+    """The ticket a key names. IGSH and SOFT are both board 2060 (a SOFT-2273 board key, an IGSH-2273 PR title and release note),
+    so they compare by number; any other key is its own id."""
+    m = re.fullmatch(r"(?:IGSH|SOFT)-(\d+)", key or "")
+    return ("2060", m[1]) if m else key
+
+
+def sf_wait_hold(on, now):
+    """Software Factory tickets a script is waiting on (HYCI-352, SOFT-2273: five runs, four only waited). fleet/sf-release-watch
+    writes SF_RELEASE_WAIT every five minutes: state pr (PR open, checks pending or green) or release (merged, release not out)
+    means the next step is a script's, so no lane hands the ticket to a model. Red, conflicting, change-requested, failed-release
+    and notes-missing tickets are state attention and never held. A file older than SF_WAIT_FRESH_S holds nothing, and so does a
+    wait older than gate_cap(t). Incidents are never held. Makes no GitHub call. Fails open."""
+    held = set()
+    try:
+        doc = json.loads(SF_RELEASE_WAIT.read_text())
+        age = now.timestamp() - float(doc["at"])
+        if age > SF_WAIT_FRESH_S:
+            log(f"sf-wait: {SF_RELEASE_WAIT.name} is {int(age / 60)} minutes old, nothing held")
+            return held
+        for key, row in sorted(doc["tickets"].items()):
+            if row.get("state") not in ("pr", "release"):
+                continue
+            t = next((x for x in SNAP["tickets"] if ticket_id(x["key"]) == ticket_id(key)), None)
+            since = stamp_time(row.get("since", ""))
+            if t is None or INCIDENT_LABEL in t["labels"] or since is None or (now - since).total_seconds() > gate_cap(t):
+                continue
+            msg = f"sf-wait: {t['key']} {row.get('state')}: {row.get('detail', '')}"
+            log(msg if on else f"{msg} (shadow: {ONE_RUN_FLAG} missing, not skipped)")
+            if on:
+                held.add(t["key"])
+                note(t["key"], f"sf-wait: {row.get('detail', '')}")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log(f"sf-wait: error, nothing held ({type(e).__name__}: {str(e)[:80]})")
+        held = set()
+    return held
 
 
 def one_run_hold(dry, now=None):
@@ -1527,6 +1569,7 @@ def one_run_hold(dry, now=None):
     except Exception as e:
         log(f"one-run: error, nothing held ({type(e).__name__}: {str(e)[:80]})")
         held = set()
+    held |= sf_wait_hold(on, now)
     _ONE_RUN.update(memo=memo, held=held)
     return held
 
@@ -1902,6 +1945,8 @@ def parkable(t, ledger=None):
     WAIT_CHECK, PR 963 red at 20:19:40, the model handed it back, an empty run)."""
     if t["section"] not in BOARDS[t["board"]][1] or t["key"] in SKIP[0].hard or just_waited(t["key"]):
         return False
+    if t["key"] in one_run_hold(True):  # its next step is a script's (checks, merge, release): a park job has nothing to park
+        return False
     when = stamp_time((park_ledger() if ledger is None else ledger).get(t["key"], ""))
     return when is None or (dt.datetime.now(dt.timezone.utc) - when).total_seconds() > REST_MAX
 
@@ -1980,11 +2025,13 @@ def try_claim(n, t, source, dry):
         if mine and timed_out_here(mine):
             log(f"hold {t['key']}: own {own} timed out on OpenCode; it waits for its hand-back")
             return False
+        if mine and mine["key"] in one_run_hold(dry):
+            # Before the hand-back: a ticket whose next step is a script's is not offered as "own" either (SOFT-2273, 13 Nov
+            # 20:52 and 21:35: handed back twice with the hold on, each run only waited).
+            log(f"hold {t['key']}: own {own} waits on its PR's checks, merge or release (one-run); a script owns it, no run")
+            return False
         if mine and own not in SKIP[0] and not held_back(mine, own=True):
             raise Pick(mine, "own")
-        if mine and mine["key"] in one_run_hold(dry):
-            log(f"hold {t['key']}: own {own} waits on its PR's checks or merge (one-run); a script owns it, no park job")
-            return False
         if mine and pr_checks_pending(mine["key"], mine):
             log(f"hold {t['key']}: own {own} has an open PR whose checks are running; a park job has nothing to park (HYCI-352, HYCI-358 parks)")
             return False
@@ -3225,6 +3272,108 @@ def one_run_self_test():
         _ONE_RUN.clear()
 
 
+def sf_release_self_test():
+    """HYCI-352, SOFT-2273 (13 Nov): five runs, four only waited. fleet/sf-release-watch writes what a script waits on; the picker
+    must not hand such a ticket to a model as park, orphan or own. Replays the four follow-up moments from that evening."""
+    global SNAP, ONE_RUN_FLAG, SF_RELEASE_WAIT, log
+    import tempfile
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    ago = lambda m: (now - dt.timedelta(minutes=m)).strftime(fmt)
+    tk = lambda key, section="Doing", labels=("multiprompt",), prio="Medium", holders=(): {
+        "key": key, "idx": 1, "board": "2060", "section": section, "title": "x", "labels": list(labels), "prio": prio,
+        "holders": [list(h) for h in holders], "waiting": False, "subs": False, "paid": False, "updated": ago(360), "created": ago(9999)}
+    saved = (SNAP, ONE_RUN_FLAG, SF_RELEASE_WAIT, log)
+    tmp = Path(tempfile.mkdtemp())
+    wait, flag = tmp / "sf-release-wait.json", tmp / "one-run.on"
+    SF_RELEASE_WAIT, ONE_RUN_FLAG, lines = wait, flag, []
+    log = lines.append
+
+    def write(rows, at=0):
+        wait.write_text(json.dumps({"at": int(now.timestamp()) - at, "tickets": rows}))
+
+    def held(tickets, dry=True):
+        global SNAP
+        SNAP = {"tickets": tickets, "rel": {}, "prs": [], "incidents": [], "open": {}}
+        _ONE_RUN.clear()
+        lines.clear()
+        return one_run_hold(dry, now)
+
+    def row(state, since=10, detail="PR #961 open, checks pending"):
+        return {"SOFT-2273": {"state": state, "detail": detail, "since": ago(since)}}
+
+    try:
+        flag.write_text("")
+        # The ticket key on the board is SOFT-2273; the PR title and the release note say IGSH-2273. Both are board 2060.
+        assert ticket_id("SOFT-2273") == ticket_id("IGSH-2273") == ("2060", "2273") and ticket_id("HTPR-1") == "HTPR-1"
+        assert ticket_id("SOFT-227") != ticket_id("IGSH-2273"), "compare by whole number"
+        # Replay 1: 19:17 park job, PR open, one check running. 2: 20:08 orphan, merged, release not out. 3: 21:02 own, same.
+        for moment, state, detail in (("19:17 park", "pr", "PR #961 open, checks pending"),
+                                      ("20:08 orphan", "release", "PR #961 merged, release not out yet"),
+                                      ("21:02 own", "release", "PR #961 merged, release not out yet")):
+            write(row(state, detail=detail))
+            assert held([tk("SOFT-2273")]) == {"SOFT-2273"}, f"{moment}: a script owns the wait"
+            assert lines == [f"sf-wait: SOFT-2273 {state}: {detail}"], lines
+            assert "SOFT-2273" in resting(2, True) and "SOFT-2273" in Skip(set(), resting(2, True)), f"{moment}: every lane reads it through resting()"
+        # The real lanes through choose(): Runner 7 holds SOFT-2273 (own lane), Runner 8 sees it unheld (orphan lane). Control first:
+        # with state attention the picker offers it; with pr or release it offers the runner other work instead.
+        global RUNNER_STATE, RUNNERS
+        saved_rs, saved_n = RUNNER_STATE, RUNNERS
+        RUNNER_STATE, RUNNERS = Path(tempfile.mkdtemp()), 8
+        new = tk("SOFT-2300", "Todo")
+
+        def lane(n, holders, rows):
+            global SNAP
+            write(rows)
+            SNAP = {"tickets": [tk("SOFT-2273", holders=holders), new], "rel": {"SOFT-2273": [[], []], "SOFT-2300": [[], []]},
+                    "prs": [], "incidents": [], "open": {}}
+            _ONE_RUN.clear()
+            try:
+                got = choose(n, True)
+                return got[0]["key"], got[1]
+            except SystemExit as e:
+                return str(e)
+
+        try:
+            mine7 = (("runner 7", True),)
+            assert lane(7, mine7, row("attention", detail="PR #961 is red")) == ("SOFT-2273", "own"), "control: a red PR is offered as own"
+            assert lane(8, (), row("attention", detail="PR #961 is red")) == ("SOFT-2273", "orphan"), "control: a red PR is offered as orphan"
+            for moment, n, holders, state in (("21:02 own", 7, mine7, "release"), ("19:17 own", 7, mine7, "pr"),
+                                              ("20:08 orphan", 8, (), "release"), ("19:17 orphan", 8, (), "pr")):
+                got = lane(n, holders, row(state))
+                assert got != ("SOFT-2273", "own") and got != ("SOFT-2273", "orphan") and not (isinstance(got, tuple) and got[0] == "SOFT-2273"), \
+                    f"{moment}: a script owns the wait, SOFT-2273 must not start a run ({got})"
+        finally:
+            RUNNER_STATE, RUNNERS = saved_rs, saved_n
+        # What a model keeps: anything attention, a stale file, no file, a wait past its cap, an incident, a missing flag, a garbled file.
+        for why, rows, at in (("a red PR", row("attention", detail="PR #961 is red"), 0), ("a stale file", row("pr"), 16 * 60),
+                              ("a wait past 6 hours", row("pr", since=7 * 60), 0), ("a state the picker does not know", row("done"), 0)):
+            write(rows, at)
+            assert held([tk("SOFT-2273")]) == set(), f"{why}: a model has work, not held"
+        write(row("pr", since=90), 0)
+        assert held([tk("SOFT-2273", prio="Urgent")]) == set(), "an Urgent wait is released after an hour"
+        write(row("pr"))
+        assert held([tk("SOFT-2273", labels=("multiprompt", "incident"))]) == set(), "an incident is never held"
+        assert held([tk("SOFT-2274")]) == set(), "another ticket is not this wait"
+        wait.unlink()
+        assert held([tk("SOFT-2273")]) == set() and not lines, "no file: nothing held, no noise"
+        wait.write_text("{not json")
+        assert held([tk("SOFT-2273")]) == set() and lines and lines[0].startswith("sf-wait: error"), lines
+        write(row("pr"))
+        flag.unlink()
+        assert held([tk("SOFT-2273")]) == set() and lines == [f"sf-wait: SOFT-2273 pr: PR #961 open, checks pending (shadow: {flag} missing, not skipped)"], \
+            "flag off: logged as shadow, not skipped"
+        flag.write_text("")
+        # Replay 4: 21:43. The 21:20 release holds the merge, so fleet/sf-release-watch moved SOFT-2273 to Done and dropped its row.
+        write({})
+        assert held([tk("SOFT-2273", "Done")]) == set(), "21:43: Done and out of the file, never offered"
+        print("sf-release self-test ok: SOFT-2273 replay, 4 of 4 follow-up runs not started (19:17 park, 20:08 orphan, 21:02 own held by "
+              "the picker; 21:43 moved to Done by fleet/sf-release-watch); red, stale, capped, incident and flag-off cases are not held")
+    finally:
+        SNAP, ONE_RUN_FLAG, SF_RELEASE_WAIT, log = saved
+        _ONE_RUN.clear()
+
+
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
@@ -3363,6 +3512,7 @@ def self_test():
     wait_self_test()
     wait_gate_self_test()
     one_run_self_test()
+    sf_release_self_test()
     not_now_self_test()
     factory_stop_self_test()
     stage_self_test()
