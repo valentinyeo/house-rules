@@ -397,6 +397,9 @@ def self_test():
     assert v("TOO_HARD", "RUNNER TOO HARD HTPR-7 | why: x") == ("valid", "too_hard")
     assert v("PROVIDER_BUSY", "provider busy: the inference service is overloaded") == ("valid", "provider")
     assert v("FAULT", "API error 503 from the provider") == ("valid", "provider"), "a 5xx is the provider, not the runner"
+    assert v("WAIT_CHECK", "CI RUNNER IDLE HYCI-226 pr-title MCP 502 recheck 08:05 UTC") == ("invalid", "wait_check"), "a number is not an outage"
+    assert v("PARKED", "RUNNER IDLE HTPR-9105 parked waiting on HTPR-9106 (same 504 timeout fix)") == ("invalid", "parked")
+    assert v("FAULT", "HTTP 529 overloaded") == ("valid", "provider") and v("FAULT", "status: 503") == ("valid", "provider")
     assert v("PARKED", "PARKED HTPR-2 | why: Valentin Review plus one Question; money") == ("valid", "valentin")
     assert v("STOPPED", "removed from the roster") == ("valid", "removed") and v("STOPPED", "manual") == ("invalid", "stopped")
     assert set(reg["invalid"]) <= set(STATES) and set(reg["skip"]) <= set(STATES), "the registry names listed states only"

@@ -3,7 +3,7 @@
   "rule": "A runner that takes a ticket delivers it. Valid leaves only: provider outage, TOO HARD (brain up one step), runner removed, Valentin's own call. Every other leave, from the second run on, wakes a Sonnet fixer that fixes the cause at its source.",
   "valid": [
     {"id": "provider", "label": "Provider outage", "states": ["PROVIDER_BUSY", "FAULT", "WAIT_CHECK", "PARKED"],
-     "detail": "api error|\\b5\\d\\d\\b|rate.?limit|quota|overloaded|model (?:is )?unreachable|provider (?:busy|outage|down|unreachable)",
+     "detail": "api error|(?:http|status|error|code)[ :=]{0,3}5\\d\\d\\b|\\b5\\d\\d (?:server error|service unavailable|bad gateway|from the provider)|rate.?limit|quota|overloaded|model (?:is )?unreachable|provider (?:busy|outage|down|unreachable)",
      "then": "the same runner resumes when the provider is back; an outage over 30 minutes: the same brain on another plan takes it"},
     {"id": "too_hard", "label": "TOO HARD", "states": ["TOO_HARD"],
      "then": "fleet/park --too-hard raises the brain tag one step; a stronger runner takes it; at extra-hard it goes to the lead lane"},
