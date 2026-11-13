@@ -1396,13 +1396,18 @@ def one_run_state(p):
         return "draft", False
     if not checks:
         return "unread", False
-    if p.get("red") or any(FAILED_CHECK.search(c) for c in checks):
+    failed = failed_checks(checks)
+    if p.get("red") or any(not CANCELLED_CHECK.search(c) for c in failed):
         return "red", False
     if p.get("mergeable") == "CONFLICTING":
         return "conflicting", False
     if p.get("review") == "CHANGES_REQUESTED":
         return "change request", False
     if any(RUNNING_CHECK.search(c) for c in checks):
+        return "pending", True
+    # Only CANCELLED checks are left (HYCI-388, 13 Nov: HTPR-9106 woke a runner each time): bin/pr-merger reruns the PR once, so a
+    # script owns it. A cancelled check whose newer attempt exists is already dropped by failed_checks().
+    if failed:
         return "pending", True
     # Every listed check is done but GitHub still says BLOCKED: a required check has not reported yet (HYCI-358, 13 Nov 16:36:
     # ai-review and claude-review were not on the list, the PR read green, a run started and parked). Nothing a model can do.
@@ -2021,6 +2026,17 @@ def check_states(rollup):
 
 RUNNING_CHECK = re.compile(r"=(?:IN_PROGRESS|PENDING|QUEUED|EXPECTED|WAITING|REQUESTED)$")
 FAILED_CHECK = re.compile(r"=(?:FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|ERROR|STARTUP_FAILURE)$")
+CANCELLED_CHECK = re.compile(r"=CANCELLED$")
+
+
+def failed_checks(checks):
+    """The failing 'name=state' entries of a check list, minus every CANCELLED attempt that a newer attempt of the same check
+    supersedes (the list holds the same name twice, e.g. `bugfix-regression=CANCELLED` and `bugfix-regression=IN_PROGRESS`).
+    A superseded cancel is not red; a lone cancel stays listed so the caller can hand it to the script that reruns it."""
+    names = {}
+    for c in checks or []:
+        names.setdefault(c.rpartition("=")[0], set()).add(c.rpartition("=")[2])
+    return [c for c in checks or [] if FAILED_CHECK.search(c) and not (CANCELLED_CHECK.search(c) and len(names[c.rpartition("=")[0]]) > 1)]
 
 
 def gate_checks(checks):
@@ -2029,7 +2045,7 @@ def gate_checks(checks):
     moves only when a run has a reason to act: the last check finishes, or one fails."""
     if checks is None:
         return None
-    failed = sorted(c for c in checks if FAILED_CHECK.search(c))
+    failed = sorted(failed_checks(checks))
     if any(RUNNING_CHECK.search(c) for c in checks):
         return ["running"] + failed
     return ["finished"] + failed
@@ -3036,6 +3052,16 @@ def one_run_self_test():
                            ("a draft", {"draft": True}), ("an unread check list", {"checks": []}), ("a REST-only list", {"checks": None}),
                            ("a stalled PR", {"updated": 400})):
             assert held([tk("HTPR-1")], [pr(1, "HTPR-1", **extra)]) == set() and not lines, f"{why} is a model's job: not held"
+        for why, checks, word in (("a cancelled check with a newer attempt running", ("bugfix-regression=CANCELLED", "bugfix-regression=IN_PROGRESS", "e2e=SUCCESS"), "pending"),
+                                  ("a cancelled check with a newer attempt green", ("bugfix-regression=CANCELLED", "bugfix-regression=SUCCESS"), "green"),
+                                  ("only a cancelled check left", ("bugfix-regression=CANCELLED", "e2e=SUCCESS"), "pending")):
+            assert held([tk("HTPR-1")], [pr(1, "HTPR-1", checks)]) == {"HTPR-1"} and lines == [f"one-run: HTPR-1 PR open, checks {word}"], \
+                f"{why} is not red: pr-merger reruns it, no model: {lines}"
+        assert one_run_state(pr(1, "HTPR-1", ("bugfix-regression=CANCELLED", "bugfix-regression=IN_PROGRESS"))) == ("pending", True)
+        assert one_run_state(pr(1, "HTPR-1", ("bugfix-regression=CANCELLED", "e2e=SUCCESS"))) == ("pending", True), "a lone cancel is the merger's"
+        assert one_run_state(pr(1, "HTPR-1", ("bugfix-regression=CANCELLED", "e2e=FAILURE"))) == ("red", False), "a real failure stays red"
+        assert one_run_state(pr(1, "HTPR-1", ("ci=FAILURE", "ci=SUCCESS"))) == ("red", False), "only CANCELLED attempts are superseded"
+        assert gate_checks(["a=CANCELLED", "a=IN_PROGRESS"]) == ["running"], gate_checks(["a=CANCELLED", "a=IN_PROGRESS"])
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="BLOCKED")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks pending"], \
             "all listed checks green but GitHub BLOCKED: a required check has not reported, held as pending"
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="CLEAN")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks green"], "CLEAN reads green"
