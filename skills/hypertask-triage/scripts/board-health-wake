@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Wake a lead only when its board-health log is not GREEN (HYCI-357).
+
+Leads were starting board-health in the background. Claude then opened a new
+turn for every exit, about 212 times a week, and 95 percent of those turns
+only read a green scorecard. The hourly timer now runs those boards. This
+script reads the logs and messages the owner session only when the scorecard
+is not GREEN. The same red set waits six hours. A green log sends nothing.
+
+usage: board-health-wake [--dir DIR] [--state PATH] [--now EPOCH] [--dry-run] | --self-test
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+LOG_DIR = os.path.join(HOME, ".local/state/board-health")
+STATE = os.path.join(LOG_DIR, "wake-state.json")
+WAKE_LOG = os.path.join(LOG_DIR, "wake.log")
+BACKOFF_S = 6 * 3600
+SAY_LIMIT = 2000
+FROM = "board-health"
+
+# tmux session name from fleet/roster.json, not the display name in scopes.json.
+OWNERS = (
+    ("10450", "ht-support-lead"),
+    ("8783", "upwork-auto-applier"),
+    ("2108", "ht-marketing"),
+    ("2128", "ht-marketing"),
+)
+VERDICT = re.compile(r"^BOARD-HEALTH board (\S+): (.+)$", re.M)
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
+def classify(text, board):
+    found = [v.strip() for b, v in VERDICT.findall(text or "") if b == str(board)]
+    if not found:
+        return "missing", []
+    verdict = found[-1]
+    if verdict == "GREEN":
+        return "green", []
+    reds = [ln.strip() for ln in text.splitlines() if ln.startswith(("RED", "ESCALATE"))]
+    return verdict, reds
+
+
+def signature(verdict, reds):
+    if verdict == "green":
+        return ""
+    keys = []
+    for ln in reds:
+        parts = ln.split()
+        if len(parts) >= 2:
+            keys.append(parts[1])
+    return verdict + ":" + ",".join(sorted(set(keys)))
+
+
+def message(items):
+    lines = ["Board health is not green. Work these lines, then stop. Do not start board-health. The timer runs it."]
+    for board, verdict, reds in items:
+        lines.append(f"board {board}: {verdict}")
+        lines.extend(reds or ["no GREEN line in the log"])
+    text = "\n".join(lines)
+    if len(text) <= SAY_LIMIT:
+        return text
+    return text[: SAY_LIMIT - 3] + "..."
+
+
+def decide(state, reports, now):
+    """reports: board -> (verdict, reds) for logs that exist. Returns (wakes, state)."""
+    boards = state.setdefault("boards", {})
+    for board, (verdict, _reds) in reports.items():
+        if verdict == "green":
+            boards.pop(board, None)
+    by_session = {}
+    for board, session in OWNERS:
+        if board not in reports:
+            continue
+        by_session.setdefault(session, []).append(board)
+    wakes = []
+    for session, boards_for in by_session.items():
+        pending, due = [], False
+        for board in boards_for:
+            verdict, reds = reports[board]
+            if verdict == "green":
+                continue
+            sig = signature(verdict, reds)
+            row = boards.get(board) or {}
+            last = row.get("last_wake") or 0
+            held = bool(row.get("sig") == sig and last and now - last < BACKOFF_S)
+            pending.append((board, verdict, reds, sig))
+            due = due or not held
+        if not due:
+            continue
+        for board, verdict, reds, sig in pending:
+            boards[board] = {"sig": sig, "last_wake": now}
+        wakes.append({"session": session, "text": message([(b, v, r) for b, v, r, _s in pending]),
+                      "boards": [b for b, _v, _r, _s in pending]})
+    return wakes, state
+
+
+def load_state(path):
+    try:
+        data = json.load(open(path))
+    except (OSError, ValueError):
+        return {"boards": {}}
+    if not isinstance(data, dict):
+        return {"boards": {}}
+    data.setdefault("boards", {})
+    return data
+
+
+def save_state(path, state):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, path)
+
+
+def note(msg):
+    line = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()) + " board-health-wake: " + msg
+    print(line, file=sys.stderr)
+    try:
+        os.makedirs(os.path.dirname(WAKE_LOG), exist_ok=True)
+        with open(WAKE_LOG, "a") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
+
+def say(session, text):
+    r = subprocess.run(["session-say", session, text, "--from", FROM], capture_output=True, text=True)
+    if r.returncode != 0:
+        note(f"say {session} failed: {(r.stderr or r.stdout).strip()[:200]}")
+        return False
+    return True
+
+
+def read_reports(directory):
+    reports = {}
+    for board, _session in OWNERS:
+        path = os.path.join(directory, f"last-{board}.log")
+        if not os.path.isfile(path):
+            note(f"skip {board}: no log")
+            continue
+        with open(path) as fh:
+            reports[board] = classify(fh.read(), board)
+    return reports
+
+
+def run(directory, state_path, now, dry):
+    reports = read_reports(directory)
+    state = load_state(state_path)
+    wakes, state = decide(state, reports, now)
+    sent = []
+    for wake in wakes:
+        if dry:
+            print(f"wake {wake['session']}\n{wake['text']}")
+            sent.append(wake["session"])
+            continue
+        if say(wake["session"], wake["text"]):
+            note(f"woke {wake['session']} boards {','.join(wake['boards'])}")
+            sent.append(wake["session"])
+        else:
+            for board in wake["boards"]:
+                state["boards"].pop(board, None)
+    if not dry:
+        save_state(state_path, state)
+    if not sent:
+        note("quiet")
+    return 0
+
+
+def self_test():
+    now = 1_700_000_000
+    red = "RED       wip           tickets being built never outnumber workers. 3 open. Owner HT Support Lead: free one.\n"
+    green = "OK        prq           open PRs at most the workers.\nBOARD-HEALTH board {b}: GREEN\n"
+    red_log = red + "BOARD-HEALTH board {b}: RED 1 of 4\n"
+
+    state = {"boards": {}}
+    wakes, state = decide(state, {"10450": classify(green.format(b="10450"), "10450")}, now)
+    assert wakes == [] and "10450" not in state["boards"], wakes
+
+    wakes, state = decide(state, {"10450": classify(red_log.format(b="10450"), "10450")}, now)
+    assert len(wakes) == 1 and wakes[0]["session"] == "ht-support-lead" and "wip" in wakes[0]["text"], wakes
+    assert state["boards"]["10450"]["sig"].endswith("wip")
+
+    wakes, state = decide(state, {"10450": classify(red_log.format(b="10450"), "10450")}, now + 3600)
+    assert wakes == [], "same red inside 6h must stay quiet"
+
+    wakes, state = decide(state, {"10450": classify(red_log.format(b="10450"), "10450")}, now + BACKOFF_S + 1)
+    assert len(wakes) == 1, "backoff expiry must wake again"
+
+    wakes, state = decide(state, {"10450": classify(green.format(b="10450"), "10450")}, now + BACKOFF_S + 2)
+    assert wakes == [] and "10450" not in state["boards"], "green clears the red set"
+    wakes, state = decide(state, {"10450": classify(red_log.format(b="10450"), "10450")}, now + BACKOFF_S + 3)
+    assert len(wakes) == 1, "a red set after green is new work"
+
+    both = {
+        "2108": classify(red_log.format(b="2108"), "2108"),
+        "2128": classify(red_log.format(b="2128"), "2128"),
+    }
+    wakes, _state = decide({"boards": {}}, both, now)
+    assert len(wakes) == 1 and wakes[0]["session"] == "ht-marketing" and wakes[0]["boards"] == ["2108", "2128"], wakes
+
+    one = {
+        "2108": classify(red_log.format(b="2108"), "2108"),
+        "2128": classify(green.format(b="2128"), "2128"),
+    }
+    wakes, _state = decide({"boards": {}}, one, now)
+    assert wakes[0]["boards"] == ["2108"] and "2128" not in wakes[0]["text"], wakes
+
+    held = {"boards": {"2108": {"sig": signature("RED 1 of 4", [red.strip()]), "last_wake": now}}}
+    mixed = {
+        "2108": classify(red_log.format(b="2108"), "2108"),
+        "2128": classify(red_log.format(b="2128"), "2128"),
+    }
+    wakes, _state = decide(held, mixed, now + 60)
+    assert wakes[0]["boards"] == ["2108", "2128"], "a new red board includes the one still inside backoff"
+
+    wakes, _state = decide({"boards": {}}, {"8783": classify("noise\n", "8783")}, now)
+    assert wakes[0]["session"] == "upwork-auto-applier" and "no GREEN line" in wakes[0]["text"], wakes
+
+    unit = open(os.path.join(REPO, "systemd/ht-board-health.service")).read()
+    for board, _session in OWNERS:
+        assert f"--board {board}" in unit, board
+    assert "board-health-wake" in unit, "timer must call the wake script"
+    skill = open(os.path.join(REPO, "skills/hypertask-triage/SKILL.md")).read()
+    assert "board-health-wake" in skill and "does not start" in skill, "skill must tell the lead to stop background runs"
+    assert len(message([("10450", "RED 1 of 4", ["x" * 3000])])) <= SAY_LIMIT
+    print("board-health-wake self-test ok")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dir", default=LOG_DIR)
+    ap.add_argument("--state", default=STATE)
+    ap.add_argument("--now", type=int, default=0)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--self-test", action="store_true")
+    args = ap.parse_args()
+    if args.self_test:
+        return self_test()
+    return run(args.dir, args.state, args.now or int(time.time()), args.dry_run)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

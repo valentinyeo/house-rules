@@ -15,6 +15,7 @@ Default board: your fleet's product board (Hypertask: 15). Software Factory: its
 ## How often to run it
 Two layers. The script runs on a timer, the chief session works what it cannot fix.
 - Script, every hour at :05: timer `ht-board-health` runs `board-health --fix --apply` for 15 and 11514, and a read-only run for 2060 and each Software Factory view scope. Safe fixes happen even when no chief is awake. Output: `~/.local/state/board-health/last-<scope>.log` (`/` becomes `-`). Alarms bump at most once a day.
+- Lead boards 10450, 8783, 2108 and 2128 run on that same timer, read only, with `--apply`. `scripts/board-health-wake` reads those logs. A GREEN log sends nothing. Any other log wakes that board's owner session once, and the same red lines wait 6 hours. The owner does not start `board-health` in the background.
 - Chief session, every hour at :20: read the last logs, work each red line. The script runs at :05, so the log is fresh by :20. A session cron dies with its session, so check `CronList` at every shift start and recreate it when missing: `CronCreate` cron `20 * * * *`, prompt `/hypertask-triage step 0: read ~/.local/state/board-health/last-*.log, work every red line, rerun board-health until GREEN`. Never more often: runners take about an hour per ticket.
 - Full clean-up (steps 1 to 7): once a day at 08:00 London, a second session cron `0 8 * * *`, prompt `/hypertask-triage`. The blocker check also runs alone at 07:30.
 - Right away after big changes: a runner restart or a batch of merges.

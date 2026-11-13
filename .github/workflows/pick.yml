@@ -20,6 +20,7 @@ jobs:
       - run: python3 fleet/roster-check --self-test
       - run: python3 skills/hypertask-triage/scripts/flow-check --self-test
       - run: python3 skills/hypertask-triage/scripts/board-health --self-test
+      - run: python3 skills/hypertask-triage/scripts/board-health-wake --self-test
       - run: fleet/runner harness-selftest
       - run: fleet/runner provider-busy-selftest
       - run: fleet/runner reply-cap-selftest
