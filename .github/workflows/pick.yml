@@ -22,6 +22,7 @@ jobs:
       - run: fleet/runner harness-selftest
       - run: fleet/runner provider-busy-selftest
       - run: fleet/runner reply-cap-selftest
+      - run: fleet/runner transcript-selftest
       - run: python3 -m unittest tests.test_runner_chat -v
       - run: python3 -m unittest tests.test_rules_drift -v
       - run: python3 -m unittest tests.test_ticket_gate_label -v

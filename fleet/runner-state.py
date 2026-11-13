@@ -3,6 +3,8 @@
 
     fleet/runner-state.py --classify --final LINE --rc N --elapsed SEC --stop MARK --waited SEC --ticket KEY
     fleet/runner-state.py --pick-fail --runner N --note LINE --wip TEXT --ledger PATH
+    fleet/runner-state.py --refs --repo DIR --ticket KEY
+    fleet/runner-state.py --progress --repo DIR --before FILE --after FILE
     fleet/runner-state.py --self-test
 
 An unknown state is a fault. flag approval is not a state. Waiting on a person is not a state.
@@ -11,6 +13,7 @@ The launcher writes `state` on run-ledger.jsonl. fleet-watch reads that field.
 """
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -145,6 +148,54 @@ def classify_pick(note, wip):
     return _out(state, state, detail=text[:500])
 
 
+def ticket_refs(repo, ticket):
+    """{branch: sha} for every local branch and origin branch whose name carries the ticket key (case blind). Cheap: one
+    for-each-ref call. HYCI-343: a run that pushed commits and then waited for CI ended WAIT_CHECK and counted as empty;
+    the launcher snapshots these before and after the run to write `progress`. The ticket key, not the runner number, ties
+    a branch to a run: git identities on the runner checkouts do not match the ledger's runner numbers."""
+    key = (ticket or "").lower()
+    if not key:
+        return {}
+    r = subprocess.run(["git", "-C", repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/remotes/origin"],
+                       capture_output=True, text=True)
+    out = {}
+    for line in r.stdout.splitlines():
+        sha, _, ref = line.partition(" ")
+        name = re.sub(r"^refs/(?:heads|remotes/origin)/", "", ref)
+        if key in name.lower() and name != "HEAD":
+            out[name] = sha
+    return out
+
+
+def _count(repo, rev_range):
+    r = subprocess.run(["git", "-C", repo, "rev-list", "--count", rev_range], capture_output=True, text=True)
+    try:
+        return int(r.stdout.strip())
+    except ValueError:
+        return None
+
+
+def progress_count(repo, before, after):
+    """Commits pushed to branches named for the ticket, plus branches that went away, between two ticket_refs snapshots.
+    A new branch counts its commits ahead of origin/main (at least 1, capped at 50). A moved branch counts the commits the
+    move added, or 1 when history was rewritten. A removed branch counts 1 (the PR merged and its branch was deleted)."""
+    total = 0
+    for name, sha in after.items():
+        old = before.get(name)
+        if old == sha:
+            continue
+        if old is None:
+            n = _count(repo, f"origin/main..{sha}")
+            if n is None:
+                n = _count(repo, f"main..{sha}")
+            total += min(max(n or 1, 1), 50)
+        else:
+            n = _count(repo, f"{old}..{sha}")
+            total += min(max(n or 1, 1), 50)
+    total += sum(1 for name in before if name not in after)
+    return total
+
+
 def append_ledger(path, row):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -232,6 +283,36 @@ def self_test():
     runner = Path(__file__).with_name("runner").read_text()
     assert 'grep -q "RUNNER IDLE"' not in runner
     assert "unknown state" in runner and "flag approval" in runner
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    git = lambda *a: subprocess.run(["git", "-C", tmp, "-c", "user.email=t@t", "-c", "user.name=t", *a], capture_output=True, text=True, check=True)
+    git("init", "-q", "-b", "main")
+    Path(tmp, "f").write_text("a")
+    git("add", "f")
+    git("commit", "-q", "-m", "base")
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    key = "HYCI-77"
+    before = ticket_refs(tmp, key)
+    assert before == {} and progress_count(tmp, before, ticket_refs(tmp, key)) == 0, "no branch, no progress"
+    git("checkout", "-q", "-b", "runner-3/hyci-77-fix")
+    for i in range(2):
+        Path(tmp, "f").write_text(f"b{i}")
+        git("commit", "-q", "-am", f"c{i}")
+    git("checkout", "-q", "-b", "runner-3/htpr-1-other")
+    Path(tmp, "f").write_text("z")
+    git("commit", "-q", "-am", "other ticket")
+    after = ticket_refs(tmp, key)
+    assert set(after) == {"runner-3/hyci-77-fix"}, after
+    assert progress_count(tmp, before, after) == 2, "a new branch counts its commits ahead of origin/main"
+    assert progress_count(tmp, after, after) == 0, "nothing moved: no progress, a run that only waited"
+    git("checkout", "-q", "runner-3/hyci-77-fix")
+    Path(tmp, "f").write_text("c")
+    git("commit", "-q", "-am", "c2")
+    assert progress_count(tmp, after, ticket_refs(tmp, key)) == 1, "one more commit on the branch"
+    git("checkout", "-q", "main")
+    git("branch", "-q", "-D", "runner-3/hyci-77-fix")
+    assert progress_count(tmp, ticket_refs(tmp, key) or {"runner-3/hyci-77-fix": "x"}, {}) == 1, "a removed branch counts one"
+    assert ticket_refs(tmp, "") == {} and ticket_refs("/nonexistent", key) == {}
     print("runner-state self-test ok")
 
 
@@ -249,6 +330,18 @@ def main():
             append_ledger(ledger, row)
         print(json.dumps(row))
         return
+    if "--refs" in sys.argv:
+        for name, sha in sorted(ticket_refs(_arg("--repo"), _arg("--ticket")).items()):
+            print(f"{sha} {name}")
+        return
+    if "--progress" in sys.argv:
+        def snap(path):
+            try:
+                return {l.split(" ", 1)[1]: l.split(" ", 1)[0] for l in Path(path).read_text().splitlines() if " " in l}
+            except OSError:
+                return {}
+        print(progress_count(_arg("--repo"), snap(_arg("--before")), snap(_arg("--after"))))
+        return
     if "--redact" in sys.argv:
         sys.stdout.write(redact(sys.stdin.read()))
         return
@@ -258,7 +351,7 @@ def main():
                        overload=_arg("--overload", "0") == "1")
         print(json.dumps(row))
         return
-    sys.exit("usage: fleet/runner-state.py --classify | --pick-fail | --redact | --self-test")
+    sys.exit("usage: fleet/runner-state.py --classify | --pick-fail | --refs | --progress | --redact | --self-test")
 
 
 if __name__ == "__main__":

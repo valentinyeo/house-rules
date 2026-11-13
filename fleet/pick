@@ -2051,6 +2051,51 @@ def ramp_line(step, cap):
     return f"factory restart step {step}/{len(RAMP_CAPS)}: {'all runners' if cap is None else f'{cap} runner(s)'}"
 
 
+RESTART_WINDOW_H = 24  # a clear without a ramp field still counts as a restart for this long (the coordinator's 13 Nov clear)
+
+
+def in_restart(now=None):
+    """True while the pool is coming back: a ramp step below the last, or a clear with no ramp field made under RESTART_WINDOW_H ago."""
+    step, cap = factory_ramp()
+    if cap is not None:
+        return True
+    try:
+        rec = json.loads(FACTORY_STOP.read_text())
+        cleared = rec.get("cleared") if isinstance(rec, dict) else None
+        if not cleared or (cleared.get("ramp") or {}).get("step") is not None:
+            return False
+        at = dt.datetime.fromisoformat(str(cleared.get("at")).replace("Z", "+00:00"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return ((now or dt.datetime.now(dt.timezone.utc)) - at).total_seconds() < RESTART_WINDOW_H * 3600
+
+
+def ramp_gate(n):
+    """HYCI-345, Valentin 13 Nov ("one runner PER plan"): the ramp cap is per plan, not per runner number. Step 1 lets one runner per
+    plan hold a run, step 2 three, step 3 all. Runner numbers say nothing about the plan: runner 1 may be a reserved plan's."""
+    step, cap = factory_ramp()
+    if cap is None:
+        return
+    log(ramp_line(step, cap))
+    eng = runner_engine(n)
+    plan = ENGINES[eng]["plan"] if eng in ENGINES else "?"
+    busy = [m for m in range(1, RUNNERS + 1) if m != n and runner_engine(m) in ENGINES
+            and ENGINES[runner_engine(m)]["plan"] == plan and running(m)]
+    if len(busy) >= cap:
+        raise SystemExit(f"none: factory restart step {step}/{len(RAMP_CAPS)}, {cap} runner(s) per plan: "
+                         f"{plan} runners {' '.join(map(str, busy))} already in a run")
+
+
+def staged_units(units):
+    """During a restart a loose orphan (no live runner holds it) does not close new work: it is not a canary's work yet, and the
+    orphan lane takes it first anyway. Only tickets a live runner holds count (HYCI-345, 13 Nov: seven units of five closed new work
+    to the canaries because three unheld investigation tickets sat in In Progress)."""
+    if not in_restart():
+        return units
+    held = {t["key"] for t in SNAP["tickets"] if any(live_runner(h) for h in names(t))}
+    return {k for k in units if k in held}
+
+
 def choose(n, dry):
     hit = incident_step(n, dry)
     if hit:
@@ -2059,11 +2104,7 @@ def choose(n, dry):
     if why:
         log(f"factory stopped: {why}")
         raise SystemExit(f"none: factory stopped: {why}")
-    step, cap = factory_ramp()
-    if cap is not None:
-        log(ramp_line(step, cap))
-        if n > cap:
-            raise SystemExit(f"none: factory restart step {step}/{len(RAMP_CAPS)}, {cap} runner(s)")
+    ramp_gate(n)
     hand_back_timeouts(n, dry)
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
@@ -2156,6 +2197,10 @@ def choose(n, dry):
     # WIP cap: while the pool's pipeline is at or over its live runners, nothing new starts; only the PR queue and
     # tickets that already have an open PR (finish before you start)
     units, workers, excluded = pipeline()
+    loose = units - staged_units(units)
+    if loose:
+        excluded["unheld in a staged restart"] = sorted(loose)
+        units = units - loose
     wip = wip_line(units, workers, excluded)
     log(wip)
     closed = len(units) >= len(workers)
@@ -2697,6 +2742,7 @@ def self_test():
     wait_self_test()
     wait_gate_self_test()
     factory_stop_self_test()
+    stage_self_test()
     print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop and restart steps, 38 wait-gate checks")
 
 
@@ -2746,27 +2792,78 @@ def factory_stop_self_test():
             except SystemExit as e:
                 return str(e)
 
-        saved_log, saved_snap, saved_inc = log, SNAP, incident_step
+        saved_log, saved_snap, saved_inc, saved_eng, saved_n = log, SNAP, incident_step, runner_engine, RUNNERS
         lines = []
         globals()["log"], globals()["incident_step"] = lines.append, lambda n, dry: None
         globals()["SNAP"] = {"tickets": [], "rel": {}, "prs": [], "incidents": [], "open": {}}
+        engines = {1: "opencode", 2: "opencode", 3: "opencode", 4: "opencode", 5: "codex"}
+        globals()["runner_engine"], globals()["RUNNERS"] = engines.get, 5
+        RUNNING.clear()
+        RUNNING.update({m: None for m in engines})
         try:
+            # Valentin 13 Nov, "one runner PER plan": the cap counts runners of the same plan in a run, not the runner number
             ramped(1)
             assert factory_ramp() == (1, 1) and not factory_stopped(), "a cleared step 1 record runs"
-            assert exit_msg(5) == "none: factory restart step 1/3, 1 runner(s)", exit_msg(5)
+            assert "factory restart" not in exit_msg(1), "no opencode runner in a run: runner 1 goes"
             assert "factory restart step 1/3: 1 runner(s)" in lines, "the picker log names the cap"
-            assert "factory restart" not in exit_msg(1), "runner 1 is inside the cap"
+            RUNNING[2] = "HTPR-1"
+            assert exit_msg(1) == "none: factory restart step 1/3, 1 runner(s) per plan: opencode runners 2 already in a run", exit_msg(1)
+            assert exit_msg(4).startswith("none: factory restart step 1/3"), "runner 4 is the same plan"
+            assert "factory restart" not in exit_msg(5), "codex has no run of its own: its canary goes"
             ramped(2)
             assert factory_ramp() == (2, 3)
-            assert "factory restart" not in exit_msg(3) and "factory restart" in exit_msg(4), "step 2 lets three runners in"
+            RUNNING[3] = "HTPR-2"
+            assert "factory restart" not in exit_msg(1), "step 2: two in a run, a third may start"
+            RUNNING[4] = "HTPR-3"
+            assert "factory restart" in exit_msg(1), "step 2: three in a run is the cap"
             ramped(3)
-            assert factory_ramp() == (3, None) and "factory restart" not in exit_msg(20), "the last step caps nothing"
+            assert factory_ramp() == (3, None) and "factory restart" not in exit_msg(1), "the last step caps nothing"
             ramped(9)
             assert factory_ramp() == (3, None), "a step past the last is the last"
         finally:
             globals()["log"], globals()["SNAP"], globals()["incident_step"] = saved_log, saved_snap, saved_inc
+            globals()["runner_engine"], globals()["RUNNERS"] = saved_eng, saved_n
+            RUNNING.clear()
     finally:
         FACTORY_STOP = saved
+        tmp.unlink(missing_ok=True)
+
+
+def stage_self_test():
+    """HYCI-345: during a restart a loose orphan does not close new work, a held ticket does. A clear with no ramp field made under
+    RESTART_WINDOW_H ago is a restart (the coordinator's 13 Nov clear, with a `reopened` block); an old one, a full ramp and a
+    stopped factory are not."""
+    global FACTORY_STOP, SNAP
+    saved = (FACTORY_STOP, SNAP)
+    tmp = STATE / "stage-test.json"
+    now = dt.datetime(2026, 11, 13, 12, 0, tzinfo=dt.timezone.utc)
+    recent = {"at": "2026-11-13T01:18:32Z", "by": "t", "why": "t"}
+    try:
+        FACTORY_STOP = tmp
+        tmp.unlink(missing_ok=True)
+        assert not in_restart(now), "no record: no restart"
+        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": None}))
+        assert not in_restart(now), "an active stop is not a restart; factory_stopped() handles it"
+        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": recent,
+                                   "reopened": {"at": "z", "by": "c", "why": "w", "undone_clear": recent}}))
+        assert in_restart(now) and factory_ramp() == (3, None), "a recent clear with no ramp and a reopened block is a restart that caps no runner"
+        assert not in_restart(now + dt.timedelta(hours=40)), "a clear 40 hours old is over"
+        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {**recent, "ramp": {"step": 3, "at": "y"}}}))
+        assert not in_restart(now), "the last ramp step is no restart"
+        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {**recent, "ramp": {"step": 1, "at": "y"}}}))
+        assert in_restart(now)
+        # units: the unheld orphan stops counting only during a restart; a held ticket always counts
+        RUNNING.clear()
+        RUNNING.update({3: "HTPR-5"})
+        tk = lambda key, *holders: {"key": key, "holders": [[h, True] for h in holders]}
+        SNAP = {"tickets": [tk("HYCI-346"), tk("HTPR-5", "runner 3")]}
+        units = {"HYCI-346", "HTPR-5"}
+        assert staged_units(units) == {"HTPR-5"}, "restart: the unheld orphan is not a canary's work"
+        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {**recent, "ramp": {"step": 3, "at": "y"}}}))
+        assert staged_units(units) == units, "after the restart every unit counts"
+    finally:
+        FACTORY_STOP, SNAP = saved
+        RUNNING.clear()
         tmp.unlink(missing_ok=True)
 
 

@@ -136,6 +136,48 @@ save_fail_tail() {
   ls -1t "$dir" 2>/dev/null | tail -n +201 | while read -r old; do rm -f "$dir/$old"; done
   return 0
 }
+# HYCI-348: Codex runs use --no-session, so no transcript exists after a run, and the next run wipes $runlog. Keep the last
+# 300 lines of EVERY run, redacted by runner-state.py --redact, with a header that names the ending (state, rc, elapsed,
+# progress, detail). Local only (mode 0600), pruned after TRANSCRIPT_DAYS. hax and cursor print only the final message, so on
+# those engines the tail is short; the header and the git progress count still tell what the run did.
+TRANSCRIPT_DAYS=${TRANSCRIPT_DAYS:-14}
+TRANSCRIPT_FILE=""
+save_transcript() {
+  local ticket=$1 log=$2 state=$3 detail=$4 progress=$5 rc=$6 elapsed=$7 dir="$STATE/transcripts"
+  TRANSCRIPT_FILE=""
+  mkdir -p "$dir" 2>/dev/null && chmod 700 "$dir" 2>/dev/null || return 0
+  local f="$dir/$(date -u +%Y%m%dT%H%M%SZ)-runner-${n:-0}-${ticket:-none}.log"
+  ( umask 077
+    { printf 'ticket %s runner %s state %s rc %s elapsed %ss progress %s\ndetail %s\n---\n' "$ticket" "${n:-0}" "$state" "$rc" "$elapsed" "$progress" "$detail"
+      tail -n 300 "$log" 2>/dev/null; } | python3 "$HERE/runner-state.py" --redact > "$f" ) 2>/dev/null || return 0
+  [ -s "$f" ] && TRANSCRIPT_FILE=$f
+  find "$dir" -type f -mtime +"$TRANSCRIPT_DAYS" -delete 2>/dev/null
+  return 0
+}
+# An empty run (not BUILDING, nothing pushed) leaves one record for bin/canary-watch, which hands the run's class and
+# transcript tail to the fleet-watch Sonnet fixer while a staged restart runs, so a fix lands per run (HYCI-345).
+CANARY_WATCH=${CANARY_WATCH:-$HOME/projects/poteto-2-advisor/bin/canary-watch}
+note_empty_run() {
+  local ticket=$1 state=$2 detail=$3 progress=$4 source=$5 dir="$STATE/empty-runs"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  jq -nc --arg ts "$(date -u +%FT%TZ)" --argjson runner "${n:-0}" --arg ticket "$ticket" --arg state "$state" --arg detail "$detail" \
+    --argjson progress "${progress:-0}" --arg source "$source" --arg transcript "$TRANSCRIPT_FILE" --arg engine "${pick_engine:-}" \
+    '{ts:$ts,runner:$runner,ticket:$ticket,engine:$engine,state:$state,detail:$detail,progress:$progress,source:$source,transcript:$transcript}' \
+    > "$dir/$(date -u +%Y%m%dT%H%M%SZ)-runner-${n:-0}-${ticket:-none}.json" 2>/dev/null || return 0
+  find "$dir" -type f -mtime +"$TRANSCRIPT_DAYS" -delete 2>/dev/null
+  [ -x "$CANARY_WATCH" ] && [ -z "${FLEET_RUNNER_NO_WAKE:-}" ] && ( setsid "$CANARY_WATCH" >/dev/null 2>&1 < /dev/null & ) 2>/dev/null
+  return 0
+}
+# HYCI-343: how much a run pushed. Branches named for the ticket (local and origin) are snapshotted before and after; the
+# count is commits added, plus branches removed. A run that pushed and then waited for CI ends WAIT_CHECK but is not empty.
+ticket_progress() {
+  local repo=$1 ticket=$2 before=$3 after count
+  after=$(mktemp) || { echo 0; return 0; }
+  python3 "$HERE/runner-state.py" --refs --repo "$repo" --ticket "$ticket" > "$after" 2>/dev/null
+  count=$(python3 "$HERE/runner-state.py" --progress --repo "$repo" --before "$before" --after "$after" 2>/dev/null)
+  rm -f "$after"
+  [[ "$count" =~ ^[0-9]+$ ]] && echo "$count" || echo 0
+}
 stall_mark() { echo "$STATE/stall-${n:-0}"; }
 pi_session_dir() { echo "$STATE/pi-session-${n:-0}/$(date +%s)"; }
 newest_beat() {
@@ -380,6 +422,40 @@ case "${1:-}" in
     expect 'the folder keeps 200 files' "$(ls "$tmp/fail-tail" | wc -l)" 200
     [ "$bad" = 0 ] && echo 'fail-tail self-test ok'
     exit "$bad" ;;
+  transcript-selftest)
+    # Proved without a model call: every run keeps a redacted tail with a header, the file is private, old files are pruned,
+    # an empty run leaves one record (HYCI-348), the git progress count reads a pushed commit (HYCI-343).
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    STATE=$tmp; n=7; bad=0; pick_engine=codex; FLEET_RUNNER_NO_WAKE=1
+    expect() { [ "$2" = "$3" ] || { echo "transcript self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    { for i in $(seq 1 400); do echo "line $i"; done
+      echo 'Authorization: Bearer abcDEF123456789xyz'; echo 'key sk-abcdefghijklmnop1234'; } > "$tmp/run.log"
+    mkdir -p "$tmp/transcripts"; echo old > "$tmp/transcripts/old.log"; touch -d '15 days ago' "$tmp/transcripts/old.log"
+    echo recent > "$tmp/transcripts/recent.log"; touch -d '3 days ago' "$tmp/transcripts/recent.log"
+    save_transcript HYCI-9 "$tmp/run.log" WAIT_CHECK 'checks pending' 0 0 95
+    f=$TRANSCRIPT_FILE
+    [ -n "$f" ] && [ -s "$f" ] || { echo 'transcript self-test FAILED: no transcript written' >&2; bad=1; f=/dev/null; }
+    expect 'header names the ending' "$(head -1 "$f")" 'ticket HYCI-9 runner 7 state WAIT_CHECK rc 0 elapsed 95s progress 0'
+    expect 'header plus 300 lines' "$(wc -l < "$f")" 303
+    expect 'the newest line is kept' "$(grep -c '^line 400$' "$f")" 1
+    expect 'a line older than the last 300 is cut' "$(grep -c '^line 100$' "$f")" 0
+    for leak in abcDEF123456789xyz sk-abcdefghijklmnop1234; do expect "'$leak' is removed" "$(grep -c "$leak" "$f")" 0; done
+    expect 'the file is private' "$(stat -c %a "$f" 2>/dev/null)" 600
+    [ -e "$tmp/transcripts/old.log" ] && { echo 'transcript self-test FAILED: a 15 day old file stayed' >&2; bad=1; }
+    [ -e "$tmp/transcripts/recent.log" ] || { echo 'transcript self-test FAILED: a 3 day old file was pruned' >&2; bad=1; }
+    note_empty_run HYCI-9 WAIT_CHECK 'checks pending' 0 orphan
+    r=$(ls "$tmp/empty-runs"/*HYCI-9.json 2>/dev/null | head -1)
+    [ -n "$r" ] || { echo 'transcript self-test FAILED: no empty-run record' >&2; bad=1; r=/dev/null; }
+    expect 'the record names the class' "$(jq -r .state "$r" 2>/dev/null)" WAIT_CHECK
+    expect 'the record points at the transcript' "$(jq -r .transcript "$r" 2>/dev/null)" "$f"
+    git -C "$tmp" init -q -b main && git -C "$tmp" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+    git -C "$tmp" update-ref refs/remotes/origin/main HEAD
+    b=$(mktemp); python3 "$HERE/runner-state.py" --refs --repo "$tmp" --ticket HYCI-9 > "$b"
+    git -C "$tmp" checkout -q -b runner-7/hyci-9-x && git -C "$tmp" -c user.email=t@t -c user.name=t commit -q --allow-empty -m one
+    expect 'a pushed commit is progress' "$(ticket_progress "$tmp" HYCI-9 "$b")" 1
+    expect 'no push is no progress' "$(ticket_progress "$tmp" HYCI-8 "$b")" 0
+    [ "$bad" = 0 ] && echo 'transcript self-test ok'
+    exit "$bad" ;;
   harness-selftest)
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
     STATE=$tmp; PI_AUTH=$tmp/auth.json; export PI_AUTH HARNESS_DOWN_TTL=21600
@@ -451,7 +527,7 @@ case "${1:-}" in
       printf '%s\n' "$out" | tail -5
       grep -q RUNNER_LAUNCH_OK <<< "$out" && echo "launch-check ok: $eng $model $effort" || { echo "launch-check FAILED: exit $rc"; exit 1; }
     fi ;;
-  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | reply-cap-selftest | fail-tail-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
+  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | reply-cap-selftest | fail-tail-selftest | transcript-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
   *)
     n=$1
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
@@ -504,6 +580,7 @@ case "${1:-}" in
       echo "$(date -u +%FT%TZ) $run_tag: $pick_ticket $pick_model" >> "$rlog"
       tmux select-pane -t "$TMUX_PANE" -T "RUNNER $n $pick_engine $pick_model"
       cmodel=$pick_model
+      refs_before=$(mktemp); python3 "$HERE/runner-state.py" --refs --repo "$pick_repo" --ticket "$pick_ticket" > "$refs_before" 2>/dev/null || true
       started_at=$(date +%s)
       launch "$pick_engine" "$pick_model" "$pick_effort" "$pick_repo" "$brief" 2>&1 | tee "$runlog"
       rc=${PIPESTATUS[0]}
@@ -531,8 +608,11 @@ case "${1:-}" in
       [ -n "$state" ] || state=FAULT; [ -n "$res" ] || res=FAIL
       if [ "$state" = "WAIT_CHECK" ]; then [ -f "$waitf" ] || touch "$waitf"; else rm -f "$waitf"; fi
       reason=$(printf '%s' "$final" | cut -c1-300)
-      jq -nc --arg ts "$(date -u +%FT%TZ)" --arg ticket "$pick_ticket" --arg engine "$pick_engine" --arg model "$cmodel" --arg result "$res" --argjson runner "$n" --arg reason "$reason" --arg state "$state" --arg detail "$detail" --arg source "${pick_source:-}" \
-        '{ts:$ts,runner:$runner,ticket:$ticket,engine:$engine,model:$model,result:$result,reason:$reason,state:$state,detail:$detail,source:$source}' >> "$STATE/run-ledger.jsonl" 2>/dev/null || true
+      progress=$(ticket_progress "$pick_repo" "$pick_ticket" "$refs_before"); rm -f "$refs_before"
+      save_transcript "$pick_ticket" "$runlog" "$state" "$detail" "$progress" "$rc" "$elapsed"
+      jq -nc --arg ts "$(date -u +%FT%TZ)" --arg ticket "$pick_ticket" --arg engine "$pick_engine" --arg model "$cmodel" --arg result "$res" --argjson runner "$n" --arg reason "$reason" --arg state "$state" --arg detail "$detail" --arg source "${pick_source:-}" --argjson progress "$progress" --arg transcript "$(basename "${TRANSCRIPT_FILE:-}")" \
+        '{ts:$ts,runner:$runner,ticket:$ticket,engine:$engine,model:$model,result:$result,reason:$reason,state:$state,detail:$detail,source:$source,progress:$progress,transcript:$transcript}' >> "$STATE/run-ledger.jsonl" 2>/dev/null || true
+      if [ "$state" != BUILDING ] && [ "$progress" -eq 0 ]; then note_empty_run "$pick_ticket" "$state" "$detail" "$progress" "${pick_source:-}"; fi
       echo "$res" > "$STATE/runner-$n.result"
       if [ "$park_mode" = "lead" ]; then
         "$HERE/park" "$pick_ticket" --lead --why "$detail" >>"$rlog" 2>&1 || echo "$(date -u +%FT%TZ) park-lead failed" >>"$rlog"
