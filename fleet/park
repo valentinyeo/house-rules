@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Park a ticket a run cannot move, so it never sits In Progress (house rule "No column piles up").
 
-    fleet/park <TICKET> --waits-on <T1[,T2..]>   waits on other tickets: home column, BlockedBy link per blocker, unassigned
+    fleet/park <TICKET> --waits-on <T1[,T2..]>   waits on other tickets: home column, BlockedBy link per blocker, owner retained
     fleet/park <TICKET> --valentin [--comment ID] waits on Valentin: Valentin Review, his name and the red border on ONE marked Question
-    fleet/park <TICKET> --unstarted              nothing built, no PR: home column, unassigned
-    fleet/park <TICKET> --hand-back "<left to do>"  unfinished, nothing waits on anyone (e.g. its PR fails to build): unassigns
-                                                 you, column and PR stay, the orphan lane hands it to a fresh runner
+    fleet/park <TICKET> --unstarted              nothing built, no PR: home column, owner retained
+    fleet/park <TICKET> --hand-back "<left to do>"  unfinished work: keep its starting runner and PR;
+                                                 resume on that runner after the wait
     fleet/park <TICKET> --lead --why "reason"    unknown state, or a wait on a person: home column, waiting on the board lead
                                                  and held by it, so the pool leaves it there
     fleet/park <TICKET> --release                another runner owns the work (you were co-assigned, e.g. a cross-check): unassigns only you,
@@ -27,6 +27,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ticket_owner import store
 
 HOME = Path.home()
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
@@ -121,8 +124,23 @@ def free_claim(key):
         pass
 
 
-def release(key, t):
+def preserve_owner(key, t):
+    owners = store()
+    record = owners.read(key)
+    if record:
+        return record
     for name in holders(t):
+        match = re.fullmatch(r"runner (\d+)", name, re.I)
+        if match and owners.exists(int(match[1])):
+            return owners.bind(key, int(match[1]))
+    return None
+
+
+def release(key, t):
+    record = preserve_owner(key, t)
+    for name in holders(t):
+        if record and name.lower() == f"runner {record['runner']}":
+            continue
         vcc("task", "unassign", key, "--agent", name, check=False)
     free_claim(key)
 
@@ -144,10 +162,10 @@ def park_waits(key, waits, t=None):
     if t.get("section") != home:
         vcc("task", "move", key, "--section", home)
     release(key, t)
-    note(key, f"Parked by fleet/park: waits on {', '.join(waits)} (BlockedBy). Back in {home}, unassigned. The picker skips it until every blocker is done. "
+    note(key, f"Parked by fleet/park: waits on {', '.join(waits)} (BlockedBy). Back in {home}, starting runner retained. The picker skips it until every blocker is done. "
               "Nobody needs to touch it before then.")
     record_event(key)
-    return f"{key} -> {home}, BlockedBy {', '.join(waits)}, unassigned"
+    return f"{key} -> {home}, BlockedBy {', '.join(waits)}, starting runner retained"
 
 
 def park_unstarted(key, t=None):
@@ -158,10 +176,10 @@ def park_unstarted(key, t=None):
     if t.get("section") != home:
         vcc("task", "move", key, "--section", home)
     release(key, t)
-    note(key, f"Parked by fleet/park: nothing was built and no PR exists. Back in {home}, unassigned. Another run starts it fresh; "
+    note(key, f"Parked by fleet/park: nothing was built and no PR exists. Back in {home}, starting runner retained. The same runner resumes; "
               "fleet/pick rests it until the ticket changes.")
     record_event(key)
-    return f"{key} -> {home}, unassigned"
+    return f"{key} -> {home}, starting runner retained"
 
 
 # A hand-back that only waits on checks, review or a deploy is a timed wait, not a failed try: it must not count toward the
@@ -170,9 +188,7 @@ CHECK_WAIT = re.compile(r"\brecheck\b|\b(?:pending|running|queued|awaiting|in pr
 
 
 def park_hand_back(key, why, t=None):
-    """Unfinished work nobody waits on (a PR that fails to build, a fix the run could not finish): the caller leaves, the ticket
-    keeps its column and PR. The unassign and the note change the ticket, so its IDLE rest ends and the orphan lane hands it to
-    a fresh runner. Without this the caller holds it and gets no new work for three days."""
+    """Pause unfinished work without transferring its owner or losing its PR."""
     t = t or get(key)
     who = os.environ["SHIP_SESSION_NAME"]
     mine, others = co_holders(t, who)
@@ -182,13 +198,19 @@ def park_hand_back(key, why, t=None):
         raise RuntimeError(f"{key} has an open BlockedBy link; use --waits-on")
     if not why.strip():
         raise RuntimeError("--hand-back needs a reason: what is left to do")
-    vcc("task", "unassign", key, "--agent", mine[0])
+    record = preserve_owner(key, t)
+    if not record or mine[0].lower() != f"runner {record['runner']}":
+        raise RuntimeError(f"{key}: only its starting runner may schedule its next run")
+    section = t.get("section")
+    if section in ("In Progress", "Doing"):
+        section = "AI Review" if t.get("pullRequests") else home_section(t.get("projectId"), [], t.get("title"))
+        vcc("task", "move", key, "--section", section)
     free_claim(key)
-    note(key, f"Handed back by fleet/park: {mine[0]} could not finish it and nothing waits on anyone. Left to do: {why.strip()} "
-              f"Column {t.get('section')} and the PR stay. The next free runner takes it as an orphan.")
+    note(key, f"Paused by fleet/park: {mine[0]} keeps this ticket until Done. Left to do: {why.strip()} "
+              f"Column {section}; PR retained. Only this runner resumes it.")
     if not CHECK_WAIT.search(why):
         record_event(key)
-    return f"{key} stays in {t.get('section')}, {mine[0]} unassigned, handed to the orphan lane"
+    return f"{key} -> {section}, {mine[0]} retained for its next run"
 
 
 def co_holders(t, me):
@@ -206,6 +228,9 @@ def park_release(key, t=None):
         raise RuntimeError(f"{key}: {who} is not assigned to it, nothing to release")
     if not others:
         raise RuntimeError(f"{key}: no other runner holds it, so releasing would orphan it; use --waits-on, --valentin or --unstarted")
+    record = preserve_owner(key, t)
+    if record and mine[0].lower() == f"runner {record['runner']}":
+        raise RuntimeError(f"{key}: its starting runner keeps ownership until Done")
     vcc("task", "unassign", key, "--agent", mine[0])
     note(key, f"Released by fleet/park: {mine[0]} no longer holds this ticket; {', '.join(others)} continues. Column unchanged. "
               "The picker no longer holds this runner for it.")
@@ -254,8 +279,8 @@ def park_lead(key, why, t=None):
     vcc("task", "assign", key, "--agent", name, check=False)
     record_event(key)
     note(key, f"Parked by fleet/park: unknown state. {why.strip()} Waiting person is {name}, who now holds it. "
-              f"Back in {home}, the runner left it.")
-    return f"{key} -> {home}, waiting on {name}, unassigned"
+              f"Back in {home}, starting runner retained for the next run.")
+    return f"{key} -> {home}, waiting on {name}, starting runner retained"
 
 
 # ---------------------------------------------------------------- one-time sweep
@@ -441,7 +466,8 @@ def self_test():
               "assignees": [{"agent": {"displayName": "Runner 4"}}, {"agent": {"displayName": "Runner 6"}}]}
     with patch.dict(os.environ, {"SHIP_SESSION_NAME": "RUNNER 4"}), \
             patch(__name__ + ".vcc", side_effect=fake_vcc) as api, \
-            patch(__name__ + ".note") as posted, patch(__name__ + ".record_event") as event:
+            patch(__name__ + ".note") as posted, patch(__name__ + ".record_event") as event, \
+            patch(__name__ + ".preserve_owner", return_value={"runner": 4}):
         assert blockers("HTPR-1") == ["HTPR-7", "HYCI-8"], "completed and incoming links must not block; Flag: Off must block"
         try:
             park_hand_back("HTPR-1", "finish the PR", ticket)
@@ -454,9 +480,8 @@ def self_test():
         event.assert_not_called()
         relations[:] = [r for r in relations if r["otherTask"]["ticketNumber"] not in ("HTPR-7", "HYCI-8")]
         result = park_hand_back("HTPR-1", "finish the PR", ticket)
-        assert "Runner 4 unassigned" in result and "AI Review" in result
-        assert [c.args for c in api.call_args_list if c.args[:2] == ("task", "unassign")] == [
-            ("task", "unassign", "HTPR-1", "--agent", "Runner 4")]
+        assert "Runner 4 retained" in result and "AI Review" in result
+        assert not any(c.args[:2] == ("task", "unassign") for c in api.call_args_list)
         assert ticket["section"] == "AI Review" and ticket["pullRequests"] == [{"number": 1}]
         posted.assert_called_once()
         event.assert_called_once_with("HTPR-1")
@@ -469,7 +494,7 @@ def self_test():
         else:
             raise AssertionError("an unreadable blocker must refuse hand-back")
         assert not any(c.args[:2] == ("task", "unassign") for c in api.call_args_list)
-    print("fleet/park completed-blocker hand-back regression ok")
+    print("fleet/park completed-blocker owner-resume regression ok")
     print("fleet/park self-test ok")
 
 
