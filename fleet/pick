@@ -35,15 +35,6 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
   e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 11514
   f. the rest of the CI or infra lane, same cap
-Restart in steps (HYCI-345): a stop cleared by bin/factory-breaker carries a ramp step. Step 1 lets one runner take work, step 2 three,
-step 3 all; the log line "factory restart step K/3: N runner(s)" names the cap and a runner past it gets
-"none: factory restart step K/3, N runner(s)". Steps are earned by 24 good hours, decided by bin/factory-breaker.
-Probe (HYCI-359): a stop that idles every runner cannot build the replay its own clear needs. While the record says stopped,
-one runner per plan (the step 1 cap) takes clean tickets: the log names it and a second runner on the same plan gets
-"none: factory stopped: R1; probe, 1 runner(s) per plan". bin/factory-breaker clears the stop itself at 90% of 10 runs.
-Stop fix (HYCI-352): the stop exists to fix each empty run at its source, so the probe may also take one open Fleet CI & Infra (11514)
-ticket labelled Stop Fix (the kept slot, any lane). One at a time across the pool; any other 11514 ticket still waits for the clear.
-The log line is "probe: stop fix <KEY>".
 One runner holds one ticket until it is live. brain-extra-hard runs on the codex engine (Sol high) or the claude engine (Opus high); every other engine skips it.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
@@ -139,12 +130,6 @@ SF_RELEASE_WAIT = Path(os.environ.get("FLEET_SF_RELEASE_WAIT", HOME / ".local/st
 SF_WAIT_FRESH_S = 900  # an older file holds nothing: a dead watcher must not freeze tickets
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
-# HYCI-342: bin/factory-breaker writes this record when burn, runs and merged PRs stop matching. Present and not cleared: only incidents go out.
-FACTORY_STOP = Path(os.environ.get("FLEET_FACTORY_STOP", HOME / ".local/state/fleet/factory-stop.json"))
-# HYCI-345: after a clear the pool comes back in steps (bin/factory-breaker walks them on 24 good hours); the picker holds the cap.
-RAMP_CAPS = (1, 3, None)
-PROBE_CAP = RAMP_CAPS[0]  # HYCI-359: a stopped factory probes with one runner per plan, the same cap as restart step 1
-
 # board -> (new-work columns, building columns)
 BOARDS = {
     "15": (("Backlog", "Bugs", "Improvements", "Features"), ("In Progress", "AI Review", "QA")),
@@ -166,9 +151,6 @@ NOT_NOW = "not now"
 
 def in_not_now(t):
     return (t.get("section") or "").strip().lower() == NOT_NOW
-# HYCI-352: a ticket on Fleet CI & Infra labelled Stop Fix fixes the cause of the factory stop itself, so the probe may run it
-# during a stop, one at a time across the pool. Any other 11514 ticket still waits for the stop to clear. Lower case: labels are read lower case.
-STOP_FIX = "stop fix"
 # HYCI-355: a ticket that says up front it cannot be built yet never starts a model. Valentin 2026-11-13: "the biggest
 # group of empty runs: a runner picks a ticket that cannot be built yet. It waits on a person, sits in Backlog, or needs a
 # key." The waits on a person, a lead or an open ticket are read from the board (waiting, BlockedBy, Valentin Review). These
@@ -1744,53 +1726,12 @@ def open_blocked_by(t):
 PICKER = [0]  # the runner number this pick runs for
 
 
-def stop_fix_label(t):
-    """A declared stop fix: a Fleet CI & Infra ticket labelled Stop Fix (HYCI-352)."""
-    return t["board"] == "11514" and STOP_FIX in (t.get("labels") or [])
-
-
-def stop_fix_in_work(n):
-    """Key of a Stop Fix ticket another runner works on right now, or None. One at a time across the pool: a live runner holds it
-    in a building column, runs it, or claimed it in the last two minutes (the run may not show in its log yet)."""
-    keys = {t["key"] for t in SNAP["tickets"] if stop_fix_label(t)}
-    if not keys:
-        return None
-    me = f"runner {n}"
-    for t in SNAP["tickets"]:
-        if t["key"] in keys and t["section"] in BOARDS[t["board"]][1] and any(live_runner(h) and h != me for h in names(t)):
-            return t["key"]
-    for m in range(1, RUNNERS + 1):
-        if m != n and running(m) in keys:
-            return running(m)
-    now_s = time.time()
-    try:
-        for path in (STATE / "claims").iterdir():
-            if path.name.startswith(".") or now_s - path.stat().st_mtime >= FRESH_CLAIM:
-                continue
-            who, key = path.read_text().split("\t")[:2]
-            if who != str(n) and key in keys:
-                return key
-    except OSError:
-        pass
-    return next((key for key, who in virtual_claims().items() if who != str(n) and key in keys), None)
-
-
-def stop_fix_ok(t, n):
-    """May runner n take t as a probe during a stop? Only a Stop Fix ticket, and only when no other runner has one in work."""
-    return bool(factory_stopped()) and stop_fix_label(t) and stop_fix_in_work(n) is None
-
-
 def infra_closed(t):
     """Features first (Valentin 13 Nov: "they are still only on infra"). A Fleet CI & Infra ticket is new work for this runner
-    only under the infra cap, and never while the factory is stopped: the probe must prove features (HYCI-376).
+    only under the infra cap (HYCI-388: no factory stop any more).
     Incidents are outside both. A runner's own held ticket is not new work."""
     if not t["key"].startswith("HYCI-") or INCIDENT_LABEL in t["labels"]:
         return None
-    if factory_stopped():
-        if stop_fix_label(t):
-            busy = stop_fix_in_work(PICKER[0])
-            return f"stop fix: one at a time, {busy} is in work" if busy else None
-        return "features first: factory stopped, probe takes app work only"
     if infra_count(PICKER[0]) >= infra_cap():
         return f"features first: {infra_cap()} runner(s) already on Fleet CI & Infra"
     return None
@@ -2424,136 +2365,12 @@ def wip_line(units, workers, excluded):
     return f"wip: {len(units)} of {len(workers)}, new work {state}" + (f" (not counted: {left})" if left else "")
 
 
-def factory_stopped():
-    """Why the factory is stopped, or "" when it runs. An unreadable record counts as stopped."""
-    try:
-        rec = json.loads(FACTORY_STOP.read_text())
-    except FileNotFoundError:
-        return ""
-    except (OSError, ValueError):
-        return "unreadable stop record"
-    if not isinstance(rec, dict):
-        return "unreadable stop record"
-    if rec.get("cleared"):
-        return ""
-    by = rec.get("tripped_by")
-    return ", ".join(str(x) for x in by) if isinstance(by, list) and by else "no rule named"
-
-
-def factory_ramp():
-    """(step, cap) after a clear: bin/factory-breaker walks 1 runner, then 3, then all on 24 good hours. No ramp field means
-    the pool was cleared before steps existed, so every runner takes work: a new rule never throttles a running pool."""
-    try:
-        rec = json.loads(FACTORY_STOP.read_text())
-    except (OSError, ValueError):
-        return len(RAMP_CAPS), None
-    cleared = rec.get("cleared") if isinstance(rec, dict) else None
-    if not cleared:
-        return len(RAMP_CAPS), None
-    field = cleared.get("ramp") or {}
-    step = field.get("step") if isinstance(field.get("step"), int) else len(RAMP_CAPS)
-    step = min(max(step, 1), len(RAMP_CAPS))
-    return step, RAMP_CAPS[step - 1]
-
-
-def ramp_line(step, cap):
-    return f"factory restart step {step}/{len(RAMP_CAPS)}: {'all runners' if cap is None else f'{cap} runner(s)'}"
-
-
-RESTART_WINDOW_H = 24  # a clear without a ramp field still counts as a restart for this long (the coordinator's 13 Nov clear)
-
-
-def in_restart(now=None):
-    """True while the pool is coming back: a ramp step below the last, or a clear with no ramp field made under RESTART_WINDOW_H ago."""
-    step, cap = factory_ramp()
-    if cap is not None:
-        return True
-    try:
-        rec = json.loads(FACTORY_STOP.read_text())
-        cleared = rec.get("cleared") if isinstance(rec, dict) else None
-        if not cleared or (cleared.get("ramp") or {}).get("step") is not None:
-            return False
-        at = dt.datetime.fromisoformat(str(cleared.get("at")).replace("Z", "+00:00"))
-    except (OSError, ValueError, TypeError):
-        return False
-    return ((now or dt.datetime.now(dt.timezone.utc)) - at).total_seconds() < RESTART_WINDOW_H * 3600
-
-
-def plan_of(n):
-    eng = runner_engine(n)
-    return ENGINES[eng]["plan"] if eng in ENGINES else "?"
-
-
-def busy_on_plan(n, plan):
-    return [m for m in range(1, RUNNERS + 1) if m != n and runner_engine(m) in ENGINES
-            and ENGINES[runner_engine(m)]["plan"] == plan and running(m)]
-
-
-PROBE_CAPS = [Path.home() / ".local/state/fleet/probe-caps.json"]  # self-test points it at a missing file
-
-
-def probe_cap(plan):
-    """Valentin's direct order may raise one plan's probe cap during a stop (13 Nov: "You can launch more agents again on the
-    OpenCode Go plan ... make sure they don't just check"). ~/.local/state/fleet/probe-caps.json:
-    {"<plan>": {"cap": N, "until": epoch, "why": "his words"}}. A stopped factory still takes app work only (infra_closed)."""
-    try:
-        o = json.loads(PROBE_CAPS[0].read_text()).get(plan) or {}
-        if float(o.get("until", 0)) > time.time():
-            return max(PROBE_CAP, int(o["cap"]))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        pass
-    return PROBE_CAP
-
-
-def probe_gate(n, why):
-    """HYCI-359: a stop that idles every runner never fills the window its own clear reads, so the stop could only be lifted by
-    hand. While it is active one runner per plan takes clean tickets as a probe; bin/factory-breaker clears the stop itself once
-    those runs build 90% of 10. Under the line the stop holds."""
-    cap = probe_cap(plan_of(n))
-    log(f"factory stopped: {why}; probe: {cap} runner(s) per plan take clean tickets")
-    busy = busy_on_plan(n, plan_of(n))
-    if len(busy) >= cap:
-        raise SystemExit(f"none: factory stopped: {why}; probe, {cap} runner(s) per plan: "
-                         f"{plan_of(n)} runners {' '.join(map(str, busy))} already in a run")
-
-
-def ramp_gate(n):
-    """HYCI-345, Valentin 13 Nov ("one runner PER plan"): the ramp cap is per plan, not per runner number. Step 1 lets one runner per
-    plan hold a run, step 2 three, step 3 all. Runner numbers say nothing about the plan: runner 1 may be a reserved plan's."""
-    step, cap = factory_ramp()
-    if cap is None:
-        return
-    # HYCI-345, Valentin 13 Nov: a live probe-caps.json order (OpenCode Go 6) holds through the restart steps too. Without it the
-    # first --restart-step1 drops that plan from 6 runners back to 1 (runner-watch 13 Nov: runners 2 and 11 idle behind runner 12).
-    cap = max(cap, probe_cap(plan_of(n)))
-    log(ramp_line(step, cap))
-    busy = busy_on_plan(n, plan_of(n))
-    if len(busy) >= cap:
-        raise SystemExit(f"none: factory restart step {step}/{len(RAMP_CAPS)}, {cap} runner(s) per plan: "
-                         f"{plan_of(n)} runners {' '.join(map(str, busy))} already in a run")
-
-
-def staged_units(units):
-    """During a restart a loose orphan (no live runner holds it) does not close new work: it is not a canary's work yet, and the
-    orphan lane takes it first anyway. Only tickets a live runner holds count (HYCI-345, 13 Nov: seven units of five closed new work
-    to the canaries because three unheld investigation tickets sat in In Progress)."""
-    if not in_restart():
-        return units
-    held = {t["key"] for t in SNAP["tickets"] if any(live_runner(h) for h in names(t))}
-    return {k for k in units if k in held}
-
-
 def choose(n, dry):
     PICKER[0] = n
     RELATION_CAP[0] = BLOCK_LOOKUPS * 2
     hit = incident_step(n, dry)
     if hit:
         return hit
-    why = factory_stopped()
-    if why:
-        probe_gate(n, why)
-    else:
-        ramp_gate(n)
     owned = [t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == int(n)]
     if owned:
         t = sorted(owned, key=lambda t: (t["created"], t["key"]))[0]
@@ -2591,20 +2408,12 @@ def choose(n, dry):
             # joins only for an incident or a ticket that blocks open app work (Valentin 13 Nov: "literally everything
             # is on infrastructure")
             full = infra_count(n) >= infra_cap()
-            cands = [t for t in cands if t["key"] != held and (INCIDENT_LABEL in t["labels"] or stop_fix_ok(t, n)
-                                                                or (blocks_known(t) and not full))]
+            cands = [t for t in cands if t["key"] != held and (INCIDENT_LABEL in t["labels"] or (blocks_known(t) and not full))]
             log("kept slot: another runner holds it; this runner takes only blockers" if cands
                 else "kept slot: another runner holds it; app work first")
-        if factory_stopped():
-            cands = [t for t in cands if INCIDENT_LABEL in t["labels"] or stop_fix_ok(t, n)]
-            fixes = any(INCIDENT_LABEL not in t["labels"] for t in cands)
-            log(("kept slot: incident or stop fix only" if fixes else "kept slot: incident only") if cands
-                else "kept slot: factory stopped, probe takes app work only")
         if cands:
             got = take_kept_slot(n, me, cands, dry)
             if got:
-                if factory_stopped() and stop_fix_label(got[0]):
-                    log(f"probe: stop fix {got[0]['key']}")
                 return got
             own = any(me in names(t) and t["section"] in BOARDS[t["board"]][1] for t in SNAP["tickets"])
             if not own and not held:
@@ -2670,10 +2479,6 @@ def choose(n, dry):
     # WIP cap: while the pool's pipeline is at or over its live runners, nothing new starts; only the PR queue and
     # tickets that already have an open PR (finish before you start)
     units, workers, excluded = pipeline()
-    loose = units - staged_units(units)
-    if loose:
-        excluded["unheld in a staged restart"] = sorted(loose)
-        units = units - loose
     wip = wip_line(units, workers, excluded)
     log(wip)
     closed = len(units) >= len(workers)
@@ -3396,11 +3201,9 @@ def sf_release_self_test():
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
-    global STATE, ALLOCATION, RUNNER_STATE, WATCH, FACTORY_STOP
-    PROBE_CAPS[0] = Path("/nonexistent/probe-caps.json")  # a live order on this server must not change test outcomes
+    global STATE, ALLOCATION, RUNNER_STATE, WATCH
     import tempfile
     STATE = Path(tempfile.mkdtemp())
-    FACTORY_STOP = STATE / "no-factory-stop.json"  # a live stop record must not change the offline test
     ALLOCATION = STATE / "allocation.json"
     RUNNER_STATE = STATE
     WATCH = STATE
@@ -3533,203 +3336,7 @@ def self_test():
     one_run_self_test()
     sf_release_self_test()
     not_now_self_test()
-    factory_stop_self_test()
-    stage_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, probe and restart steps, "
-          "38 wait-gate checks, not-now skip")
-
-
-def factory_stop_self_test():
-    """HYCI-342: an active stop record takes every ticket except incidents. Absent, cleared: runs.
-    HYCI-345: a cleared record with a ramp step caps how many runners take work, and the log names the cap."""
-    global FACTORY_STOP
-    saved = FACTORY_STOP
-    tmp = STATE / "factory-stop-test.json"
-    try:
-        FACTORY_STOP = tmp
-        tmp.unlink(missing_ok=True)
-        assert factory_stopped() == "", "no record: the factory runs"
-        assert factory_ramp() == (3, None), "no record: no cap"
-        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R1", "R3"], "cleared": None}))
-        assert factory_stopped() == "R1, R3", "an active record names its rules"
-        assert factory_ramp() == (3, None), "a stopped record caps nothing: the stop already holds every runner"
-        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R1"], "cleared": {"at": "y", "by": "t", "why": "t"}}))
-        assert factory_stopped() == "", "a cleared record: the factory runs"
-        assert factory_ramp() == (3, None), "a clear from before restart steps keeps every runner"
-        tmp.write_text("{not json")
-        assert factory_stopped() == "unreadable stop record", "an unreadable record stops the factory"
-        assert factory_ramp() == (3, None), "an unreadable record caps nothing"
-        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": None}))
-        # an incident still goes out first
-        saved_inc = incident_step
-        globals()["incident_step"] = lambda n, dry: ({"key": "I-1"}, "incident")
-        assert choose(5, True)[1] == "incident", "a stopped factory still takes an incident"
-        globals()["incident_step"] = saved_inc
-
-        def ramped(step):
-            tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {
-                "at": "y", "by": "t", "why": "t", "ramp": {"step": step, "at": "y"}}}))
-
-        def exit_msg(n):
-            """The message choose() ends on: the ramp guard runs before any ticket work, so the rest of the board is empty here."""
-            try:
-                choose(n, True)
-                return ""
-            except SystemExit as e:
-                return str(e)
-
-        saved_log, saved_snap, saved_inc, saved_eng, saved_n = log, SNAP, incident_step, runner_engine, RUNNERS
-        saved_claim = try_claim
-        lines = []
-        globals()["log"], globals()["incident_step"] = lines.append, lambda n, dry: None
-        globals()["SNAP"] = {"tickets": [], "rel": {}, "prs": [], "incidents": [], "open": {}}
-        engines = {1: "opencode", 2: "opencode", 3: "opencode", 4: "opencode", 5: "codex"}
-        globals()["runner_engine"], globals()["RUNNERS"] = engines.get, 5
-        RUNNING.clear()
-        RUNNING.update({m: None for m in engines})
-        try:
-            # Valentin 13 Nov, "one runner PER plan": the cap counts runners of the same plan in a run, not the runner number
-            ramped(1)
-            assert factory_ramp() == (1, 1) and not factory_stopped(), "a cleared step 1 record runs"
-            assert "factory restart" not in exit_msg(1), "no opencode runner in a run: runner 1 goes"
-            assert "factory restart step 1/3: 1 runner(s)" in lines, "the picker log names the cap"
-            RUNNING[2] = "HTPR-1"
-            assert exit_msg(1) == "none: factory restart step 1/3, 1 runner(s) per plan: opencode runners 2 already in a run", exit_msg(1)
-            assert exit_msg(4).startswith("none: factory restart step 1/3"), "runner 4 is the same plan"
-            assert "factory restart" not in exit_msg(5), "codex has no run of its own: its canary goes"
-            # Valentin 13 Nov: a live probe-caps order (opencode 3 here) lifts the step 1 cap for that plan only, and only while it runs
-            PROBE_CAPS[0] = tmp.parent / "probe-caps.json"
-            PROBE_CAPS[0].write_text(json.dumps({"opencode": {"cap": 3, "until": time.time() + 3600, "why": "self-test"}}))
-            assert "factory restart" not in exit_msg(1), "step 1 with a live opencode cap of 3: a second runner may start"
-            RUNNING[3] = "HTPR-2"
-            RUNNING[4] = "HTPR-3"
-            assert exit_msg(1) == "none: factory restart step 1/3, 3 runner(s) per plan: opencode runners 2 3 4 already in a run", exit_msg(1)
-            PROBE_CAPS[0].write_text(json.dumps({"opencode": {"cap": 3, "until": time.time() - 1, "why": "expired"}}))
-            assert exit_msg(1).startswith("none: factory restart step 1/3, 1 runner(s)"), "an expired order caps at the step again"
-            PROBE_CAPS[0] = Path("/nonexistent/probe-caps.json")
-            RUNNING[3] = None
-            RUNNING[4] = None
-            ramped(2)
-            assert factory_ramp() == (2, 3)
-            RUNNING[3] = "HTPR-2"
-            assert "factory restart" not in exit_msg(1), "step 2: two in a run, a third may start"
-            RUNNING[4] = "HTPR-3"
-            assert "factory restart" in exit_msg(1), "step 2: three in a run is the cap"
-            ramped(3)
-            assert factory_ramp() == (3, None) and "factory restart" not in exit_msg(1), "the last step caps nothing"
-            ramped(9)
-            assert factory_ramp() == (3, None), "a step past the last is the last"
-
-            # HYCI-359: a stop no longer idles every runner. It probes with one runner per plan at the step 1 cap, so its own
-            # replay can fill; the record still says stopped until bin/factory-breaker clears it on 90% of 10 runs.
-            tmp.write_text(json.dumps({"at": "2026-11-13T09:00:00Z", "tripped_by": ["R2"], "cleared": None}))
-            RUNNING.clear()
-            lines.clear()
-            assert factory_stopped() == "R2", "a probe is not a clear"
-            assert "factory stopped" not in exit_msg(1), "a stopped factory lets its probe runner through"
-            assert "factory stopped: R2; probe: 1 runner(s) per plan take clean tickets" in lines, lines
-            assert factory_stopped() == "R2", "the probe leaves the record stopped"
-            RUNNING[2] = "HTPR-1"
-            assert exit_msg(1) == ("none: factory stopped: R2; probe, 1 runner(s) per plan: "
-                                  "opencode runners 2 already in a run"), exit_msg(1)
-            assert exit_msg(4).startswith("none: factory stopped: R2; probe, 1 runner(s) per plan"), "runner 4 is the same plan"
-            assert "factory stopped" not in exit_msg(5), "codex probes with a runner of its own plan"
-            # HYCI-352: a declared stop fix (11514, label Stop Fix) runs during a stop, one at a time; a plain 11514 ticket does not.
-            claims = []
-            MEMBERS.update({b: None for b in BOARDS})  # membership unknown: every board is offered
-            LOGGED.clear()
-            globals()["try_claim"] = lambda n, t, source, dry: claims.append(t["key"]) or True
-            ticket = lambda key, labels=(), section="Backlog", holders=(): {
-                "key": key, "idx": int(key.split("-")[1]), "board": "11514", "section": section, "title": "x",
-                "labels": ["brain-medium", *labels], "prio": "Urgent", "holders": [list(h) for h in holders], "waiting": False,
-                "subs": False, "paid": False, "created": "2026-11-13T01:00:00Z", "updated": "2026-11-13T01:00:00Z"}
-
-            def stopped_pick(n, *tickets):
-                globals()["SNAP"] = {"tickets": list(tickets), "rel": {t["key"]: [[], []] for t in tickets}, "prs": [],
-                                     "incidents": [], "open": {}}
-                RUNNING.clear()
-                RUNNING.update({m: None for m in engines})
-                lines.clear()
-                claims.clear()
-                try:
-                    got = choose(n, True)
-                    return got[0]["key"], got[1]
-                except SystemExit as e:
-                    return str(e)
-
-            fix, plain = ticket("HYCI-901", ["stop fix"]), ticket("HYCI-902")
-            assert stopped_pick(1, fix) == ("HYCI-901", "kept-slot"), "stopped plus a Stop Fix ticket: the probe takes it"
-            assert "probe: stop fix HYCI-901" in lines, lines
-            assert claims == ["HYCI-901"], claims
-            assert factory_stopped() == "R2", "taking the fix leaves the record stopped"
-            got = stopped_pick(1, plain)
-            assert isinstance(got, str) and got.startswith("none:"), got
-            assert not claims and not any(l.startswith("probe: stop fix") for l in lines), "a plain 11514 ticket is not a stop fix"
-            got = stopped_pick(1, plain, fix)
-            assert got == ("HYCI-901", "kept-slot"), f"a plain ticket beside a Stop Fix one: only the fix goes, got {got}"
-            # one at a time: a live runner holds the first, so the second waits
-            second = ticket("HYCI-903", ["stop fix"])
-            held = ticket("HYCI-901", ["stop fix"], "In Progress", [("runner 2", True)])
-            got = stopped_pick(1, held, second)
-            assert isinstance(got, str) and got.startswith("none:") and not claims, f"a second Stop Fix ticket must wait, got {got}"
-            PICKER[0] = 1
-            assert stop_fix_in_work(1) == "HYCI-901" and stop_fix_in_work(2) is None, "the holder itself is not blocked by its own ticket"
-            assert infra_closed(second) == "stop fix: one at a time, HYCI-901 is in work"
-            assert not stop_fix_ok(second, 1) and stop_fix_ok(held, 2)
-            # a running run counts too, and a stop that has cleared leaves the label with no effect
-            globals()["SNAP"]["tickets"] = [fix, second]
-            RUNNING[3] = "HYCI-901"
-            assert stop_fix_in_work(1) == "HYCI-901" and stop_fix_in_work(3) is None
-            RUNNING[3] = None
-            tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {"at": "y", "by": "t", "why": "t"}}))
-            assert not stop_fix_ok(fix, 1), "no stop: nothing to fix, the label opens no lane"
-            RUNNING.clear()
-        finally:
-            globals()["try_claim"] = saved_claim
-            globals()["log"], globals()["SNAP"], globals()["incident_step"] = saved_log, saved_snap, saved_inc
-            globals()["runner_engine"], globals()["RUNNERS"] = saved_eng, saved_n
-            RUNNING.clear()
-    finally:
-        FACTORY_STOP = saved
-        tmp.unlink(missing_ok=True)
-
-
-def stage_self_test():
-    """HYCI-345: during a restart a loose orphan does not close new work, a held ticket does. A clear with no ramp field made under
-    RESTART_WINDOW_H ago is a restart (the coordinator's 13 Nov clear, with a `reopened` block); an old one, a full ramp and a
-    stopped factory are not."""
-    global FACTORY_STOP, SNAP
-    saved = (FACTORY_STOP, SNAP)
-    tmp = STATE / "stage-test.json"
-    now = dt.datetime(2026, 11, 13, 12, 0, tzinfo=dt.timezone.utc)
-    recent = {"at": "2026-11-13T01:18:32Z", "by": "t", "why": "t"}
-    try:
-        FACTORY_STOP = tmp
-        tmp.unlink(missing_ok=True)
-        assert not in_restart(now), "no record: no restart"
-        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": None}))
-        assert not in_restart(now), "an active stop is not a restart; factory_stopped() handles it"
-        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": recent,
-                                   "reopened": {"at": "z", "by": "c", "why": "w", "undone_clear": recent}}))
-        assert in_restart(now) and factory_ramp() == (3, None), "a recent clear with no ramp and a reopened block is a restart that caps no runner"
-        assert not in_restart(now + dt.timedelta(hours=40)), "a clear 40 hours old is over"
-        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {**recent, "ramp": {"step": 3, "at": "y"}}}))
-        assert not in_restart(now), "the last ramp step is no restart"
-        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {**recent, "ramp": {"step": 1, "at": "y"}}}))
-        assert in_restart(now)
-        # units: the unheld orphan stops counting only during a restart; a held ticket always counts
-        RUNNING.clear()
-        RUNNING.update({3: "HTPR-5"})
-        tk = lambda key, *holders: {"key": key, "holders": [[h, True] for h in holders]}
-        SNAP = {"tickets": [tk("HYCI-346"), tk("HTPR-5", "runner 3")]}
-        units = {"HYCI-346", "HTPR-5"}
-        assert staged_units(units) == {"HTPR-5"}, "restart: the unheld orphan is not a canary's work"
-        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {**recent, "ramp": {"step": 3, "at": "y"}}}))
-        assert staged_units(units) == units, "after the restart every unit counts"
-    finally:
-        FACTORY_STOP, SNAP = saved
-        RUNNING.clear()
-        tmp.unlink(missing_ok=True)
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, 38 wait-gate checks, not-now skip")
 
 
 def escalate_self_test():

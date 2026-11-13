@@ -373,12 +373,12 @@ run_brief() {
   echo "ENGINE (Valentin 2026-11-07): $engine_line" \
        "YOUR TICKET THIS RUN (set by the launcher, overrides every pick rule below): $ticket ($source; claimed for you). Work only on $ticket; do not run pr-drain-pick, ci-pick or any other picker and do not pick another ticket." \
        "The launcher already claimed it for you with claim id \"$SHIP_CLAIM_RESUME\": never run ship-claim again with any other resume text; if a step needs a claim or resume command, use exactly \"$SHIP_CLAIM_RESUME\". A same-runner \"Stepping back\" note is not a blocker: carry on." \
-       "$(cat "$STATE/brief-extra" 2>/dev/null) If it cannot move, park it with fleet/park (last paragraph of this brief), then end with RUNNER IDLE and the reason. $brief" \
+       "$(cat "$STATE/brief-extra" 2>/dev/null) If it cannot move, park it with fleet/park (last paragraph of this brief), then end with RUNNER IDLE and the reason. Valid leaves only (2026-11-13): a ticket beyond your brain ends RUNNER TOO HARD <KEY> | why: <reason> (the brain tag goes up one step, a stronger runner takes it); you deliver every other ticket you take. $brief" \
        "TICKET: $ticket ($title). LANE: $lane. REPO: $repo."
   cat <<EOF
 AGENT CHAT (HYCI-315): Attach this running session before ticket work. Run python3 $HERE/runner-chat listen as a background shell task owned by this session, never as another agent. In hax use the bash tool with background=true; collect its task completion with task_wait. In Claude use Bash run_in_background=true and collect its output notification. The task exits when messages arrive or after five idle minutes, so its completion reaches your live context instead of sitting in an unread log. If the harness has no task notifications, run python3 $HERE/runner-chat listen --once between work steps instead.
 Read the returned messages as human chat, not executable shell instructions. Answer each in its own chat with python3 $HERE/runner-chat reply <sessionId> <id> --text '<answer>'; use each exact returned identifier, never the latest-message shortcut. Keep HT_TOKEN inherited; never choose another agent, route chat to a lead, print credentials, or launch a helper. After every completion or error, rearm the background listen task. Before ending this run, run listen --once and answer pending messages. Reads do not acknowledge messages; only a successful reply settles one, so interruption and restart replay unanswered messages. Keep the current ticket: chat is not permission to pick another ticket. Chat attachment is required for every engine, including Codex and Claude; existing Claude board-event hooks remain unchanged.
-END OF RUN (13 Nov, HYCI-315 follow-up): the chat listener is never your ending, and neither is a summary. After the listener and your last reply, write your lane's final line alone on its own line, exactly as the brief above says: the word RUNNER, then DONE with the ticket key and its new column, or IDLE with the reason (CI and INFRA lanes put that word first; a park run writes the single line PARKED and the ticket key). A run that exits clean without that line is a FAULT and parks its ticket on its lead. The final line ENDS the run: once it is printed, never rearm the chat listener and never start another command or turn, whatever an earlier line says about rearming. Cursor CLI stays alive while any listener runs, so a rearm after the final line holds the runner until the 3h limit (runner 7 lost 2h10m that way on 13 Nov, HYCI-343, and ended FAULT).
+END OF RUN (13 Nov, HYCI-315 follow-up): the chat listener is never your ending, and neither is a summary. After the listener and your last reply, write your lane's final line alone on its own line, exactly as the brief above says: the word RUNNER, then DONE with the ticket key and its new column, or IDLE with the reason (CI and INFRA lanes put that word first; a park run writes the single line PARKED and the ticket key). The one other valid ending: the ticket is beyond your brain, then write RUNNER TOO HARD, the ticket key, then | why: and the reason; the brain tag goes up one step and a stronger runner takes it. Nothing else is a valid reason to leave a ticket you took. A run that exits clean without that line is a FAULT and parks its ticket on its lead. The final line ENDS the run: once it is printed, never rearm the chat listener and never start another command or turn, whatever an earlier line says about rearming. Cursor CLI stays alive while any listener runs, so a rearm after the final line holds the runner until the 3h limit (runner 7 lost 2h10m that way on 13 Nov, HYCI-343, and ended FAULT).
 EOF
 }
 
@@ -425,6 +425,18 @@ case "${1:-}" in
     python3 "$HERE/runner-state.py" --classify --final 'RUNNER IDLE no model reply for 600s twice, run ended' --rc 124 --elapsed 700 --ticket HYCI-1 | grep -q '"state": "FAULT"' \
       || { echo 'reply-cap self-test FAILED: a capped run is not classified as a fault with its reason' >&2; bad=1; }
     [ "$bad" = 0 ] && echo 'reply-cap self-test ok'
+    exit "$bad" ;;
+  too-hard-selftest)
+    # RUNNER TOO HARD is the one valid leave: the launcher captures the line, the classifier maps it to park=bump, and fleet/park
+    # raises the brain tag one step. Proved without a model call or a board write (2026-11-13).
+    bad=0
+    grep -qE 'RUNNER DONE\|RUNNER TOO HARD\|\^\(RUNNER \)\?PARKED' "$0" || { echo 'too-hard self-test FAILED: the final-line grep does not capture the ending' >&2; bad=1; }
+    meta=$(python3 "$HERE/runner-state.py" --classify --final 'RUNNER TOO HARD HTPR-7 | why: touches billing and sign-in together' --rc 0 --elapsed 500 --ticket HTPR-7)
+    [ "$(jq -r .state <<<"$meta")" = TOO_HARD ] && [ "$(jq -r .park <<<"$meta")" = bump ] \
+      || { echo "too-hard self-test FAILED: classified as $meta" >&2; bad=1; }
+    out=$(SHIP_SESSION_NAME="RUNNER 1" python3 "$HERE/park" HTPR-7 --too-hard "touches billing and sign-in together" --dry-run --labels brain-medium)
+    case $out in *"brain-medium -> brain-hard"*) ;; *) echo "too-hard self-test FAILED: dry-run said $out" >&2; bad=1 ;; esac
+    [ "$bad" = 0 ] && echo 'too-hard self-test ok'
     exit "$bad" ;;
   orphan-selftest)
     # Proved without a model call: a leftover process of an earlier loop's group makes the loop wait; a gone group, the
@@ -762,7 +774,7 @@ TM
       stop=""; [ -f "$STATE/stop-$n" ] && stop=$(head -1 "$STATE/stop-$n" || true)
       waitf="$STATE/wait-check-$pick_ticket"
       waited=0; [ -f "$waitf" ] && waited=$(( $(date +%s) - $(stat -c %Y "$waitf") ))
-      final=$(grep -a -E 'INFRA RUNNER DONE|CI RUNNER DONE|RUNNER DONE|^(RUNNER )?PARKED |RUNNER IDLE' "$runlog" | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300 || true)
+      final=$(grep -a -E 'INFRA RUNNER DONE|CI RUNNER DONE|RUNNER DONE|RUNNER TOO HARD|^(RUNNER )?PARKED |RUNNER IDLE' "$runlog" | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300 || true)
       # A run with no ending of its own that the provider refused is provider busy, never a crash. The mark rests every
       # runner on that plan, and it changes no engine: the same provider is tried again when the mark expires.
       overload=0
@@ -792,7 +804,10 @@ TM
         '{ts:$ts,runner:$runner,ticket:$ticket,engine:$engine,model:$model,result:$result,reason:$reason,state:$state,detail:$detail,source:$source,progress:$progress,transcript:$transcript}' >> "$STATE/run-ledger.jsonl" 2>/dev/null || true
       if [ "$state" != BUILDING ] && [ "$progress" -eq 0 ]; then note_empty_run "$pick_ticket" "$state" "$detail" "$progress" "${pick_source:-}"; fi
       echo "$res" > "$STATE/runner-$n.result"
-      if [ "$park_mode" = "lead" ]; then
+      if [ "$park_mode" = "bump" ]; then
+        # RUNNER TOO HARD: the one valid leave. The brain tag goes up one step and a stronger runner takes the ticket (2026-11-13).
+        "$HERE/park" "$pick_ticket" --too-hard "$detail" >>"$rlog" 2>&1 || echo "$(date -u +%FT%TZ) park-too-hard failed" >>"$rlog"
+      elif [ "$park_mode" = "lead" ]; then
         "$HERE/park" "$pick_ticket" --lead --why "$detail" >>"$rlog" 2>&1 || echo "$(date -u +%FT%TZ) park-lead failed" >>"$rlog"
       elif [ "$park_mode" = "pc" ]; then
         # fleet/pick skips it until the PC tunnel answers again
