@@ -1409,12 +1409,53 @@ def one_run_state(p):
     return ("pending", True) if p.get("merge_state") == "BLOCKED" else ("green", True)
 
 
-def pr_checks_pending(key):
+_SF_PRS = {}
+
+
+def gh_app_env():
+    """Environment for a gh call made as the runner App, as open_prs() does it. None (default auth) when the App gives nothing."""
+    cred = subprocess.run(["gh-app-token"], capture_output=True, text=True).stdout.strip()
+    return dict(os.environ, GH_TOKEN=cred) if cred else None
+
+
+def sf_open_prs(t):
+    """Open PRs of a Software Factory ticket's own app repo, shaped like open_prs() rows. open_prs() reads only
+    hypertask-ai/hypertask, so a SOFT ticket with a PR in its app repo looked PR-less: canary run 13 Nov 17:01 (SOFT-2166)
+    was offered as an orphan while its checks ran and ended WAIT_CHECK, empty. One GitHub read per repo per pick. Fails open."""
+    if not t or t.get("board") != "2060":
+        return []
+    d = sf_repo(t)
+    if d == str(PROJECTS):
+        return []
+    if d not in _SF_PRS:
+        rows = []
+        try:
+            url_ = subprocess.run(["git", "-C", d, "remote", "get-url", "origin"], capture_output=True, text=True, timeout=20).stdout.strip()
+            m = re.search(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?$", url_)
+            r = subprocess.run(["gh", "pr", "list", "--repo", m[1], "--state", "open", "--limit", "100",
+                                "--json", "number,title,isDraft,headRefName,updatedAt,statusCheckRollup,headRefOid,reviewDecision,mergeable,mergeStateStatus"],
+                               capture_output=True, text=True, env=gh_app_env(), timeout=60)
+            if r.returncode == 0:
+                for p in json.loads(r.stdout):
+                    rows.append({"number": p["number"], "title": p["title"], "draft": p["isDraft"], "branch": p["headRefName"],
+                                 "updated": p["updatedAt"],
+                                 "red": any(c.get("conclusion") in ("FAILURE", "TIMED_OUT") or c.get("state") in ("FAILURE", "ERROR")
+                                            for c in p.get("statusCheckRollup") or []),
+                                 "head": p.get("headRefOid"), "review": p.get("reviewDecision") or "", "mergeable": p.get("mergeable") or "",
+                                 "merge_state": p.get("mergeStateStatus") or "", "checks": check_states(p.get("statusCheckRollup"))})
+        except Exception:
+            rows = []
+        _SF_PRS[d] = rows
+    return _SF_PRS[d]
+
+
+def pr_checks_pending(key, t=None):
     """Does ticket `key` have an open, non-draft PR whose checks are still running and that nothing else blocks (no conflict, no
     change request, no red check)? Then a park job has nothing to do: the next run only merges once checks end. Not behind
-    ONE_RUN_FLAG: parks 10:49 and 11:01 UTC on 13 Nov (HYCI-352, HYCI-358) were 60 and 75 second runs on exactly this. Fails open."""
+    ONE_RUN_FLAG: parks 10:49 and 11:01 UTC on 13 Nov (HYCI-352, HYCI-358) were 60 and 75 second runs on exactly this. Fails open.
+    `t`: the ticket, so a Software Factory ticket's PR in its own app repo counts too (SOFT-2166, 13 Nov 17:01)."""
     try:
-        for p in open_prs():
+        for p in open_prs() + sf_open_prs(t):
             if pr_ticket(p) == key and one_run_state(p) == ("pending", True):
                 return True
     except Exception:
@@ -1913,7 +1954,7 @@ def try_claim(n, t, source, dry):
         if mine and mine["key"] in one_run_hold(dry):
             log(f"hold {t['key']}: own {own} waits on its PR's checks or merge (one-run); a script owns it, no park job")
             return False
-        if mine and pr_checks_pending(mine["key"]):
+        if mine and pr_checks_pending(mine["key"], mine):
             log(f"hold {t['key']}: own {own} has an open PR whose checks are running; a park job has nothing to park (HYCI-352, HYCI-358 parks)")
             return False
         if mine and parkable(mine):  # parking clears both holds: ship-claim lets a parked ticket's open PR go too
@@ -2500,7 +2541,7 @@ def choose(n, dry):
             why = "ticket design-pass or pool hold"
         elif not can_join(n, t["board"]):
             why = f"runner {n} is not a member of board {t['board']}"
-        elif INCIDENT_LABEL not in t["labels"] and pr_checks_pending(t["key"]):
+        elif INCIDENT_LABEL not in t["labels"] and pr_checks_pending(t["key"], t):
             why = "open PR checks still running; the next run only merges once they end (HYCI-358 orphan parks 13 Nov 16:31, 16:33)"
         elif in_lane(t) and full():
             why = "checks lane full"
@@ -3028,6 +3069,13 @@ def one_run_self_test():
             SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "prs": [pr(1, "HTPR-1", **extra)], "incidents": []}
             assert not pr_checks_pending("HTPR-1"), f"{why}: a model has work, park job allowed"
         assert not pr_checks_pending("HTPR-2"), "another ticket's PR is not this ticket's wait"
+        _SF_PRS["/x/sf"] = [pr(7, "SOFT-9", ("ci=IN_PROGRESS",))]
+        _sf_orig = sf_repo
+        globals()["sf_repo"] = lambda t: "/x/sf"
+        assert pr_checks_pending("SOFT-9", {"board": "2060", "labels": []}), "SF app repo PR with running checks holds the ticket (SOFT-2166, 13 Nov)"
+        assert not pr_checks_pending("SOFT-8", {"board": "2060", "labels": []}), "another SF ticket's PR is not this ticket's wait"
+        globals()["sf_repo"] = _sf_orig
+        _SF_PRS.clear()
         flag.write_text("")
         assert held([tk("HTPR-1"), tk("HTPR-2")], [pr(1, "HTPR-2", ("ci=PENDING",))]) == {"HTPR-2"}, "only the ticket with the PR is held"
         SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "incidents": [], "prs": None}
