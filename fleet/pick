@@ -2562,7 +2562,9 @@ def wait_self_test():
                    {"ticket": "HTPR-2", "ts": at(20), "state": "WAIT_CHECK", "reason": "x"},
                    {"ticket": "HTPR-2", "ts": at(10), "state": "WAIT_CHECK", "reason": "ci-pending"},
                    {"ticket": "HTPR-3", "ts": at(10), "state": "WAIT_CHECK", "reason": "ci-pending"},
-                   {"ticket": "HTPR-4", "ts": at(10), "state": "WAIT_CHECK", "reason": "until 2026-11-11T11:00Z"}]]
+                   {"ticket": "HTPR-4", "ts": at(10), "state": "WAIT_CHECK", "reason": "until 2026-11-11T11:00Z"},
+                   {"ticket": "HTPR-8863", "ts": at(3), "state": "WAIT_CHECK",
+                    "reason": "RUNNER IDLE timed-observation until 2026-11-12T02:30:00Z"}]]
     try:
         h = waits_until(now)
     finally:
@@ -2571,6 +2573,9 @@ def wait_self_test():
     assert "HTPR-2" in h, "three waits in two hours rest the ticket two hours"
     assert "HTPR-3" not in h, "one wait alone keeps the old rest rules"
     assert "HTPR-4" not in h, "a recheck time already past holds nothing"
+    # HYCI-340: the launcher log picked this ticket four times in 17 minutes. The reason says "until", not "recheck".
+    assert h.get("HTPR-8863") == dt.datetime(2026, 11, 12, 2, 30, tzinfo=dt.timezone.utc), \
+        "a timed-observation until an ISO time holds the ticket without the word recheck"
 
 
 def wait_gate_self_test():
