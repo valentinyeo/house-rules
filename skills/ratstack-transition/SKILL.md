@@ -66,6 +66,7 @@ Use the noun table in Rat Stack's `AGENTS.md`. Typical homes:
 | Feature switch | `packages/flags` cartridge |
 | Analytics events | `packages/events` cartridge |
 | Screen or page | Foldkit Feature in `apps/web/src/features/<name>/` + Client in `apps/web/src/client/<name>/`, styled with StyleX |
+| The app's look | Keep the app's own theme: its colours, fonts, sizes and corners, rebuilt in StyleX. Never copy Rat Stack's or Foldkit's look. docs.hypertask.ai and ai-chatbot keep their own themes |
 | Charts | SVG drawn in Foldkit views. No chart library |
 | Secret, setting | `.env.schema` (varlock) |
 | KV, R2, D1, domain | Alchemy resource in `apps/infra/alchemy.run.ts` |
