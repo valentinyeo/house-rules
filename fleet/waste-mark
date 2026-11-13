@@ -19,6 +19,7 @@ The per-ticket "since" stamp (newest run already counted) lives in ~/.local/stat
     fleet/waste-mark --dry-run    same output ("would mark:"), writes nothing to the board or the state file
     fleet/waste-mark --self-test  synthetic ledger and stub board, no network
 """
+import fcntl
 import json
 import os
 import re
@@ -36,7 +37,10 @@ LABEL = "Wasted Runs"
 STREAK = 3
 EMPTY = {"WAIT_CHECK", "FAULT", "PARKED"}
 PROGRESS = {"BUILDING", "DONE"}
-FINISHED = {"Done"}
+# the columns fleet/pick offers or owns tickets from (its BOARDS table). A ticket anywhere else (Done, Flag: Everyone, Agent Blocked,
+# Later, Valentin Review) is not being woken, so marking it is noise.
+COLUMNS = {15: {"Backlog", "Bugs", "Improvements", "Features", "In Progress", "AI Review", "QA"},
+           2060: {"Todo", "Doing", "AI Review"}, 11514: {"Backlog", "In Progress", "AI Review"}}
 REASONS_MAX = 5
 REASON_WIDTH = 140
 IDLE_PREFIX = re.compile(r"^(?:(?:CI|INFRA|MP) )?RUNNER IDLE\s*")  # every runner ends "RUNNER IDLE <reason>"; the prefix says nothing
@@ -135,8 +139,9 @@ class Board:
         vcc("activity", "add", key, "--text", text)
 
 
-def sweep(rows, since, board, dry=False):
-    """Returns (lines, new since map, errors). Writes to the board only when dry is False."""
+def sweep(rows, since, board, dry=False, save=None):
+    """Returns (lines, new since map, errors). Writes to the board only when dry is False. save(since) runs after each
+    ticket is settled, so a killed run never marks a ticket twice."""
     lines, errors, since = [], [], dict(since)
     for key, runs in sorted(streaks(rows, since).items()):
         if len(runs) < STREAK:
@@ -147,8 +152,9 @@ def sweep(rows, since, board, dry=False):
         except Exception as e:
             errors.append(f"{key}: {e}")
             continue
-        if LABEL in t["labels"] or t["status"] != "Normal" or t["section"] in FINISHED:
-            since[key] = newest  # already marked, or finished: the next streak counts from here
+        if LABEL in t["labels"] or t["status"] != "Normal" or t["section"] not in COLUMNS.get(t["board"], ()):
+            since[key] = newest  # already marked, archived or out of the pool's columns: the next streak counts from here
+            save and not dry and save(since)
             continue
         if dry:
             lines.append(f"would mark: {key}  {summary(runs)}")
@@ -160,6 +166,7 @@ def sweep(rows, since, board, dry=False):
             errors.append(f"{key}: {e}")
             continue
         since[key] = newest
+        save and save(since)
         lines.append(f"marked: {key}  {summary(runs)}")
         try:
             board.add_note(key, note(runs))
@@ -217,16 +224,20 @@ def self_test():
             + run("E-5", "WAIT_CHECK", 2, t0=0) + [{"ts": "2026-11-13T00:12:00Z", "ticket": "E-5", "state": "FAULT",
                                                      "engine": "pi", "reason": "crash"}]
             + run("F-6", "WAIT_CHECK", 3, t0=0) + [{"ts": "2026-11-13T00:05:00Z", "ticket": "F-6", "result": "DONE"}])
+    rows += run("H-8", "FAULT", 3, t0=0) + run("I-9", "FAULT", 3, t0=0)
     rows.sort(key=lambda r: r["ts"])
 
     board = Stub({"A-1": ticket(), "B-2": ticket(), "C-3": ticket(), "D-4": ticket(),
-                  "E-5": ticket(section="Done"), "F-6": ticket()})
-    lines, since, errors = sweep(rows, {}, board)
+                  "E-5": ticket(section="Done"), "F-6": ticket(),
+                  "H-8": ticket(section="Agent Blocked", board=11514), "I-9": ticket(status="Archive")})
+    saves = []
+    lines, since, errors = sweep(rows, {}, board, save=lambda m: saves.append(dict(m)))
+    assert [len(m) for m in saves] == [1, 2, 3, 4, 5], saves              # the stamp is saved after every settled ticket
     marked = {l.split()[1] for l in lines}
     assert marked == {"A-1", "D-4"}, lines            # 3 mark; 2 does not; BUILDING resets; Done ticket skipped
     assert not errors and board.added == ["A-1", "D-4"] and [k for k, _ in board.notes] == ["A-1", "D-4"]
     assert "4 runs" in lines[1] and "opencode" in lines[1] and lines[1].count("same reason") == 1, lines[1]
-    assert "E-5" not in marked and since["E-5"]                     # finished tickets are not marked, since stamp kept
+    assert not {"E-5", "H-8", "I-9"} & marked and all(since[k] for k in ("E-5", "H-8", "I-9"))  # Done, Agent Blocked, archived: stamp only
     assert "F-6" not in marked                                      # DONE after three empty runs reset the streak
 
     again, since2, _ = sweep(rows, since, board)                    # a second tick: nothing, no second label or note
@@ -265,10 +276,14 @@ def main(argv):
         print(__doc__)
         return 2
     dry = argv == ["--dry-run"]
-    since = load_since()
-    lines, since, errors = sweep(read_rows(LEDGER), since, Board(), dry)
-    if not dry and since != load_since():
-        save_since(since)
+    if not dry:  # two real runs at once (a timer tick during a long one) would label and note a ticket twice
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        lock = open(STATE.parent / "lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return 0
+    lines, since, errors = sweep(read_rows(LEDGER), load_since(), Board(), dry, None if dry else save_since)
     print("\n".join(lines) or "waste-mark: nothing over the line")
     for e in errors:
         print(f"error: {e}", file=sys.stderr)
