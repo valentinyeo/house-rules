@@ -1217,7 +1217,10 @@ _ONE_RUN = {}
 def wait_end(r):
     """True when a ledger row is a run that ended waiting: WAIT_CHECK, or a FAULT whose text names CI, a PR or a blocker.
     The 'CI RUNNER IDLE' prefix is stripped first, or every CI-lane FAULT would match on the word CI."""
-    if r.get("state") == "WAIT_CHECK":
+    # PARKED: a run that ended by parking a ticket whose work is merged or waiting. It is the same wait, so the same gate
+    # holds it (HYCI-358, 13 Nov 16:31 to 16:43: six PARKED runs in 12 minutes on a merged PR, none held, because only
+    # WAIT_CHECK and FAULT counted)
+    if r.get("state") in ("WAIT_CHECK", "PARKED"):
         return True
     if r.get("state") != "FAULT":
         return False
@@ -2990,6 +2993,8 @@ def wait_gate_self_test():
         assert held() == set(), "a build with no PR is not held"
         fresh([built("HTPR-1", 1, "DONE Done")], [tk("HTPR-1")], [pr(1, "HTPR-1")])
         assert held() == set(), "a build that ended in another column is not a PR wait"
+        fresh([wait("HTPR-4", 5, "PARKED HTPR-4", "PARKED")], [tk("HTPR-4")])
+        assert held() == {"HTPR-4"}, "a PARKED run on a ticket with nothing to observe is held like a wait (HYCI-358)"
         # nothing to observe: the stated recheck time, else 30 minutes
         fresh([wait("HTPR-4", 5, f"RUNNER IDLE production deploy in flight, recheck {(now + dt.timedelta(minutes=30)).strftime('%H:%M')}Z")], [tk("HTPR-4")])
         assert held() == {"HTPR-4"} and held(now + dt.timedelta(minutes=29)) == {"HTPR-4"} and held(now + dt.timedelta(minutes=31)) == set(), \
