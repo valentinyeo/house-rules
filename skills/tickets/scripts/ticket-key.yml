@@ -1,0 +1,53 @@
+# Ticket key check (HYCI-381). Copy this file to any repo as .github/workflows/ticket-key.yml.
+# Passes when the PR title, the branch, or any commit message holds a ticket key like HYCI-381.
+# Pushes to the default branch need a key in one of the pushed commit messages.
+# Bots pass. "[no-ticket]" in the title or a commit passes and is counted by goal-watch Unticketed spend.
+name: Ticket key
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  ticket-key:
+    if: ${{ !endsWith(github.actor, '[bot]') && !endsWith(github.event.pull_request.user.login || '', '[bot]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Look for a ticket key
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -u
+          KEY='\b(?!(?:UTF|SHA|ISO|GPT|TLS|AES|RFC|CVE|HTTP|MD|X|VP)-)[A-Z][A-Z0-9]{1,5}-[0-9]+\b'
+          if [ -n "${PR_HEAD:-}" ]; then
+            text="$PR_TITLE"$'\n'"$(printf %s "$PR_BRANCH" | tr a-z A-Z)"$'\n'"$(git log --format=%B "$PR_BASE..$PR_HEAD" | head -c 20000)"
+          elif [ -n "${PUSH_BEFORE:-}" ] && [ "${PUSH_BEFORE//0/}" != "" ] && git cat-file -e "$PUSH_BEFORE" 2>/dev/null; then
+            text="$(git log --format=%B "$PUSH_BEFORE..$PUSH_AFTER" | head -c 20000)"
+          else
+            text="$(git log --format=%B -n 1 "$PUSH_AFTER")"
+          fi
+          if printf '%s' "$text" | grep -qiF '[no-ticket]'; then
+            echo "::warning::[no-ticket] used; counted in Unticketed spend"
+            echo "no-ticket escape used" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if printf '%s' "$text" | grep -qP "$KEY"; then
+            echo "ticket key found: $(printf '%s' "$text" | grep -oP "$KEY" | sort -u | tr '\n' ' ')"
+            exit 0
+          fi
+          echo "::error::No ticket key in the PR title, branch or commit messages. Add one like HYCI-381, or put [no-ticket] in the title."
+          exit 1
