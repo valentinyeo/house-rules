@@ -175,20 +175,30 @@ def _count(repo, rev_range):
         return None
 
 
+def base_ref(repo):
+    """The branch new work is measured against. hypertask's default branch is production; its origin/main is an old lineage,
+    so every new ticket branch looked 8 or 9 commits ahead of it (HYCI-354, 13 Nov: a branch made at the tip of production,
+    with no commit, counted progress 8)."""
+    for ref in ("origin/production", "origin/main", "main"):
+        if subprocess.run(["git", "-C", repo, "rev-parse", "--verify", "-q", ref], capture_output=True).returncode == 0:
+            return ref
+    return None
+
+
 def progress_count(repo, before, after):
     """Commits pushed to branches named for the ticket, plus branches that went away, between two ticket_refs snapshots.
-    A new branch counts its commits ahead of origin/main (at least 1, capped at 50). A moved branch counts the commits the
-    move added, or 1 when history was rewritten. A removed branch counts 1 (the PR merged and its branch was deleted)."""
+    A new branch counts its commits ahead of the base branch (capped at 50; 1 when the count cannot be read; 0 when the branch
+    sits on the base with no commit). A moved branch counts the commits the move added, or 1 when history was rewritten.
+    A removed branch counts 1 (the PR merged and its branch was deleted)."""
     total = 0
+    base = base_ref(repo)
     for name, sha in after.items():
         old = before.get(name)
         if old == sha:
             continue
         if old is None:
-            n = _count(repo, f"origin/main..{sha}")
-            if n is None:
-                n = _count(repo, f"main..{sha}")
-            total += min(max(n or 1, 1), 50)
+            n = _count(repo, f"{base}..{sha}") if base else None
+            total += 1 if n is None else min(n, 50)
         else:
             n = _count(repo, f"{old}..{sha}")
             total += min(max(n or 1, 1), 50)
@@ -304,6 +314,19 @@ def self_test():
     after = ticket_refs(tmp, key)
     assert set(after) == {"runner-3/hyci-77-fix"}, after
     assert progress_count(tmp, before, after) == 2, "a new branch counts its commits ahead of origin/main"
+    # default branch production: origin/main is an old lineage, so work is measured against origin/production
+    git("checkout", "-q", "--orphan", "oldmain")
+    Path(tmp, "f").write_text("old")
+    git("commit", "-q", "-am", "old lineage")
+    git("update-ref", "refs/remotes/origin/main", "oldmain")
+    git("update-ref", "refs/remotes/origin/production", "main")
+    git("branch", "-q", "runner-3/hyci-78-idle", "main")
+    assert progress_count(tmp, {}, {"runner-3/hyci-78-idle": "main"}) == 0, "a new branch at the tip of production pushed nothing"
+    assert progress_count(tmp, {}, ticket_refs(tmp, key)) == 2, "two commits ahead of production"
+    git("update-ref", "-d", "refs/remotes/origin/production")
+    git("update-ref", "refs/remotes/origin/main", "main")
+    git("checkout", "-q", "-f", "runner-3/htpr-1-other")
+    git("branch", "-q", "-D", "oldmain", "runner-3/hyci-78-idle")
     assert progress_count(tmp, after, after) == 0, "nothing moved: no progress, a run that only waited"
     git("checkout", "-q", "runner-3/hyci-77-fix")
     Path(tmp, "f").write_text("c")
