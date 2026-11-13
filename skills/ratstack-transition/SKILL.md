@@ -131,6 +131,8 @@ Rules behind the table:
 
 Each slice ticket names: the Rat Stack commit, the Rat Stack skill to follow, the inventory item numbers it owns, and "Done when" with `pnpm check` and `pnpm test` green in GitHub CI.
 
+**Links.** Link every slice to the slices it needs, in the same turn as filing: `vcc task link <slice> <needed-slice> --type BlockedBy`. Scaffold, project law, `apps/infra`, database and auth block every later slice. Contract and Machine slices block the screen slices that use them. The picker skips a ticket whose blockers are open; an unlinked slice gets offered, and a runner burns a run to find the gap. (HYCI-343, 13 Nov: SOFT-2060 and SOFT-2061 parked on foundation slices nobody had linked.)
+
 **Coverage rule.** Each inventory item has one owning slice. A test that spans slices is owned by the last slice it needs.
 
 **Brain tags.** One per ticket. Medium is the default for every slice kind. Hard for money, auth, secrets and the live cutover.
