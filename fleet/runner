@@ -762,7 +762,7 @@ TM
       stop=""; [ -f "$STATE/stop-$n" ] && stop=$(head -1 "$STATE/stop-$n" || true)
       waitf="$STATE/wait-check-$pick_ticket"
       waited=0; [ -f "$waitf" ] && waited=$(( $(date +%s) - $(stat -c %Y "$waitf") ))
-      final=$(grep -a -E 'INFRA RUNNER DONE|CI RUNNER DONE|RUNNER DONE|^PARKED |RUNNER IDLE' "$runlog" | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300 || true)
+      final=$(grep -a -E 'INFRA RUNNER DONE|CI RUNNER DONE|RUNNER DONE|^(RUNNER )?PARKED |RUNNER IDLE' "$runlog" | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300 || true)
       # A run with no ending of its own that the provider refused is provider busy, never a crash. The mark rests every
       # runner on that plan, and it changes no engine: the same provider is tried again when the mark expires.
       overload=0
