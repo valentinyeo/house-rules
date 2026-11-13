@@ -123,7 +123,7 @@ class Board:
     def get(self, key):
         t = vcc("task", "get", key)["tasks"][0]
         names = [(x.get("name") if isinstance(x, dict) else str(x)) for x in t.get("labels") or []]
-        return {"labels": names, "section": t.get("section"), "status": t.get("status"), "board": t.get("projectId")}
+        return {"key": t.get("ticketNumber") or key, "labels": names, "section": t.get("section"), "status": t.get("status"), "board": t.get("projectId")}
 
     def ensure_label(self, board):
         if board not in self.has_label:
@@ -156,22 +156,23 @@ def sweep(rows, since, board, dry=False, save=None):
             since[key] = newest  # already marked, archived or out of the pool's columns: the next streak counts from here
             save and not dry and save(since)
             continue
+        name = t.get("key") or key  # the ledger may hold an old prefix (IGSH-1274 is SOFT-1274 now): the board knows only the new one
         if dry:
-            lines.append(f"would mark: {key}  {summary(runs)}")
+            lines.append(f"would mark: {name}  {summary(runs)}")
             continue
         try:
             board.ensure_label(t["board"])
-            board.add_label(key)
+            board.add_label(name)
         except Exception as e:
             errors.append(f"{key}: {e}")
             continue
         since[key] = newest
         save and save(since)
-        lines.append(f"marked: {key}  {summary(runs)}")
+        lines.append(f"marked: {name}  {summary(runs)}")
         try:
-            board.add_note(key, note(runs))
+            board.add_note(name, note(runs))
         except Exception as e:
-            errors.append(f"{key}: label added, note failed: {e}")
+            errors.append(f"{name}: label added, note failed: {e}")
     return lines, since, errors
 
 
@@ -202,7 +203,7 @@ class Stub:
 
     def add_label(self, key):
         self.added.append(key)
-        self.tickets[key]["labels"].append(LABEL)
+        next(t for k, t in self.tickets.items() if t.get("key", k) == key)["labels"].append(LABEL)
 
     def add_note(self, key, text):
         self.notes.append((key, text))
@@ -224,24 +225,25 @@ def self_test():
             + run("E-5", "WAIT_CHECK", 2, t0=0) + [{"ts": "2026-11-13T00:12:00Z", "ticket": "E-5", "state": "FAULT",
                                                      "engine": "pi", "reason": "crash"}]
             + run("F-6", "WAIT_CHECK", 3, t0=0) + [{"ts": "2026-11-13T00:05:00Z", "ticket": "F-6", "result": "DONE"}])
-    rows += run("H-8", "FAULT", 3, t0=0) + run("I-9", "FAULT", 3, t0=0)
+    rows += run("J-1", "FAULT", 3, t0=0) + run("H-8", "FAULT", 3, t0=0) + run("I-9", "FAULT", 3, t0=0)
     rows.sort(key=lambda r: r["ts"])
 
     board = Stub({"A-1": ticket(), "B-2": ticket(), "C-3": ticket(), "D-4": ticket(),
                   "E-5": ticket(section="Done"), "F-6": ticket(),
-                  "H-8": ticket(section="Agent Blocked", board=11514), "I-9": ticket(status="Archive")})
+                  "H-8": ticket(section="Agent Blocked", board=11514), "I-9": ticket(status="Archive"),
+                  "J-1": ticket(key="K-2")})
     saves = []
     lines, since, errors = sweep(rows, {}, board, save=lambda m: saves.append(dict(m)))
-    assert [len(m) for m in saves] == [1, 2, 3, 4, 5], saves              # the stamp is saved after every settled ticket
+    assert [len(m) for m in saves] == [1, 2, 3, 4, 5, 6], saves              # the stamp is saved after every settled ticket
     marked = {l.split()[1] for l in lines}
-    assert marked == {"A-1", "D-4"}, lines            # 3 mark; 2 does not; BUILDING resets; Done ticket skipped
-    assert not errors and board.added == ["A-1", "D-4"] and [k for k, _ in board.notes] == ["A-1", "D-4"]
+    assert marked == {"A-1", "D-4", "K-2"}, lines     # 3 mark; 2 does not; BUILDING resets; Done ticket skipped; renamed ticket
+    assert not errors and board.added == ["A-1", "D-4", "K-2"] and [k for k, _ in board.notes] == ["A-1", "D-4", "K-2"]
     assert "4 runs" in lines[1] and "opencode" in lines[1] and lines[1].count("same reason") == 1, lines[1]
     assert not {"E-5", "H-8", "I-9"} & marked and all(since[k] for k in ("E-5", "H-8", "I-9"))  # Done, Agent Blocked, archived: stamp only
     assert "F-6" not in marked                                      # DONE after three empty runs reset the streak
 
     again, since2, _ = sweep(rows, since, board)                    # a second tick: nothing, no second label or note
-    assert again == [] and len(board.notes) == 2 and board.added == ["A-1", "D-4"]
+    assert again == [] and len(board.notes) == 3 and board.added == ["A-1", "D-4", "K-2"]
 
     board.tickets["A-1"]["labels"] = []                             # label removed by the owner: 2 new runs do not mark
     more = rows + run("A-1", "WAIT_CHECK", 2, t0=55)
@@ -249,7 +251,7 @@ def self_test():
     assert lines == [], lines
     more += run("A-1", "FAULT", 1, t0=58)                           # the third new empty run marks again
     lines, since4, _ = sweep(more, since3, board)
-    assert [l.split()[1] for l in lines] == ["A-1"] and len(board.notes) == 3, lines
+    assert [l.split()[1] for l in lines] == ["A-1"] and len(board.notes) == 4, lines
 
     marked_already = Stub({"A-1": ticket(labels=[LABEL])})          # carries the label already: skipped, stamp advances
     lines, since5, _ = sweep(run("A-1", "WAIT_CHECK", 3), {}, marked_already)
