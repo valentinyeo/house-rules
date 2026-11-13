@@ -2434,6 +2434,7 @@ def ramp_gate(n):
     step, cap = factory_ramp()
     if cap is None:
         return
+    cap = max(cap, probe_cap(plan_of(n)))  # Valentin's per-plan order holds through restart steps too
     log(ramp_line(step, cap))
     busy = busy_on_plan(n, plan_of(n))
     if len(busy) >= cap:
