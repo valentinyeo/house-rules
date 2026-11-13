@@ -206,6 +206,38 @@ def progress_count(repo, before, after):
     return total
 
 
+PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
+
+
+def _epoch(iso):
+    import datetime as dt
+    return dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+
+
+def _pr_created(repo, num):
+    r = subprocess.run(["gh", "api", f"repos/{repo}/pulls/{num}", "--jq", ".created_at"], capture_output=True, text=True, timeout=30)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def pr_progress(text, since, created=_pr_created):
+    """PRs the run's own output links that GitHub says were opened at or after `since` (epoch seconds), at most 3 looked up.
+    progress_count only reads the repo the picker named, so a ticket built in another repo (HYCI-361, 13 Nov: a PR on
+    yeoux-site) ended WAIT_CHECK with progress 0 and counted as an empty run: a false alarm for the canary fixer and the
+    factory breaker. The run's final message names the PR it opened; the PR's own created_at proves it was this run's."""
+    seen, n = set(), 0
+    for repo, num in PR_URL.findall(text):
+        if (repo, num) in seen or len(seen) >= 3:
+            continue
+        seen.add((repo, num))
+        try:
+            when = _epoch(created(repo, num))
+        except (ValueError, subprocess.SubprocessError):
+            continue
+        if when >= since - 60:
+            n += 1
+    return n
+
+
 def append_ledger(path, row):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -332,6 +364,12 @@ def self_test():
     Path(tmp, "f").write_text("c")
     git("commit", "-q", "-am", "c2")
     assert progress_count(tmp, after, ticket_refs(tmp, key)) == 1, "one more commit on the branch"
+    fake = {("o/r", "26"): "2026-11-13T11:27:59Z", ("o/r", "9"): "2026-11-13T09:00:00Z"}
+    look = lambda repo, num: fake.get((repo, num), "")
+    since = _epoch("2026-11-13T11:11:37Z")
+    assert pr_progress("[PR](https://github.com/o/r/pull/26) x", since, look) == 1, "a PR opened during the run is progress"
+    assert pr_progress("see https://github.com/o/r/pull/9", since, look) == 0, "an older PR is not this run's"
+    assert pr_progress("no link, or https://github.com/o/r/pull/77", since, look) == 0, "an unknown PR counts nothing"
     git("checkout", "-q", "main")
     git("branch", "-q", "-D", "runner-3/hyci-77-fix")
     assert progress_count(tmp, ticket_refs(tmp, key) or {"runner-3/hyci-77-fix": "x"}, {}) == 1, "a removed branch counts one"
@@ -364,6 +402,13 @@ def main():
             except OSError:
                 return {}
         print(progress_count(_arg("--repo"), snap(_arg("--before")), snap(_arg("--after"))))
+        return
+    if "--pr-progress" in sys.argv:
+        try:
+            body = Path(_arg("--log")).read_text(errors="replace")
+        except OSError:
+            body = ""
+        print(pr_progress(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", body), float(_arg("--since", "0") or 0)))
         return
     if "--redact" in sys.argv:
         sys.stdout.write(redact(sys.stdin.read()))

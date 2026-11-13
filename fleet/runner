@@ -681,6 +681,11 @@ case "${1:-}" in
       if [ "$state" = "WAIT_CHECK" ]; then [ -f "$waitf" ] || touch "$waitf"; else rm -f "$waitf"; fi
       reason=$(printf '%s' "$final" | cut -c1-300)
       progress=$(ticket_progress "$pick_repo" "$pick_ticket" "$refs_before"); rm -f "$refs_before"
+      # Built in another repo than the picker named (HYCI-361: a PR on yeoux-site)? A PR the run links, opened since it started, is progress.
+      if [ "$progress" -eq 0 ] && [ "$state" != BUILDING ]; then
+        pr_made=$(python3 "$HERE/runner-state.py" --pr-progress --log "$runlog" --since "$started_at" 2>/dev/null || echo 0)
+        [[ "$pr_made" =~ ^[0-9]+$ ]] && progress=$pr_made
+      fi
       save_transcript "$pick_ticket" "$runlog" "$state" "$detail" "$progress" "$rc" "$elapsed"
       jq -nc --arg ts "$(date -u +%FT%TZ)" --arg ticket "$pick_ticket" --arg engine "$pick_engine" --arg model "$cmodel" --arg result "$res" --argjson runner "$n" --arg reason "$reason" --arg state "$state" --arg detail "$detail" --arg source "${pick_source:-}" --argjson progress "$progress" --arg transcript "$(basename "${TRANSCRIPT_FILE:-}")" \
         '{ts:$ts,runner:$runner,ticket:$ticket,engine:$engine,model:$model,result:$result,reason:$reason,state:$state,detail:$detail,source:$source,progress:$progress,transcript:$transcript}' >> "$STATE/run-ledger.jsonl" 2>/dev/null || true
