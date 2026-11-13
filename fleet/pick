@@ -3317,9 +3317,9 @@ def sf_release_self_test():
             assert "SOFT-2273" in resting(2, True) and "SOFT-2273" in Skip(set(), resting(2, True)), f"{moment}: every lane reads it through resting()"
         # The real lanes through choose(): Runner 7 holds SOFT-2273 (own lane), Runner 8 sees it unheld (orphan lane). Control first:
         # with state attention the picker offers it; with pr or release it offers the runner other work instead.
-        global RUNNER_STATE, RUNNERS
-        saved_rs, saved_n = RUNNER_STATE, RUNNERS
-        RUNNER_STATE, RUNNERS = Path(tempfile.mkdtemp()), 8
+        global RUNNER_STATE, RUNNERS, STATE
+        saved_rs, saved_n, saved_state = RUNNER_STATE, RUNNERS, STATE
+        RUNNER_STATE, RUNNERS, STATE = Path(tempfile.mkdtemp()), 8, Path(tempfile.mkdtemp())
         new = tk("SOFT-2300", "Todo")
 
         def lane(n, holders, rows):
@@ -3337,14 +3337,14 @@ def sf_release_self_test():
         try:
             mine7 = (("runner 7", True),)
             assert lane(7, mine7, row("attention", detail="PR #961 is red")) == ("SOFT-2273", "own"), "control: a red PR is offered as own"
-            assert lane(8, (), row("attention", detail="PR #961 is red")) == ("SOFT-2273", "orphan"), "control: a red PR is offered as orphan"
+            got8 = lane(8, (), row("attention", detail="PR #961 is red")); assert got8 == ("SOFT-2273", "orphan"), f"control: a red PR is offered as orphan, got {got8}"
             for moment, n, holders, state in (("21:02 own", 7, mine7, "release"), ("19:17 own", 7, mine7, "pr"),
                                               ("20:08 orphan", 8, (), "release"), ("19:17 orphan", 8, (), "pr")):
                 got = lane(n, holders, row(state))
                 assert got != ("SOFT-2273", "own") and got != ("SOFT-2273", "orphan") and not (isinstance(got, tuple) and got[0] == "SOFT-2273"), \
                     f"{moment}: a script owns the wait, SOFT-2273 must not start a run ({got})"
         finally:
-            RUNNER_STATE, RUNNERS = saved_rs, saved_n
+            RUNNER_STATE, RUNNERS, STATE = saved_rs, saved_n, saved_state
         # What a model keeps: anything attention, a stale file, no file, a wait past its cap, an incident, a missing flag, a garbled file.
         for why, rows, at in (("a red PR", row("attention", detail="PR #961 is red"), 0), ("a stale file", row("pr"), 16 * 60),
                               ("a wait past 6 hours", row("pr", since=7 * 60), 0), ("a state the picker does not know", row("done"), 0)):
