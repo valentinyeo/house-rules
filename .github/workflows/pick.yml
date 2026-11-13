@@ -23,6 +23,7 @@ jobs:
       - run: fleet/runner harness-selftest
       - run: fleet/runner provider-busy-selftest
       - run: fleet/runner reply-cap-selftest
+      - run: fleet/runner ticket-selftest
       - run: fleet/runner orphan-selftest
       - run: fleet/runner loop-selftest
       - run: fleet/runner transcript-selftest
