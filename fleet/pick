@@ -95,6 +95,8 @@ REST_RESULTS = {"IDLE", "WAIT_CHECK", "FAULT"}
 URGENT_REST = 600
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
+# HYCI-342: bin/factory-breaker writes this record when burn, runs and merged PRs stop matching. Present and not cleared: only incidents go out.
+FACTORY_STOP = Path(os.environ.get("FLEET_FACTORY_STOP", HOME / ".local/state/fleet/factory-stop.json"))
 
 # board -> (new-work columns, building columns)
 BOARDS = {
@@ -1723,10 +1725,30 @@ def wip_line(units, workers, excluded):
     return f"wip: {len(units)} of {len(workers)}, new work {state}" + (f" (not counted: {left})" if left else "")
 
 
+def factory_stopped():
+    """Why the factory is stopped, or "" when it runs. An unreadable record counts as stopped."""
+    try:
+        rec = json.loads(FACTORY_STOP.read_text())
+    except FileNotFoundError:
+        return ""
+    except (OSError, ValueError):
+        return "unreadable stop record"
+    if not isinstance(rec, dict):
+        return "unreadable stop record"
+    if rec.get("cleared"):
+        return ""
+    by = rec.get("tripped_by")
+    return ", ".join(str(x) for x in by) if isinstance(by, list) and by else "no rule named"
+
+
 def choose(n, dry):
     hit = incident_step(n, dry)
     if hit:
         return hit
+    why = factory_stopped()
+    if why:
+        log(f"factory stopped: {why}")
+        raise SystemExit(f"none: factory stopped: {why}")
     hand_back_timeouts(n, dry)
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
@@ -2103,9 +2125,10 @@ def wait_self_test():
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
-    global STATE, ALLOCATION, RUNNER_STATE, WATCH
+    global STATE, ALLOCATION, RUNNER_STATE, WATCH, FACTORY_STOP
     import tempfile
     STATE = Path(tempfile.mkdtemp())
+    FACTORY_STOP = STATE / "no-factory-stop.json"  # a live stop record must not change the offline test
     ALLOCATION = STATE / "allocation.json"
     RUNNER_STATE = STATE
     WATCH = STATE
@@ -2223,7 +2246,41 @@ def self_test():
     escalate_self_test()
     fair_self_test()
     wait_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes")
+    factory_stop_self_test()
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop")
+
+
+def factory_stop_self_test():
+    """HYCI-342: an active stop record takes every ticket except incidents. Absent, cleared: runs."""
+    global FACTORY_STOP
+    saved = FACTORY_STOP
+    tmp = STATE / "factory-stop-test.json"
+    try:
+        FACTORY_STOP = tmp
+        tmp.unlink(missing_ok=True)
+        assert factory_stopped() == "", "no record: the factory runs"
+        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R1", "R3"], "cleared": None}))
+        assert factory_stopped() == "R1, R3", "an active record names its rules"
+        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R1"], "cleared": {"at": "y", "by": "t", "why": "t"}}))
+        assert factory_stopped() == "", "a cleared record: the factory runs"
+        tmp.write_text("{not json")
+        assert factory_stopped() == "unreadable stop record", "an unreadable record stops the factory"
+        tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": None}))
+        # choose() takes nothing: after the incident step, before any ticket work
+        saved_inc = incident_step
+        globals()["incident_step"] = lambda n, dry: None
+        try:
+            choose(5, True)
+            raise AssertionError("a stopped factory must take nothing")
+        except SystemExit as e:
+            assert str(e) == "none: factory stopped: R2", str(e)
+        # an incident still goes out first
+        globals()["incident_step"] = lambda n, dry: ({"key": "I-1"}, "incident")
+        assert choose(5, True)[1] == "incident", "a stopped factory still takes an incident"
+        globals()["incident_step"] = saved_inc
+    finally:
+        FACTORY_STOP = saved
+        tmp.unlink(missing_ok=True)
 
 
 def escalate_self_test():
