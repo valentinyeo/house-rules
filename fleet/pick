@@ -1402,7 +1402,11 @@ def one_run_state(p):
         return "conflicting", False
     if p.get("review") == "CHANGES_REQUESTED":
         return "change request", False
-    return ("pending", True) if any(RUNNING_CHECK.search(c) for c in checks) else ("green", True)
+    if any(RUNNING_CHECK.search(c) for c in checks):
+        return "pending", True
+    # Every listed check is done but GitHub still says BLOCKED: a required check has not reported yet (HYCI-358, 13 Nov 16:36:
+    # ai-review and claude-review were not on the list, the PR read green, a run started and parked). Nothing a model can do.
+    return ("pending", True) if p.get("merge_state") == "BLOCKED" else ("green", True)
 
 
 def pr_checks_pending(key):
@@ -1981,7 +1985,7 @@ def open_prs():
         if not tok:
             raise RuntimeError("empty GitHub App token")
         r = subprocess.run(["gh", "pr", "list", "--repo", PR_REPO, "--base", "production", "--state", "open", "--limit", "1000",
-                            "--json", "number,title,isDraft,headRefName,updatedAt,statusCheckRollup,headRefOid,reviewDecision,mergeable"],
+                            "--json", "number,title,isDraft,headRefName,updatedAt,statusCheckRollup,headRefOid,reviewDecision,mergeable,mergeStateStatus"],
                            capture_output=True, text=True, env=dict(os.environ, GH_TOKEN=tok), timeout=300)
         if r.returncode != 0 and cached and age < PRS_STALE_S:
             log(f"open PRs: GitHub read failed ({(r.stderr or '').strip()[:80]}); using a copy {int(age)}s old")
@@ -1998,7 +2002,7 @@ def open_prs():
                         "red": any(c.get("conclusion") in ("FAILURE", "TIMED_OUT") or c.get("state") in ("FAILURE", "ERROR")
                                    for c in p.get("statusCheckRollup") or []),
                         "head": p.get("headRefOid"), "review": p.get("reviewDecision") or "",
-                        "mergeable": p.get("mergeable") or "", "checks": check_states(p.get("statusCheckRollup"))}
+                        "mergeable": p.get("mergeable") or "", "merge_state": p.get("mergeStateStatus") or "", "checks": check_states(p.get("statusCheckRollup"))}
                        for p in prs]
         SNAP["prs_at"] = time.time()
         tmp = PRS_CACHE.with_suffix(".tmp")
@@ -3009,6 +3013,9 @@ def one_run_self_test():
                            ("a draft", {"draft": True}), ("an unread check list", {"checks": []}), ("a REST-only list", {"checks": None}),
                            ("a stalled PR", {"updated": 400})):
             assert held([tk("HTPR-1")], [pr(1, "HTPR-1", **extra)]) == set() and not lines, f"{why} is a model's job: not held"
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="BLOCKED")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks pending"], \
+            "all listed checks green but GitHub BLOCKED: a required check has not reported, held as pending"
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="CLEAN")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks green"], "CLEAN reads green"
         assert held([tk("HTPR-1", prio="Urgent")], [pr(1, "HTPR-1", updated=90)]) == set(), "an Urgent PR is released after an hour"
         assert held([tk("HTPR-1", ("incident",))], [pr(1, "HTPR-1")]) == set(), "an incident is never held"
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1"), pr(2, "HTPR-1", ("ci=FAILURE",))]) == set(), "one red PR of two wakes the ticket"
