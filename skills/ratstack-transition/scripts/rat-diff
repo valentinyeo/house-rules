@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Compare an app with Rat Stack's pinned stack. Prints KEEP, BUMP, DROP, ADD and layout gaps.
+
+Usage: rat-diff <app-dir> [--ref main] [--json out.json]
+Rat Stack source: github.com/joelhooks/rat-stack, read through `gh api` at one commit.
+"""
+import argparse, base64, json, os, subprocess, sys
+
+REPO = "joelhooks/rat-stack"
+CACHE = os.path.expanduser("~/.cache/rat-diff")
+SKIP_DIRS = {"node_modules", ".git", "dist", "build", ".turbo", ".wrangler", ".alchemy", "vendor"}
+# Rat Stack files every app must have, from its repo root.
+LAYOUT = ["AGENTS.md", "VISION.md", "pnpm-workspace.yaml", "lefthook.yml", ".env.schema",
+          "oxlint.config.ts", "oxfmt.config.ts", "tsconfig.base.json", "apps/infra", "apps/web",
+          "packages/core", ".github/workflows/ci.yml"]
+# Files that mean a tool Rat Stack does not use.
+FOREIGN_FILES = {"wrangler.toml": "Wrangler config. Alchemy declares Workers in apps/infra/alchemy.run.ts",
+                 "wrangler.jsonc": "Wrangler config. Alchemy declares Workers",
+                 "package-lock.json": "npm lockfile. Rat Stack installs with pnpm only",
+                 "yarn.lock": "yarn lockfile. pnpm only", "bun.lockb": "bun lockfile. pnpm only",
+                 "biome.json": "Biome. Rat Stack lints with Oxlint + Ultracite and formats with Oxfmt",
+                 ".eslintrc": "ESLint. Oxlint only", "eslint.config.js": "ESLint. Oxlint only",
+                 ".prettierrc": "Prettier. Oxfmt only", "tailwind.config.js": "Tailwind. StyleX only",
+                 "tailwind.config.ts": "Tailwind. StyleX only", "next.config.js": "Next.js. Foldkit only",
+                 "astro.config.mjs": "Astro. Foldkit only", ".env": "Raw .env. varlock .env.schema only"}
+CORE_PKGS = {"package.json", "apps/web/package.json", "apps/infra/package.json", "packages/core/package.json"}
+# Known drops and their Rat Stack home. Unknown drops: no home, cut or port by hand.
+REPLACE = {"hono": "Effect HttpApi via @rat-stack/capability toHttpApi", "express": "Effect HttpApi via toHttpApi",
+           "@hono/zod-validator": "Schema on the Contract", "zod": "effect Schema",
+           "@modelcontextprotocol/sdk": "capability toToolkit projection + cli `mcp` command",
+           "agents": "capability toToolkit projection; lifecycles as XState machines",
+           "wrangler": "alchemy + @alchemy.run/cloudflare in apps/infra/alchemy.run.ts",
+           "esbuild": "vite (apps/web) or Alchemy's Worker bundling", "tsx": "node >=24 runs .ts directly",
+           "@biomejs/biome": "oxlint + ultracite + oxfmt", "eslint": "oxlint + ultracite", "prettier": "oxfmt",
+           "@cloudflare/vitest-pool-workers": "@alchemy.run/test + @effect/vitest",
+           "react": "foldkit", "react-dom": "foldkit", "next": "foldkit ssr + prerender",
+           "astro": "foldkit ssr + prerender", "tailwindcss": "@stylexjs/stylex",
+           "axios": "effect HttpClient", "node-fetch": "effect HttpClient", "dotenv": "varlock .env.schema",
+           "jest": "@effect/vitest", "playwright-core": "no Rat Stack home: test behaviour with @effect/vitest + jsdom",
+           "drizzle-orm": "keep, through packages/database cartridge"}
+NON_JS = {"go.mod": "Go", "Cargo.toml": "Rust", "build.zig": "Zig", "pyproject.toml": "Python",
+          "requirements.txt": "Python", "build.gradle.kts": "Kotlin/Android"}
+
+
+def gh(path):
+    out = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    if out.returncode:
+        sys.exit(f"gh api {path} failed: {out.stderr.strip()[:200]}")
+    return json.loads(out.stdout)
+
+
+def rat_stack(ref):
+    sha = gh(f"repos/{REPO}/commits/{ref}")["sha"]
+    cache = os.path.join(CACHE, f"{sha}.json")
+    if os.path.exists(cache):
+        return json.load(open(cache))
+    tree = gh(f"repos/{REPO}/git/trees/{sha}?recursive=1")["tree"]
+    pkgs = [t["path"] for t in tree if t["path"].endswith("package.json") and t["path"].count("/") <= 2
+            and not t["path"].startswith(("vendor/", "tools/"))]
+    deps = {}
+    for p in pkgs:
+        body = json.loads(base64.b64decode(gh(f"repos/{REPO}/contents/{p}?ref={sha}")["content"]))
+        for kind in ("dependencies", "devDependencies", "peerDependencies"):
+            for name, ver in body.get(kind, {}).items():
+                if name.startswith("@rat-stack/") or ver.startswith("workspace:"):
+                    continue
+                deps.setdefault(name, {"version": ver, "in": []})["in"].append(p)
+    data = {"sha": sha, "deps": deps, "paths": sorted({t["path"] for t in tree})}
+    os.makedirs(CACHE, exist_ok=True)
+    json.dump(data, open(cache, "w"))
+    return data
+
+
+def app_scan(root):
+    deps, files = {}, set()
+    for d, subdirs, names in os.walk(root):
+        subdirs[:] = [s for s in subdirs if s not in SKIP_DIRS]
+        rel = os.path.relpath(d, root)
+        for n in names:
+            files.add(n if rel == "." else f"{rel}/{n}")
+            if n == "package.json":
+                try:
+                    body = json.load(open(os.path.join(d, n)))
+                except ValueError:
+                    continue
+                for kind in ("dependencies", "devDependencies", "peerDependencies"):
+                    for name, ver in body.get(kind, {}).items():
+                        deps.setdefault(name, {"version": ver, "in": []})["in"].append(
+                            os.path.join(rel, n).lstrip("./"))
+    return deps, files
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("app")
+    ap.add_argument("--ref", default="main")
+    ap.add_argument("--json")
+    a = ap.parse_args()
+    root = os.path.abspath(a.app)
+    rat = rat_stack(a.ref)
+    deps, files = app_scan(root)
+    rd = rat["deps"]
+
+    keep = sorted(n for n in deps if n in rd and deps[n]["version"] == rd[n]["version"])
+    bump = sorted(n for n in deps if n in rd and deps[n]["version"] != rd[n]["version"])
+    drop = sorted(n for n in deps if n not in rd)
+    add = sorted(n for n in rd if n not in deps)
+    tops = {f.split("/")[0] for f in files} | {"/".join(f.split("/")[:2]) for f in files}
+    layout_missing = [p for p in LAYOUT if p not in files and p not in tops]
+    foreign = sorted((f, why) for f in files for k, why in FOREIGN_FILES.items()
+                     if f == k or f.endswith("/" + k))
+    non_js = sorted((f, lang) for f in files for k, lang in NON_JS.items() if f == k or f.endswith("/" + k))
+
+    report = {"app": root, "rat_stack_sha": rat["sha"], "keep": keep,
+              "bump": [{"name": n, "from": deps[n]["version"], "to": rd[n]["version"]} for n in bump],
+              "drop": [{"name": n, "version": deps[n]["version"], "in": deps[n]["in"],
+                        "replace_with": REPLACE.get(n, "NO HOME: cut it, or port by hand onto Effect")} for n in drop],
+              "add": [{"name": n, "version": rd[n]["version"], "rat_stack_in": rd[n]["in"]} for n in add],
+              "layout_missing": layout_missing,
+              "foreign_files": [{"file": f, "why": w} for f, w in foreign],
+              "non_js": [{"file": f, "lang": l} for f, l in non_js]}
+    if a.json:
+        json.dump(report, open(a.json, "w"), indent=1)
+
+    print(f"rat-diff {os.path.basename(root)} vs {REPO}@{rat['sha'][:12]}")
+    print(f"KEEP {len(keep)}: " + ", ".join(keep))
+    print(f"BUMP {len(bump)}:")
+    for b in report["bump"]:
+        print(f"  {b['name']} {b['from']} -> {b['to']}")
+    print(f"DROP {len(drop)} (Rat Stack does not use these; replace or delete):")
+    for d in report["drop"]:
+        print(f"  {d['name']} {d['version']}  [{', '.join(d['in'])}]  -> {d['replace_with']}")
+    core = [d for d in report["add"] if any(p in CORE_PKGS for p in d["rat_stack_in"])]
+    extra = [d for d in report["add"] if d not in core]
+    print(f"ADD core {len(core)} (every app takes these, exact version):")
+    for d in core:
+        print(f"  {d['name']} {d['version']}")
+    print(f"ADD by cartridge {len(extra)} (take only with the cartridge or app that uses it):")
+    for d in extra:
+        print(f"  {d['name']} {d['version']}  [{', '.join(d['rat_stack_in'][:3])}]")
+    print(f"LAYOUT missing {len(layout_missing)}: " + ", ".join(layout_missing))
+    print(f"FOREIGN files {len(foreign)}:")
+    for f, w in foreign:
+        print(f"  {f}: {w}")
+    if non_js:
+        print(f"NON-JS {len(non_js)} (Rat Stack is TypeScript only; port or justify on the ticket):")
+        for f, l in non_js:
+            print(f"  {f}: {l}")
+
+
+if __name__ == "__main__":
+    main()
