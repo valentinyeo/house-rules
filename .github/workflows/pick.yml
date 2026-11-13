@@ -27,6 +27,7 @@ jobs:
       - run: fleet/runner orphan-selftest
       - run: fleet/runner loop-selftest
       - run: fleet/runner transcript-selftest
+      - run: python3 -m unittest tests.test_ticket_ownership -v
       - run: python3 -m unittest tests.test_runner_chat -v
       - run: python3 -m unittest tests.test_rules_drift -v
       - run: python3 -m unittest tests.test_ticket_gate_label -v

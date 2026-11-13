@@ -10,8 +10,8 @@ Valentin 2026-11-07: one pool, Runner 1..N, each runner on the engine the pacer 
 else cursor): cursor (Cursor plan), codex (hax on Codex), opencode (hax on OpenCode Go) or claude (Claude Code on the Claude plan). The model per brain tag (and for
 park and incident runs) comes from the pacer's ~/.local/state/pacing/allocation.json when it is under an hour old; else the
 built-in ENGINES map, which is the house-rules brain map. A brain the runner's engine skips is never handed to it, and a
-ticket held by a runner whose engine skips its brain counts as an orphan, so a runner that can do it adopts it. This
-replaces ht-or-runner-pick,
+ticket keeps its first runner, engine and model in STATE/ticket-owners until Done. Temporary stops, engine changes,
+expired claims and parks never make it an orphan. Only a permanently removed roster slot permits recovery. This replaces ht-or-runner-pick,
 ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/). Order:
   0. a live incident (YPER4-1375): an open board 15 ticket labelled incident that no live runner works. Any runner
      takes it first, whatever it holds or its engine: the run is Cursor grok-4.7 high (house rule), even on a Codex slot. Lane cap, app freeze, rests, queue brake and holds do not apply (ship-claim runs with
@@ -19,8 +19,7 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      an incident it is not running right now (log) is handed it again; an incident another runner is running is left alone.
   a. my own ticket in a building column on any board, QA included (the merging runner does the live check; a design-pass
      QA ticket waits for another runner's cross-qa)
-  b. an orphan in a building column, QA included (nobody holds it, or only a retired login, or a runner the pacer
-     stopped that runs nothing now; a stopped runner keeps the ticket it is running until that run ends)
+  b. an orphan in a building column, QA included (no durable owner and nobody holds it, or its roster slot was removed)
   WIP cap: the pool's pipeline (building columns on every fleet board plus new-work tickets with an open PR, one unit
      per ticket, minus incidents, open BlockedBy, waits on a person, design-pass and work outside the pool) at or over
      the live runners closes c0, d, e and f. A ticket nobody holds counts only when a free runner can take it: not in a
@@ -50,8 +49,7 @@ A ticket any runner ended IDLE on rests for every runner (runner-N.idle files an
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
 a ticket with an open BlockedBy link is held by that link; a closed link does not lift a rest (the blocker's fix changes the ticket).
 A ticket with an open BlockedBy link, in Valentin Review or waiting on someone is never picked (fleet/park puts them there).
-That someone may be Valentin or the board lead: fleet/park --lead leaves the ticket with the lead, and only a runner the lead
-hands it to starts it again. A ticket a lead or another agent holds is not new work on Fleet CI & Infra either, nor is one
+That someone may be Valentin or the board lead: fleet/park --lead keeps the starting runner assigned while the lead resolves the wait. A ticket a lead or another agent holds is not new work on Fleet CI & Infra either, nor is one
 waiting on an agent (HYCI-276: a lead-parked board alarm came back to four runners).
 Wait gate (13 Nov): a ticket whose last run ended WAIT_CHECK, or FAULT naming CI, a PR or a blocker, is also held from every lane
 that reads resting() (own, orphan, kept slot, board, PR queue, incident, the pipeline count) until what it waits on changes: the PR
@@ -72,9 +70,8 @@ Cannot be built yet (HYCI-355): a new-work ticket that says it needs Valentin, a
 a design sign-off or a person at a PC is refused before any model starts ("cannot be built yet: <what>"). Text only, no
 board read. An incident and a ticket with an open PR are never held. bin/replay-built [DAYS] counts the first runs since
 and how many of them the hold refuses.
-A runner whose own unfinished ticket rests or waits (ship-claim HOLD names it) gets that ticket back with source "park" and
-briefs/park-job.txt: decide the fleet/park mode, run it, end. A ticket is handed back at most once per REST_MAX (ledger
-STATE/parks, any runner, written when the job is handed out), so a park run that fails to park cannot loop.
+A durable owner's waiting ticket stays held without starting a park-only model run. When the wait clears, that same runner
+resumes it from its current column before taking any new ticket. Legacy tickets without durable ownership retain the park-job path.
 ship-claim runs with SHIP_CLAIM_PICKED=1: this picker already ordered infra against app work, so its infra-first hold is skipped.
 --dry-run never claims and never writes under ~/.local/state; it asks `ship-claim hold` (read only) so it sees the same holds. FLEET_PICK_VIRTUAL=<file> makes dry runs
 share virtual claims (so 20 separate dry runs give 20 different tickets); FLEET_PICK_CACHE=<file> reuses one
@@ -97,6 +94,10 @@ HOME = Path.home()
 HERE = Path(__file__).resolve().parent
 if not (HERE / "briefs").is_dir():
     HERE = Path(os.environ.get("FLEET_HOME", Path.home() / ".local/share/house-rules/fleet"))
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ticket_owner import Owners
+
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
 STATE = Path(os.environ.get("FLEET_PICK_STATE", HOME / ".local/state/fleet-pick"))
 RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
@@ -581,25 +582,6 @@ def skipped(t):
     return bool(set(t["labels"]) & SKIP_ALL) or WASTED in t["labels"] or in_not_now(t) or timed_out_here(t) or t["key"] in pc_waits()
 
 
-def hand_back_timeouts(n, dry):
-    """An OpenCode runner leaves the tickets it timed out on: fleet/park --hand-back unassigns it and keeps column and PR,
-    so ship-claim stops holding it and a runner on another engine adopts the ticket as an orphan."""
-    me = f"runner {n}"
-    for t in SNAP["tickets"]:
-        if t["section"] not in BOARDS[t["board"]][1] or me not in names(t) or not timed_out_here(t):
-            continue
-        if dry:
-            log(f"would hand back {t['key']}: timed out on OpenCode in the last 24 hours")
-            continue
-        r = subprocess.run([str(HERE / "park"), t["key"], "--hand-back",
-                            "an OpenCode run hit the 3h limit on it; a runner on another engine finishes it."],
-                           capture_output=True, text=True, env=dict(os.environ, SHIP_SESSION_NAME=f"RUNNER {n}"), timeout=300)
-        out = (r.stdout + r.stderr).strip().splitlines()
-        log(f"hand back {t['key']}: " + (out[-1] if out else f"rc {r.returncode}"))
-        if r.returncode == 0:
-            t["holders"] = [h for h in t["holders"] if h[0] != me]
-
-
 def cannot_do(name, t):
     """A live runner whose engine skips this ticket: it holds the ticket in name only."""
     m = re.fullmatch(r"runner (\d+)", name)
@@ -608,7 +590,8 @@ def cannot_do(name, t):
 
 
 def orphan(t):
-    """Nobody holds it, or only retired logins or runners whose engine skips its brain: any runner may adopt it."""
+    if t.get("_owner"):
+        return False
     return all(retired(n) or cannot_do(n, t) for n in names(t))
 
 
@@ -619,6 +602,8 @@ def set_engine(engine):
 
 
 def free_for(t, me):
+    if t.get("_owner"):
+        return me == f"runner {t['_owner']['runner']}"
     return all(n == me or retired(n) for n in names(t))
 
 
@@ -794,6 +779,7 @@ def fetch_ticket(key):
                                         or (raw.get("section") or "").lower() in INCIDENT_DONE):
         DEAD[key] = f"ticket is {status if status != 'Normal' else raw.get('section')}: no work left"
         return None
+    Owners(STATE, HERE / "roster.json").prepare([t], write=False)
     SNAP["tickets"].append(t)
     return t
 
@@ -1957,6 +1943,8 @@ def record_park(n, key):
 
 def try_claim(n, t, source, dry):
     """Claim t for Runner N. Returns True when it is ours, raises Pick for an own ticket found by a refusal."""
+    if t.get("_owner") and t["_owner"]["runner"] != int(n):
+        return False
     adopting = t["board"] == "2060" or source in ("orphan", "incident-takeover")
     if dry and adopting:
         record_claim(n, t["key"], True)
@@ -2240,7 +2228,7 @@ def incident_step(n, dry):
     ship-claim refuses) and tickets that wait on a person are left out."""
     me = f"runner {n}"
     cands = [t for t in SNAP.get("incidents") or []
-             if t["board"] in INCIDENT_BOARDS and can_join(n, t["board"]) and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & {"brain-extra-hard", "design-pass"}]
+             if t["board"] in INCIDENT_BOARDS and free_for(t, me) and can_join(n, t["board"]) and not t["waiting"] and t["section"] != "Valentin Review" and not set(t["labels"]) & {"brain-extra-hard", "design-pass"}]
     rest = None
     for t in sorted(cands, key=lambda t: (rank(t), t["created"])):
         if incident_runner(t["key"], n):
@@ -2506,10 +2494,24 @@ def choose(n, dry):
         probe_gate(n, why)
     else:
         ramp_gate(n)
-    hand_back_timeouts(n, dry)
+    owned = [t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == int(n)]
+    if owned:
+        t = sorted(owned, key=lambda t: (t["created"], t["key"]))[0]
+        record = t["_owner"]
+        if record.get("engine"):
+            set_engine(record["engine"])
+        taken = {**claim_files(), **virtual_claims()}
+        SKIP[0] = Skip({key for key, who in taken.items() if who != str(n)}, resting(n, dry))
+        if skipped(t) or t["waiting"] or t["key"] in SKIP[0] or held_back(t, own=True) or open_blocked_by(t):
+            raise SystemExit(f"none: Runner {n} keeps {t['key']}; waiting, no hand-off")
+        if f"runner {n}" not in names(t) and not try_claim(n, t, "board", dry):
+            raise SystemExit(f"none: Runner {n} keeps {t['key']}; assignment could not resume")
+        return t, "own"
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
     others = {k for k, who in taken.items() if who != str(n)}
+    others.update(t["key"] for t in SNAP["tickets"]
+                  if t.get("_owner") and t["_owner"]["runner"] != int(n))
     mine_claim = [k for k, who in taken.items() if who == str(n)]
     skip = Skip(others, resting(n, dry))
     SKIP[0] = skip
@@ -2775,10 +2777,15 @@ def render(n, t, source):
         label, model, effort = ("brain-hard", *INCIDENT_MODEL[INCIDENT_ENGINE])
     if source == "cross-qa":
         brief = CROSS_QA_LINE + "\n" + brief
+    record = t.get("_owner") or {}
+    if source != "cross-qa" and record.get("model"):
+        model, effort = record["model"], record["effort"]
+    brief += ("\nHYCI-404: Keep this ticket on this runner until Done. A wait or park keeps your ownership. "
+              "Never hand it to another runner; --hand-back schedules your own next run.\n")
     brief += GATES_LINE.replace("$key", t["key"])
     return {"runner": n, "ticket": t["key"], "board": t["board"], "section": t["section"], "lane": ln, "source": source,
             "title": t["title"], "url": url(t), "repo": repo_for(t), "brief_file": str(brief_file), "brief": brief,
-            "brain": label, "engine": INCIDENT_ENGINE if source == "incident" else ENGINE, "model": model, "effort": effort,
+            "brain": label, "engine": record.get("engine", INCIDENT_ENGINE if source == "incident" else ENGINE) if source != "cross-qa" else ENGINE, "model": model, "effort": effort,
             "labels": t["labels"]}
 
 
@@ -3592,19 +3599,6 @@ def escalate_self_test():
             raise AssertionError(f"ship-claim's hold resumed the timed-out {p.t['key']} as {p.source}")
         except SystemExit as e:
             assert str(e).startswith("none:"), e
-        calls, real_run = [], subprocess.run
-        subprocess.run = lambda args, **kw: calls.append((args, kw["env"]["SHIP_SESSION_NAME"])) or \
-            subprocess.CompletedProcess(args, 0, "HTPR-70 stays in In Progress, RUNNER 2 unassigned\n", "")
-        try:
-            hand_back_timeouts(2, True)
-            assert not calls and names(t) == ["runner 2"], "a dry run hands nothing back"
-            hand_back_timeouts(2, False)
-        finally:
-            subprocess.run = real_run
-        assert [(a[1:3], who) for a, who in calls] == [(["HTPR-70", "--hand-back"], "RUNNER 2")], calls
-        assert names(t) == [], "the handed-back ticket no longer names its OpenCode runner"
-        t["holders"] = [["runner 2", True]]
-
         ledger(run("HTPR-70", "pi-opencode", 25))
         assert not opencode_timed_out("HTPR-70") and not orphan(t), "a timeout older than 24h changes nothing"
         set_engine("opencode")
@@ -3954,6 +3948,12 @@ def main():
     ending = "picked"
     try:
         SNAP = load_snapshot()
+        owners = Owners(STATE, HERE / "roster.json")
+        owners.prepare(SNAP["tickets"] + SNAP.get("incidents", []), write=not dry)
+        owned = sorted((t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == n),
+                       key=lambda t: (t["created"], t["key"]))
+        if owned and owned[0]["_owner"].get("engine"):
+            set_engine(owned[0]["_owner"]["engine"])
         try:
             t, source = choose(n, dry)
         except Pick as p:
@@ -3963,6 +3963,8 @@ def main():
         if source == "park" and not dry:
             record_park(n, t["key"])
         pick = render(n, t, source)
+        if not dry and source != "cross-qa":
+            owners.bind(t["key"], n, pick)
     except SystemExit as e:
         ending = str(e.code)
         raise
