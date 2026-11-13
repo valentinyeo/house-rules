@@ -227,7 +227,8 @@ def self_test():
 
     unit = open(os.path.join(REPO, "systemd/ht-board-health.service")).read()
     for board, _session in OWNERS:
-        assert f"--board {board}" in unit, board
+        line = next(ln for ln in unit.splitlines() if f"--board {board}" in ln)
+        assert "--apply" in line and "--fix" not in line, line
     assert "board-health-wake" in unit, "timer must call the wake script"
     skill = open(os.path.join(REPO, "skills/hypertask-triage/SKILL.md")).read()
     assert "board-health-wake" in skill and "does not start" in skill, "skill must tell the lead to stop background runs"
