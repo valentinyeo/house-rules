@@ -171,6 +171,7 @@ BUILD_NEED = (
     (re.compile(r"\bonly (?:valentin|an? (?:admin|owner)) (?:can|may|has|holds|grants?)\b[^.]{0,40}?\b(?:key|token|credential|secret|access)\b"),
      "needs access"),
     (re.compile(r"\bneeds? (?:valentin|someone|a human|a person) at (?:his|the|their) (?:pc|machine|laptop)\b"), "needs a person at a PC"),
+    (re.compile(r"\b(?:runners?|agents?) (?:cannot|can'?t) reach (?:the |valentin'?s |his )?(?:laptop|pc)\b"), "needs a person at a PC"),
     (re.compile(r"\bneeds? (?:a |an )?design (?:sign-?off|approval|decision|pass)\b"), "needs a design"),
 )
 BRAINS = ("light", "medium", "hard", "extra-hard")
@@ -3503,6 +3504,8 @@ def wip_self_test():
     assert need("HYCI-9", "Wireframe first", "Backlog") is None, "design work without the words is not held"
     assert need("HYCI-9", "Session sidebar needs a design sign-off") == "cannot be built yet: needs a design", \
         "a design sign-off holds the ticket (HYCI-355)"
+    assert need("HYCI-9", "Agents cannot reach the laptop. Restore the connection.") == "cannot be built yet: needs a person at a PC", \
+        "an offline laptop holds the ticket (HYCI-387, 13 Nov: canary run parked)"
     assert need("HYCI-9", "Only an admin can place the token") == "cannot be built yet: needs access", \
         "a secret only an admin can place holds the ticket"
     assert need("HYCI-9", "Only the repo admin can merge it") is None, \
