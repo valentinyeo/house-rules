@@ -1540,14 +1540,14 @@ def pr_checks_pending(key, t=None):
     return False
 
 
-def just_waited(key, now=None):
-    """Did this ticket's latest run end WAIT_CHECK (a PR with running checks) in the last JUST_WAITED_S?"""
+def just_waited(key, now=None, window=None):
+    """Did this ticket's latest run end WAIT_CHECK (a PR with running checks) in the last `window` seconds (default JUST_WAITED_S)?"""
     now = now or time.time()
     last = next((r for r in reversed(ledger_rows()) if r.get("ticket") == key and r.get("state") in ("WAIT_CHECK", "PARKED", "BUILDING")), None)
     if not last or last.get("state") != "WAIT_CHECK":
         return False
     try:
-        return now - dt.datetime.strptime(last["ts"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp() < JUST_WAITED_S
+        return now - dt.datetime.strptime(last["ts"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp() < (window or JUST_WAITED_S)
     except (KeyError, ValueError, TypeError):
         return False
 
@@ -1963,7 +1963,12 @@ def parkable(t, ledger=None):
     A ticket whose latest run ended WAIT_CHECK under JUST_WAITED_S ago gets no park job, whatever its PR shows: the run set its own
     recheck, and a red check is fix work for its own run after the rest, not a hand-back (13 Nov 20:22: SOFT-1968 park job 49s after
     WAIT_CHECK, PR 963 red at 20:19:40, the model handed it back, an empty run)."""
-    if t["section"] not in BOARDS[t["board"]][1] or t["key"] in SKIP[0].hard or just_waited(t["key"]):
+    if t["section"] not in BOARDS[t["board"]][1] or t["key"] in SKIP[0].hard:
+        return False
+    # HYCI-396, 14 Nov: the hold below reads only hypertask-ai/hypertask PRs, so a Software Factory or house-rules PR with running
+    # checks got a park job the moment JUST_WAITED_S ran out (SOFT-1966 21:48, HYCI-404 22:06 on 13 Nov: each park an empty run).
+    # A ticket whose latest run ended WAIT_CHECK waits as long as one_run_hold would hold a PR it can see: gate_cap(t).
+    if just_waited(t["key"], window=gate_cap(t)):
         return False
     if t["key"] in one_run_hold(True):  # its next step is a script's (checks, merge, release): a park job has nothing to park
         return False
@@ -3377,6 +3382,12 @@ def self_test():
         assert not parkable({**t, "key": "HTPR-9"}, {}), "a run that ended WAIT_CHECK 50s ago gets no park job, even on a red PR (SOFT-1968)"
         _LEDGER[:] = [[{"ticket": "HTPR-9", "state": "WAIT_CHECK", "ts": old}]]
         assert parkable({**t, "key": "HTPR-9"}, {}), "an old WAIT_CHECK no longer holds the park job back"
+        mid = lambda secs: (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _LEDGER[:] = [[{"ticket": "HTPR-9", "state": "WAIT_CHECK", "ts": mid(JUST_WAITED_S + 120)}]]
+        assert not parkable({**t, "key": "HTPR-9"}, {}), "a WAIT_CHECK 32 minutes old still holds the park job: its PR may sit in a repo the hold cannot read (HYCI-396)"
+        _LEDGER[:] = [[{"ticket": "HTPR-9", "state": "WAIT_CHECK", "ts": mid(WAIT_GATE_CAP_URGENT + 60)}]]
+        assert parkable({**t, "key": "HTPR-9", "prio": "Urgent"}, {}), "an Urgent ticket's wait is capped at the shorter Urgent gate"
+        assert not parkable({**t, "key": "HTPR-9"}, {}), "a Medium ticket keeps waiting past the Urgent gate"
     finally:
         _LEDGER[:] = saved_ledger
     job = render(5, t, "park")
