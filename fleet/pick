@@ -1389,8 +1389,28 @@ def gate_verdict(t, when, row, base, parts, now):
             at = at + dt.timedelta(days=1) if at <= when else at
             until = min((at - when).total_seconds(), gate_cap(t))
         if age > until:
+            # HYCI-388, 13 Nov (SOFT-1966, SOFT-2273, HYCI-404 each ran again after 30 blind minutes with checks still pending): a
+            # ticket fleet/sf-release-watch lists as pr or release has a script waiting on it, so the blind wait is not over.
+            if sf_wait_listed(t, now):
+                return True, "held"
             return False, "blind wait over"
     return True, "held"
+
+
+def sf_wait_listed(t, now):
+    """The detail line when fleet/sf-release-watch lists this ticket as pr or release (a script's wait), else "". Same file, freshness and
+    cap as sf_wait_hold, but no flag and no log: the wait gate asks it for one ticket at the moment its blind wait would end. Fails open."""
+    try:
+        doc = json.loads(SF_RELEASE_WAIT.read_text())
+        if now.timestamp() - float(doc["at"]) > SF_WAIT_FRESH_S or INCIDENT_LABEL in t["labels"]:
+            return ""
+        row = next((r for k, r in doc["tickets"].items() if ticket_id(k) == ticket_id(t["key"])), None)
+        since = stamp_time((row or {}).get("since", ""))
+        if not row or row.get("state") not in ("pr", "release") or since is None or (now - since).total_seconds() > gate_cap(t):
+            return ""
+        return row.get("detail") or row["state"]
+    except Exception:
+        return ""
 
 
 def wait_gate(dry, now=None):
@@ -2891,7 +2911,8 @@ def wait_self_test():
 
 def wait_gate_self_test():
     """The wait gate: a waiting ticket is held until what it waits on changes, in every lane (they all read resting())."""
-    global SNAP, open_prs
+    global SNAP, open_prs, SF_RELEASE_WAIT
+    import tempfile
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
     ago = lambda m: (now - dt.timedelta(minutes=m)).strftime(fmt)
@@ -3031,6 +3052,36 @@ def wait_gate_self_test():
             "a stated recheck time ends the blind hold"
         fresh([wait("HTPR-4", 5, "RUNNER IDLE production deploy in flight")], [tk("HTPR-4")])
         assert held() == {"HTPR-4"} and held(now + dt.timedelta(minutes=31)) == set(), "a blind wait is held 30 minutes"
+        # HYCI-388: a blind wait that a script is still waiting on (sf-release-watch lists the ticket) is not over (SOFT-2273, HYCI-404)
+        saved_wait, wf = SF_RELEASE_WAIT, Path(tempfile.mkdtemp()) / "sf-wait.json"
+        SF_RELEASE_WAIT = wf
+        try:
+            listing = lambda key, state="pr", at=0, since=2: wf.write_text(json.dumps({"at": now.timestamp() + 1860 - at, "tickets": {
+                key: {"state": state, "detail": "PR #7 open, checks pending", "since": ago(since)}}}))
+            fresh([wait("HTPR-4", 5, "RUNNER IDLE production deploy in flight")], [tk("HTPR-4")])
+            late = now + dt.timedelta(minutes=31)  # the listing is written `at` seconds before this moment
+            assert held() == {"HTPR-4"} and held(late) == set(), "baseline: a blind wait with nothing listed ends after 30 minutes"
+            listing("HTPR-4")
+            fresh([wait("HTPR-4", 5, "RUNNER IDLE production deploy in flight")], [tk("HTPR-4")])
+            assert held() == {"HTPR-4"} and held(late) == {"HTPR-4"}, "listed as pr: the blind wait is not over"
+            listing("HTPR-4", "release")
+            assert held(late) == {"HTPR-4"}, "listed as release: held"
+            listing("HTPR-4", "attention")
+            assert held(late) == set(), "listed as attention (red, conflicting): a model has work, released"
+            listing("HTPR-4", at=1200)
+            assert held(late) == set(), "a file older than 15 minutes holds nothing"
+            listing("HTPR-4", since=400)
+            assert held(late) == set(), "a wait older than the six hour cap is released"
+            listing("HTPR-5")
+            assert held(late) == set(), "another ticket's listing does not hold this one"
+            listing("HTPR-4")
+            fresh([wait("HTPR-4", 5, "RUNNER IDLE production deploy in flight")], [tk("HTPR-4", labels=["incident"])])
+            assert held(late) == set(), "an incident is never held"
+            fresh([wait("HYCI-404", 5, "RUNNER IDLE waiting on PR checks")], [tk("HYCI-404")])
+            listing("HYCI-404")
+            assert held() == {"HYCI-404"} and held(late) == {"HYCI-404"}, "a HYCI ticket listed for its house-rules PR is held (HYCI-404)"
+        finally:
+            SF_RELEASE_WAIT = saved_wait
         # dry runs write nothing; unreadable data and errors never hold
         fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
         assert held(dry=True) == {"HTPR-1"} and not gate_state_path().exists(), "a dry run keeps no state"

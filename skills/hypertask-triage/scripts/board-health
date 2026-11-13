@@ -294,6 +294,7 @@ def alarm(board, alarm_board, lines, escalate):
 
 
 def self_test():
+    global run_text, run_fix
     flow = {"rows": [{"ticket": "HTPR-1", "verdict": "STALE"}, {"ticket": "HTPR-2", "verdict": "OK"}],
             "summary": {"ownership": {"active": 12, "live": 10, "orphans": [("HTPR-1", "no claim")], "doubles": {},
                                       "outside": []},
@@ -348,6 +349,29 @@ def self_test():
                       "ownership": {"doubles": {"Runner 1": ["A", "B"]}}}}
     plan = {n: (c, note) for n, c, note in plan_fixes(15, fl, st)}
     assert plan["HTPR-6"][0] == [["vcc", "task", "move", "HTPR-6", "QA"]]
+    # HTPR-9080 (13 Nov 23:07): the runner had just moved it to Flag: Only Me + QA, the sendback moved it back to QA, a third run started
+    at = datetime(2026, 11, 13, 23, 7, 9, tzinfo=timezone.utc)
+    got = lambda col, moved: {"section": col, "updatedAt": moved}
+    assert merged_move_skip(got("Flag: Only Me + QA", "2026-11-13T23:06:45Z"), at), "replay: a ticket the runner moved on is left alone"
+    assert merged_move_skip(got("In Progress", "2026-11-13T23:04:00Z"), at), "a ticket a runner moved 3 minutes ago is left alone"
+    assert merged_move_skip(got("QA", "2026-11-13T21:00:00Z"), at), "already in QA: nothing to move"
+    assert merged_move_skip(None, at), "an unreadable ticket is not moved"
+    for col in ("In Progress", "AI Review", "Agent Blocked (Infra)", "Valentin Review"):
+        assert merged_move_skip(got(col, "2026-11-13T21:00:00Z"), at) == "", f"{col} for hours: the sendback still moves it"
+    assert merged_move_skip(got("In Progress", "2026-11-13T22:50:00Z"), at) == "", "17 minutes quiet is enough"
+    assert is_qa_move(plan["HTPR-6"][0]) and not is_qa_move([["vcc", "task", "move", "X", "Done"]]) and not is_qa_move([])
+    real_run_text, real_run_fix, real_sub, ran = run_text, run_fix, subprocess.run, []
+    try:
+        subprocess.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")  # the agent-lane note is not written by a test
+        run_text = lambda cmd: json.dumps({"tasks": [got("Flag: Only Me + QA", "2026-11-13T23:06:45Z")]})
+        run_fix = lambda cmd: (ran.append(cmd), subprocess.CompletedProcess(cmd, 0, "", ""))[1]
+        apply_fixes([("HTPR-9080", [["vcc", "task", "move", "HTPR-9080", "QA"]], f"{NOTE} moved to QA. Its PR is merged: a#2.")])
+        assert ran == [], "apply_fixes does not run the move on a ticket that already left the column"
+        run_text = lambda cmd: json.dumps({"tasks": [got("AI Review", "2026-11-13T12:00:00Z")]})
+        apply_fixes([("HTPR-9081", [["vcc", "task", "move", "HTPR-9081", "QA"]], f"{NOTE} moved to QA. Its PR is merged: a#2.")])
+        assert ran == [["vcc", "task", "move", "HTPR-9081", "QA"]], "a ticket still in AI Review for hours is moved"
+    finally:
+        run_text, run_fix, subprocess.run = real_run_text, real_run_fix, real_sub
     assert plan["HTPR-7"][0] == [["vcc", "task", "update", "HTPR-7", "--section", "4389"]]
     assert plan["HTPR-5"][0] == [] and "ready to close" in plan["HTPR-5"][1]
     assert "C" not in plan, "board-health must not default-tag: the brain tagger owns untagged tickets"
@@ -882,9 +906,41 @@ def run_fix(cmd):
     return r
 
 
+# HYCI-388, 13 Nov (HTPR-9080 ping-pong): a runner moved the ticket from QA to In Progress for its live check, then on to
+# Flag: Only Me + QA at 23:06:45; the sendback, planned from a read taken while it was In Progress, moved it back to QA at
+# 23:07:09 and the picker started a third run. The move to QA only fits a ticket that still sits in a column nobody finishes
+# from, and that nobody touched in the last quarter hour.
+MERGED_MOVE_FROM = re.compile(r"^(?:In Progress|AI Review|Agent Blocked|Valentin Review)\b", re.I)
+MERGED_MOVE_QUIET_MIN = 15
+
+
+def merged_move_skip(task, now):
+    """Why the move to QA must not run on this fresh read of the ticket, or "" when it may. Pure: `task` is `task get`'s row or None."""
+    if not task:
+        return "its column could not be read again"
+    col = task.get("section") or ""
+    if not MERGED_MOVE_FROM.match(col):
+        return f"it is in {col or 'no column'} now, not where the read saw it"
+    moved = hours_since(task.get("updatedAt"), now)
+    if moved is not None and moved * 60 < MERGED_MOVE_QUIET_MIN:
+        return f"it moved {int(moved * 60)} minutes ago, a runner is still on it"
+    return ""
+
+
+def is_qa_move(cmds):
+    return bool(cmds) and cmds[0][:3] == ["vcc", "task", "move"] and cmds[0][-1] == "QA"
+
+
 def apply_fixes(plan):
     done = failed = skipped = 0
     for ticket, cmds, note in plan:
+        if ticket and is_qa_move(cmds):  # the plan is minutes old: read the column again right before the write
+            fresh = (json.loads(run_text(["hypertask", "--json", "task", "get", ticket]) or "{}").get("tasks") or [None])[0]
+            why = merged_move_skip(fresh, datetime.now(timezone.utc))
+            if why:
+                skipped += 1
+                print(f"FIX SKIPPED {ticket}: not moved to QA, {why}")
+                continue
         log = [] if cmds else json.loads(run_text(["hypertask", "--json", "task", "agent-log", ticket]) or "{}").get("activities") or []
         if not cmds and any(note[:60] in (a.get("text") or "") for a in log[:20]):
             skipped += 1
