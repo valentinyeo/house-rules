@@ -216,7 +216,13 @@ def _epoch(iso):
 
 def _pr_created(repo, num):
     r = subprocess.run(["gh", "api", f"repos/{repo}/pulls/{num}", "--jq", ".created_at"], capture_output=True, text=True, timeout=30)
-    return r.stdout.strip() if r.returncode == 0 else ""
+    created = r.stdout.strip() if r.returncode == 0 else ""
+    # A push to a PR the run did not open (SOFT-1952, 13 Nov: a CI fix on a PR from hours before) is progress too: the newest
+    # commit time counts as well. Paginated: one line per page, ISO times sort as text.
+    c = subprocess.run(["gh", "api", "--paginate", f"repos/{repo}/pulls/{num}/commits", "--jq", ".[-1].commit.committer.date"],
+                       capture_output=True, text=True, timeout=30)
+    last = max([x for x in c.stdout.split() if x] or [""]) if c.returncode == 0 else ""
+    return max(created, last)
 
 
 def pr_progress(text, since, created=_pr_created):
@@ -368,6 +374,8 @@ def self_test():
     look = lambda repo, num: fake.get((repo, num), "")
     since = _epoch("2026-11-13T11:11:37Z")
     assert pr_progress("[PR](https://github.com/o/r/pull/26) x", since, look) == 1, "a PR opened during the run is progress"
+    fake[("o/r", "30")] = "2026-11-13T11:30:00Z"  # an older PR whose newest commit landed during the run: _pr_created returns the later time
+    assert pr_progress("see https://github.com/o/r/pull/30", since, look) == 1, "a push to an existing PR is progress"
     assert pr_progress("see https://github.com/o/r/pull/9", since, look) == 0, "an older PR is not this run's"
     assert pr_progress("no link, or https://github.com/o/r/pull/77", since, look) == 0, "an unknown PR counts nothing"
     git("checkout", "-q", "main")
