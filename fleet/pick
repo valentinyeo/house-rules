@@ -2184,14 +2184,28 @@ def busy_on_plan(n, plan):
             and ENGINES[runner_engine(m)]["plan"] == plan and running(m)]
 
 
+def probe_cap(plan):
+    """Valentin's direct order may raise one plan's probe cap during a stop (13 Nov: "You can launch more agents again on the
+    OpenCode Go plan ... make sure they don't just check"). ~/.local/state/fleet/probe-caps.json:
+    {"<plan>": {"cap": N, "until": epoch, "why": "his words"}}. A stopped factory still takes app work only (infra_closed)."""
+    try:
+        o = json.loads((Path.home() / ".local/state/fleet/probe-caps.json").read_text()).get(plan) or {}
+        if float(o.get("until", 0)) > time.time():
+            return max(PROBE_CAP, int(o["cap"]))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return PROBE_CAP
+
+
 def probe_gate(n, why):
     """HYCI-359: a stop that idles every runner never fills the window its own clear reads, so the stop could only be lifted by
     hand. While it is active one runner per plan takes clean tickets as a probe; bin/factory-breaker clears the stop itself once
     those runs build 90% of 10. Under the line the stop holds."""
-    log(f"factory stopped: {why}; probe: {PROBE_CAP} runner(s) per plan take clean tickets")
+    cap = probe_cap(plan_of(n))
+    log(f"factory stopped: {why}; probe: {cap} runner(s) per plan take clean tickets")
     busy = busy_on_plan(n, plan_of(n))
-    if len(busy) >= PROBE_CAP:
-        raise SystemExit(f"none: factory stopped: {why}; probe, {PROBE_CAP} runner(s) per plan: "
+    if len(busy) >= cap:
+        raise SystemExit(f"none: factory stopped: {why}; probe, {cap} runner(s) per plan: "
                          f"{plan_of(n)} runners {' '.join(map(str, busy))} already in a run")
 
 
