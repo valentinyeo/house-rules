@@ -74,9 +74,11 @@ board snapshot. Exit 0 with a pick, exit 1 with the reason on stderr.
 from collections import Counter, defaultdict
 import datetime as dt
 import fcntl
+import gzip
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1001,6 +1003,33 @@ def trace_path(dry):
     return None if dry else RUNNER_STATE / "pick-trace.jsonl"
 
 
+TRACE_KEEP_DAYS = 7
+
+
+def archive_trace(path):
+    """Rotate: move the full trace aside (atomic, so only one runner wins), gzip it into pick-trace-archive, prune old ones."""
+    arch = path.parent / "pick-trace-archive"
+    arch.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    moved = arch / f"pick-trace-{stamp}-{os.getpid()}.jsonl.part"
+    try:
+        os.replace(path, moved)
+    except FileNotFoundError:
+        return  # another runner rotated it first
+    final = arch / f"pick-trace-{stamp}-{os.getpid()}.jsonl.gz"
+    with open(moved, "rb") as src, gzip.open(f"{final}.tmp", "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    os.replace(f"{final}.tmp", final)
+    moved.unlink()
+    cutoff = time.time() - TRACE_KEEP_DAYS * 86400
+    for old in arch.glob("pick-trace-*.jsonl.gz"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+
+
 def write_trace(n, dry, ticket, source, ending):
     """One JSON line per pick: every ticket and PR outcome, plus refusal counts. Never fails the pick."""
     try:
@@ -1034,7 +1063,7 @@ def write_trace(n, dry, ticket, source, ending):
                 "pr_refusal_counts": dict(Counter(p["result"] for p in prs if p["result"] != "chosen"))}
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size > TRACE_MAX:
-            os.replace(path, f"{path}.1")
+            archive_trace(path)
         with open(path, "a") as f:
             f.write(json.dumps(line, separators=(",", ":")) + "\n")
     except Exception as e:
@@ -2558,6 +2587,22 @@ def trace_self_test():
     assert line["pr_refusal_counts"]["PR idle under two hours"] == 1
     assert line["pr_refusal_counts"]["red PR idle under six hours"] == 1
     assert line["pr_refusal_counts"]["not an eligible orphan in a building column"] == 1
+    big = RUNNER_STATE / "pick-trace.jsonl"
+    keep = big.read_text()
+    old_arch = RUNNER_STATE / "pick-trace-archive" / "pick-trace-20000101T000000Z-1.jsonl.gz"
+    old_arch.parent.mkdir(parents=True, exist_ok=True)
+    old_arch.write_bytes(b"")
+    os.utime(old_arch, (0, 0))
+    global TRACE_MAX
+    saved, TRACE_MAX = TRACE_MAX, 10
+    try:
+        write_trace(3, False, None, None, "none: rotate")
+    finally:
+        TRACE_MAX = saved
+    made = sorted((RUNNER_STATE / "pick-trace-archive").glob("pick-trace-2*Z-*.jsonl.gz"))
+    assert len(made) == 1 and not old_arch.exists(), "rotation archives into a gzip and prunes files over seven days"
+    assert gzip.open(made[0], "rt").read() == keep, "the archive holds the rotated trace whole"
+    assert len((RUNNER_STATE / "pick-trace.jsonl").read_text().splitlines()) == 1, "a fresh trace starts after rotation"
     SNAP = None
 
 
