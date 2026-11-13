@@ -116,6 +116,11 @@ INCIDENT_BOARDS = ("15", "11514")
 INCIDENT_DONE = {"done", "archive", "archived", "flag: everyone", "flag: only me + qa"}
 CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
+# Relation reads allowed per pick (HYCI-388). A pick starts at the normal budget (BLOCK_LOOKUPS*2). Only a pick that would
+# otherwise end idle, with candidates skipped just for lack of reads, lifts it to the hard ceiling (BLOCK_LOOKUPS*4).
+RELATION_CAP = [BLOCK_LOOKUPS * 2]
+RELATION_CEILING = BLOCK_LOOKUPS * 4
+SPENT_REASON = "relation reads spent this pick, link unchecked"
 REST_MAX = 3 * 86400  # an IDLE rest never outlives this, changed or not
 REST_GRACE = 60  # seconds: the run's own last write may land just after its IDLE end
 # an IDLE rest on a ticket nobody waits on (no BlockedBy, no Valentin wait) ends after this: back to its holder or the orphan lane
@@ -1694,7 +1699,7 @@ def open_blocked_by(t):
     """Open outgoing BlockedBy, when this pick can read the links.
     A spent lookup is not a block. The kept slot never reaches held_back, so a known blocker has to drop the ticket here."""
     if t["key"] not in SNAP["rel"]:
-        if CHECKED[0] >= BLOCK_LOOKUPS * 2:
+        if CHECKED[0] >= RELATION_CAP[0]:
             return False
         CHECKED[0] += 1
     return any(is_open(w) for w in relations(t["key"])[0])
@@ -1768,8 +1773,8 @@ def held_reason(t, own=False):
     if not own and t["waiting"]:
         return "waits on Valentin"
     if t["key"] not in SNAP["rel"]:
-        if CHECKED[0] >= BLOCK_LOOKUPS * 2:
-            return "relation reads spent this pick, link unchecked"
+        if CHECKED[0] >= RELATION_CAP[0]:
+            return SPENT_REASON
         CHECKED[0] += 1
     open_blocker = next((w for w in relations(t["key"])[0] if is_open(w)), None)
     return f"BlockedBy {open_blocker}" if open_blocker else None
@@ -2498,6 +2503,7 @@ def staged_units(units):
 
 def choose(n, dry):
     PICKER[0] = n
+    RELATION_CAP[0] = BLOCK_LOOKUPS * 2
     hit = incident_step(n, dry)
     if hit:
         return hit
@@ -2741,6 +2747,23 @@ def choose(n, dry):
         t = attempt(lane_new)
         if t:
             return t, "ci-lane"
+    # HYCI-388: nothing to start, yet some tickets were skipped only because this pick's relation reads ran out (104 of 366
+    # on 13 Nov, three runners idle). Read their links, in the same priority order, up to the hard ceiling before ending idle.
+    spent = {k for k, why in TRACE["why"].items() if why == SPENT_REASON}
+    if spent:
+        RELATION_CAP[0] = RELATION_CEILING
+        for k in spent:
+            del TRACE["why"][k]
+        if not frozen:
+            load, board_load = project_load(), project_load(lambda t: t["board"])
+            t = attempt(sorted((x for x in app_new if x["key"] in spent),
+                               key=lambda t: (tuple(board_load[t["board"]]), tuple(load[project(t)]), rank(t), BOARD_ORDER[t["board"]], t["created"])))
+            if t:
+                return t, "board"
+        if not full():
+            t = attempt([x for x in lane_new if x["key"] in spent])
+            if t:
+                return t, "ci-lane"
     raise SystemExit("none: no free ticket the pool may take" + (" (app freeze: CI and infra only)" if frozen else ""))
 
 
@@ -3623,7 +3646,7 @@ def escalate_self_test():
 def wip_self_test():
     """The stop lands between tickets, the short rest, and the WIP cap: closed means only own, orphan, PR queue and
     finish work, and every counted unit is something an open lane can take."""
-    global RUNNERS, FREEZE, SNAP, try_claim, LANE_CAP
+    global RUNNERS, FREEZE, SNAP, try_claim, LANE_CAP, ht
     now = dt.datetime.now(dt.timezone.utc)
     iso = lambda h: (now - dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
     held = {"key": "HTPR-1", "board": "15", "section": "In Progress", "labels": [], "holders": [("runner 12", True)]}
@@ -3905,6 +3928,38 @@ def wip_self_test():
         SNAP["open"] = {"HYCI-233": False}
         got = choose(2, True)
         assert (got[0]["key"], got[1]) == ("HYCI-277", "kept-slot"), got
+        # HYCI-388: a pick that would end idle reads the links its budget left unread, up to the hard ceiling
+        real_ht = ht
+        reads = []
+
+        def fake_ht(*args):
+            reads.append(args[2])
+            blocked_idx = int(args[2].split("-")[1]) - 100 < free_at
+            rel = [{"relationType": "BlockedBy", "direction": "outgoing",
+                    "otherTask": {"ticketNumber": "HTPR-1", "status": "Open"}}] if blocked_idx else []
+            return {"relations": rel}
+
+        def rel_cap_snap():
+            return {"tickets": [dict(tk(f"HTPR-{100 + i}", "Backlog"), created=f"2026-01-01T00:{i:02d}:00Z") for i in range(90)],
+                    "rel": {}, "prs": [], "incidents": [], "open": {"HTPR-1": True}}
+        try:
+            ht = fake_ht
+            free_at = 50  # the first 50 are blocked; the normal budget reads only 40, so the 51st is never reached without a lift
+            SNAP, CHECKED[0] = rel_cap_snap(), 0
+            got = choose(1, True)
+            assert (got[0]["key"], got[1]) == ("HTPR-150", "board"), got
+            assert len(reads) == 51, f"reads past the normal 40 stop at the free ticket: {len(reads)}"
+            free_at, reads[:] = 999, []; TRACE["why"].clear()  # nothing free anywhere: the ceiling holds at 4x, the pick still ends idle
+            SNAP, CHECKED[0] = rel_cap_snap(), 0
+            try:
+                choose(1, True)
+                raise AssertionError("every ticket blocked: the pick must end idle")
+            except SystemExit as e:
+                assert "no free ticket" in str(e), e
+            assert len(reads) == BLOCK_LOOKUPS * 4 and TRACE["why"]["HTPR-189"] == SPENT_REASON, (len(reads), TRACE["why"].get("HTPR-189"))
+        finally:
+            ht = real_ht
+            TRACE["why"].clear()
         (STATE / "runner-2.log").unlink()
         RUNNING.clear()
         SNAP["tickets"] = [tk("HTPR-50", "AI Review")]
