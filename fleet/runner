@@ -164,7 +164,9 @@ orphan_run_wait() {
 # of provider silence (HYCI-250). Pi writes a session record for every event, so its session file is a true heartbeat:
 # no new record for REPLY_CAP seconds means the provider sent nothing. That attempt is killed, retried once, then the run
 # ends and fleet/pick hands the ticket back. hax and cursor print only the final message, so they have no heartbeat to
-# watch and keep the 3h run limit alone.
+# watch and keep the 3h run limit alone. Claude runs write a session file per event too (HTPR-9130: runners 1 and 9 sat
+# silent for the whole 3h on 13 Nov, both FAULT, no reply cap because Claude had no heartbeat), so a Claude attempt gets a
+# fixed --session-id and its session file is the heartbeat; the file is removed after the attempt.
 REPLY_CAP=${REPLY_CAP:-600}
 CAP_TICK=${CAP_TICK:-15}
 # A failed run's log is wiped by the next run (`: > "$runlog"`), so its error text was lost and about 190 week-one FAULTs
@@ -223,8 +225,14 @@ ticket_progress() {
 }
 stall_mark() { echo "$STATE/stall-${n:-0}"; }
 pi_session_dir() { echo "$STATE/pi-session-${n:-0}/$(date +%s)"; }
+CLAUDE_PROJECTS=${CLAUDE_PROJECTS:-$HOME/.claude/projects}
 newest_beat() {
   local d=$1 f
+  case $d in claude-session:*)
+    f=$(ls -t "$CLAUDE_PROJECTS"/*/"${d#claude-session:}".jsonl 2>/dev/null | head -1)
+    if [ -n "$f" ]; then stat -c %Y "$f" 2>/dev/null || echo 0; else echo 0; fi
+    return 0 ;;
+  esac
   f=$(ls -t "$d"/*.jsonl 2>/dev/null | head -1)
   if [ -n "$f" ]; then stat -c %Y "$f" 2>/dev/null || echo 0; else stat -c %Y "$d" 2>/dev/null || echo 0; fi
 }
@@ -261,12 +269,16 @@ launch() {
     pi-codex) base=("$PI_BIN" -p --provider openai-codex --model "$model" --thinking "$effort") ;;
     pi-opencode) base=("$PI_BIN" -p --provider opencode-go --model "$model" --thinking "$effort") ;;
     claude) base=("$HOME/.local/bin/claude" -p --model "$model" --effort "$effort" --permission-mode bypassPermissions
-                  --no-session-persistence --output-format text --disallowedTools Agent Task) ;;
+                  --output-format text --disallowedTools Agent Task) ;;
     *) echo "unknown engine: $eng" >&2; return 2 ;;
   esac
   # The reply cap needs the harness's own progress file, so a Pi run gets a session dir of its own. Set before the dry run
   # prints, so launch-check shows the real command.
   local beat=""
+  local sid=""
+  case $eng in claude)
+    sid=$(cat /proc/sys/kernel/random/uuid); beat="claude-session:$sid"; base+=(--session-id "$sid") ;;
+  esac
   case $eng in pi-codex|pi-opencode)
     beat=$(pi_session_dir); base+=(--session-dir "$beat")
     [ "${LAUNCH_DRY:-}" = 1 ] || { find "$STATE/pi-session-${n:-0}" -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf {} + 2>/dev/null; mkdir -p "$beat"; } ;;
@@ -308,6 +320,7 @@ launch() {
     else
       wait "$apid"; rc=$?
     fi
+    [ -n "$sid" ] && rm -rf "$CLAUDE_PROJECTS"/*/"$sid".jsonl "$CLAUDE_PROJECTS"/*/"$sid" 2>/dev/null
     [ -f "$(stall_mark)" ] || break
     if [ "$attempt" -lt 2 ]; then
       echo "reply cap: nothing from the model for ${REPLY_CAP}s; retrying once (attempt 2 of 2)"
@@ -423,6 +436,18 @@ case "${1:-}" in
     kill -0 "$spid" 2>/dev/null && { echo 'reply-cap self-test FAILED: the silent attempt survived' >&2; bad=1; }
     gpid=$(cat "$tmp/grandchild.pid" 2>/dev/null)
     kill -0 "$gpid" 2>/dev/null && { echo 'reply-cap self-test FAILED: the tool call outlived the attempt' >&2; bad=1; }
+    # Claude heartbeat: the session file named by the attempt's id is the beat; a missing file is a silent attempt.
+    CLAUDE_PROJECTS=$tmp/cproj; mkdir -p "$CLAUDE_PROJECTS/-x"
+    ( for i in 1 2 3 4 5 6; do sleep 1; echo '{}' >> "$CLAUDE_PROJECTS/-x/sid1.jsonl"; done ) &
+    cpid=$!
+    wait_reply "$cpid" "claude-session:sid1"; expect 'a chatty Claude attempt is kept' "$?" 0
+    wait "$cpid" 2>/dev/null
+    ( sleep 60 & echo $! > "$tmp/grandchild2.pid"; wait ) &
+    spid=$!; started=$(date +%s)
+    wait_reply "$spid" "claude-session:none"; expect 'a Claude attempt that never writes is killed' "$?" 124
+    took=$(( $(date +%s) - started ))
+    [ "$took" -le 6 ] || { echo "reply-cap self-test FAILED: Claude kill took ${took}s at a 3s cap" >&2; bad=1; }
+    wait "$spid" 2>/dev/null
     python3 "$HERE/runner-state.py" --classify --final 'RUNNER IDLE no model reply for 600s twice, run ended' --rc 124 --elapsed 700 --ticket HYCI-1 | grep -q '"state": "FAULT"' \
       || { echo 'reply-cap self-test FAILED: a capped run is not classified as a fault with its reason' >&2; bad=1; }
     [ "$bad" = 0 ] && echo 'reply-cap self-test ok'
