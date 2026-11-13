@@ -27,7 +27,10 @@ STATES = (
     "STOPPED",
     "FAULT",
 )
-WAIT_LIMIT = 30 * 60
+# A ticket that keeps ending on its own waiting line is stuck after this much waiting, not before (HYCI-343): one PR's
+# required checks on this repo take 20 to 60 minutes, so the 30-minute line turned every healthy wait into a FAULT and made the
+# run counts and the factory breaker read waits as waste. The picker's wait gate caps a hold at the same 6 hours.
+WAIT_LIMIT = 6 * 3600
 TICKET = re.compile(r"\b((?:HTPR|HYFA|IGSH|SOFT|HYCI)-\d+)\b")
 DONE = re.compile(r"\b(?:INFRA |CI )?RUNNER DONE\b")
 HUMAN = re.compile(r"\bvalentin\b|flag approval", re.I)
@@ -96,7 +99,7 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
         return _out("FAULT", "FAULT", park="lead", detail=why)
     if line and WAIT.search(line):
         if waited is not None and int(waited) >= WAIT_LIMIT:
-            return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 30 min")
+            return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 6 h")
         return _out("WAIT_CHECK", "WAIT_CHECK", detail=line[:160])
     if line and OWN.search(line):
         return _out("OWN_PR", "DONE", detail=line[:160])
@@ -112,7 +115,7 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
         return _out("IDLE_LOAD", "IDLE_LOAD", detail=line[:160])
     if line and re.search(r"\bRUNNER IDLE\b", line):
         if waited is not None and int(waited) >= WAIT_LIMIT:
-            return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 30 min")
+            return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 6 h")
         return _out("WAIT_CHECK", "WAIT_CHECK", detail=line[:160])
     if int(rc) == 124 or int(elapsed) >= 3 * 3600 - 10:
         return _out("FAULT", "FAIL", detail="timeout: hit the 3h run limit")
@@ -181,7 +184,9 @@ def self_test():
     wait = classify("RUNNER IDLE ci-blocked HYCI-117", 0, 400, "", 10, "HYCI-1")
     assert wait["state"] == "WAIT_CHECK" and wait["park"] == ""
     late = classify("RUNNER IDLE checks pending", 0, 400, "", WAIT_LIMIT, "HYCI-1")
-    assert late["state"] == "FAULT" and late["park"] == "" and "30 min" in late["detail"]
+    assert late["state"] == "FAULT" and late["park"] == "" and "6 h" in late["detail"]
+    healthy = classify("RUNNER IDLE checks pending", 0, 400, "", 40 * 60, "HYCI-1")
+    assert healthy["state"] == "WAIT_CHECK", "a 40-minute check cycle is a wait, not a fault"
     parked = classify("RUNNER IDLE HYCI-160 BlockedBy HYCI-188", 0, 400, "", 0, "HYCI-160")
     assert parked["state"] == "PARKED" and parked["park"] == "waits" and parked["waits"] == "HYCI-188"
     assert classify("RUNNER IDLE driving own PR to live", 0, 400, "", 0, "HTPR-1")["state"] == "OWN_PR"
