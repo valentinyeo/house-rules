@@ -780,8 +780,15 @@ TM
         pr_made=$(python3 "$HERE/runner-state.py" --pr-progress --log "$runlog" --since "$started_at" 2>/dev/null || echo 0)
         [[ "$pr_made" =~ ^[0-9]+$ ]] && progress=$pr_made
       fi
-      save_transcript "$pick_ticket" "$runlog" "$state" "$detail" "$progress" "$rc" "$elapsed"
-      jq -nc --arg ts "$(date -u +%FT%TZ)" --arg ticket "$pick_ticket" --arg engine "$pick_engine" --arg model "$cmodel" --arg result "$res" --argjson runner "$n" --arg reason "$reason" --arg state "$state" --arg detail "$detail" --arg source "${pick_source:-}" --argjson progress "$progress" --arg transcript "$(basename "${TRANSCRIPT_FILE:-}")" \
+      # A PARKED ending names the ticket and nothing else. The ledger keeps the model's own reason beside it, so the next
+      # look at a pile of parks reads one line each instead of opening every log (13 Nov, "3 shipped vs 17 runs").
+      ledger_detail="$detail"
+      if [ "$state" = PARKED ]; then
+        park_why=$(python3 "$HERE/runner-state.py" --park-reason --log "$runlog" 2>/dev/null | head -1 | cut -c1-200 || true)
+        [ -n "$park_why" ] && ledger_detail="${detail:+$detail | }why: $park_why"
+      fi
+      save_transcript "$pick_ticket" "$runlog" "$state" "$ledger_detail" "$progress" "$rc" "$elapsed"
+      jq -nc --arg ts "$(date -u +%FT%TZ)" --arg ticket "$pick_ticket" --arg engine "$pick_engine" --arg model "$cmodel" --arg result "$res" --argjson runner "$n" --arg reason "$reason" --arg state "$state" --arg detail "$ledger_detail" --arg source "${pick_source:-}" --argjson progress "$progress" --arg transcript "$(basename "${TRANSCRIPT_FILE:-}")" \
         '{ts:$ts,runner:$runner,ticket:$ticket,engine:$engine,model:$model,result:$result,reason:$reason,state:$state,detail:$detail,source:$source,progress:$progress,transcript:$transcript}' >> "$STATE/run-ledger.jsonl" 2>/dev/null || true
       if [ "$state" != BUILDING ] && [ "$progress" -eq 0 ]; then note_empty_run "$pick_ticket" "$state" "$detail" "$progress" "${pick_source:-}"; fi
       echo "$res" > "$STATE/runner-$n.result"

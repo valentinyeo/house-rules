@@ -1473,12 +1473,29 @@ def pr_checks_pending(key, t=None):
     ONE_RUN_FLAG: parks 10:49 and 11:01 UTC on 13 Nov (HYCI-352, HYCI-358) were 60 and 75 second runs on exactly this. Fails open.
     `t`: the ticket, so a Software Factory ticket's PR in its own app repo counts too (SOFT-2166, 13 Nov 17:01)."""
     try:
-        for p in open_prs() + sf_open_prs(t):
+        prs = open_prs() + sf_open_prs(t)
+        if not any(pr_ticket(p) == key for p in prs) and just_waited(key):
+            # The run ended on a PR it opened a minute ago, but the shared PR copy is up to ten minutes old and does not list it.
+            # The park job then started on a PR nobody could see (13 Nov: HTPR-9099 18:01, HTPR-9106 18:33, HTPR-9130 19:47).
+            prs = open_prs(fresh=True) + sf_open_prs(t)
+        for p in prs:
             if pr_ticket(p) == key and one_run_state(p) == ("pending", True):
                 return True
     except Exception:
         pass
     return False
+
+
+def just_waited(key, now=None):
+    """Did this ticket's latest run end WAIT_CHECK (a PR with running checks) in the last JUST_WAITED_S?"""
+    now = now or time.time()
+    last = next((r for r in reversed(ledger_rows()) if r.get("ticket") == key and r.get("state") in ("WAIT_CHECK", "PARKED", "BUILDING")), None)
+    if not last or last.get("state") != "WAIT_CHECK":
+        return False
+    try:
+        return now - dt.datetime.strptime(last["ts"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp() < JUST_WAITED_S
+    except (KeyError, ValueError, TypeError):
+        return False
 
 
 def one_run_hold(dry, now=None):
@@ -1987,6 +2004,8 @@ def try_claim(n, t, source, dry):
 
 PRS_CACHE = STATE / "open-prs.json"
 PRS_FRESH_S, PRS_STALE_S = 600, 900
+PRS_JUST_S = 30  # a PR list this young already shows a PR that a run opened before it ended
+JUST_WAITED_S = 30 * 60  # a run that ended WAIT_CHECK this recently opened or pushed its PR in that run
 
 
 def open_prs_rest(tok, why):
@@ -2025,19 +2044,22 @@ def gate_checks(checks):
     return ["finished"] + failed
 
 
-def open_prs():
-    """Every open PR to production on hypertask-ai/hypertask, read once per pick. One GitHub read serves every
+def open_prs(fresh=False):
+    """`fresh`: a ticket's run just ended on a PR it opened (pr_checks_pending), so the shared ten-minute copy may predate that PR;
+    a copy older than PRS_JUST_S is read again. Every open PR to production on hypertask-ai/hypertask, read once per pick. One GitHub read serves every
     runner's pick for PRS_FRESH_S, the same ten minutes fleet/pr-snapshot writes its copy; on a failed read (the
     App's GraphQL limit ran out on 2026-11-10 and every pick stopped) a copy up to PRS_STALE_S old stands in.
     SNAP["prs_at"] is when the list was read. Besides the title, branch and red flag, each PR carries its head commit, review
     decision, mergeable state and check states: the wait gate (wait_gate) fingerprints them at no extra GitHub call."""
+    if fresh and SNAP["prs"] is not None and time.time() - (SNAP.get("prs_at") or 0) >= PRS_JUST_S:
+        SNAP["prs"] = None
     if SNAP["prs"] is None:
         try:
             cached = json.loads(PRS_CACHE.read_text())
             age = time.time() - cached["at"]
         except (OSError, ValueError, KeyError, TypeError):
             cached, age = None, None
-        if cached and age < PRS_FRESH_S:
+        if cached and age < (PRS_JUST_S if fresh else PRS_FRESH_S):
             SNAP["prs"], SNAP["prs_at"] = cached["prs"], cached["at"]
             return SNAP["prs"]
         tok = subprocess.run(["gh-app-token"], capture_output=True, text=True).stdout.strip()
@@ -3125,6 +3147,29 @@ def one_run_self_test():
             SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "prs": [pr(1, "HTPR-1", **extra)], "incidents": []}
             assert not pr_checks_pending("HTPR-1"), f"{why}: a model has work, park job allowed"
         assert not pr_checks_pending("HTPR-2"), "another ticket's PR is not this ticket's wait"
+        # A run that ended WAIT_CHECK on a PR opened under a minute ago: the shared copy does not list it, so read the list again
+        # (13 Nov: park jobs 36s after HTPR-9099, HTPR-9106 and HTPR-9130 ended WAIT_CHECK, each a 90 to 240s model run for nothing).
+        saved_ledger, saved_open_fresh, reads = list(_LEDGER), globals()["open_prs"], []
+
+        def open_prs_late(fresh=False):
+            reads.append(fresh)
+            return [pr(1, "HTPR-1", ("ci=IN_PROGRESS",))] if fresh else []
+
+        stamp = lambda secs: (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            globals()["open_prs"] = open_prs_late
+            _LEDGER[:] = [[{"ticket": "HTPR-1", "state": "WAIT_CHECK", "ts": stamp(40)}]]
+            assert pr_checks_pending("HTPR-1") and reads == [False, True], f"stale copy, run ended WAIT_CHECK 40s ago: read again ({reads})"
+            for why, rows in (("a WAIT_CHECK older than 30 minutes", [{"ticket": "HTPR-1", "state": "WAIT_CHECK", "ts": stamp(JUST_WAITED_S + 60)}]),
+                              ("the latest run ended PARKED", [{"ticket": "HTPR-1", "state": "WAIT_CHECK", "ts": stamp(300)},
+                                                               {"ticket": "HTPR-1", "state": "PARKED", "ts": stamp(40)}]),
+                              ("no run on the ledger", [])):
+                reads.clear()
+                _LEDGER[:] = [rows]
+                assert not pr_checks_pending("HTPR-1") and reads == [False], f"{why}: no extra read, a model parks it ({reads})"
+        finally:
+            _LEDGER[:] = saved_ledger
+            globals()["open_prs"] = saved_open_fresh
         _SF_PRS["/x/sf"] = [pr(7, "SOFT-9", ("ci=IN_PROGRESS",))]
         _sf_orig = sf_repo
         globals()["sf_repo"] = lambda t: "/x/sf"

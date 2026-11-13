@@ -259,7 +259,41 @@ def _arg(name, default=""):
     return default
 
 
+PARK_WHY = re.compile(r"park|block|wait|\bred\b|fail|cannot|can't|nothing|untouched|already|duplicate|checks|ci\b|hand|slice|step", re.I)
+PARK_NOISE = re.compile(r"^(?:parked [A-Z]+-\d+|detail |connection lost|retry attempt|chat listen|the (?:runner )?chat listener|gates:|blocker:|decisions?:)", re.I)
+
+
+def park_reason(text, limit=160):
+    """Why a run ended PARKED, in the model's own words (13 Nov: 28 PARKED rows, none with a reason, so nobody could say why).
+    The last line before the final `PARKED KEY` line that reads like a reason, markdown stripped. A run that wrote nothing before
+    it says so: that is itself the finding."""
+    lines = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", l).strip() for l in (text or "").splitlines()]
+    end = next((i for i in range(len(lines) - 1, -1, -1) if PARKED_LINE.search(lines[i]) and lines[i].startswith("PARKED")), None)
+    if end is None:
+        return ""
+    cleaned = []
+    for l in lines[:end]:
+        l = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", l)
+        l = re.sub(r"[*`#]+", "", l)
+        l = re.sub(r"^(?:[-+]|\d+\.)\s+", "", l).strip()
+        if l and not PARK_NOISE.match(l):
+            cleaned.append(l)
+    cleaned = cleaned[-10:]
+    if not cleaned:
+        return "no reason written"
+    why = next((l for l in reversed(cleaned) if PARK_WHY.search(l)), cleaned[-1])
+    return why[:limit]
+
+
 def self_test():
+    log = ("\x1b[1mwork\x1b[0m\n- Boundary fix pushed. Nothing deployed.\n- Parked pending [CI repair](https://x/y/390).\n"
+           "- Demo removal remains.\n\nPARKED SOFT-1\n")
+    assert park_reason(log) == "Parked pending CI repair.", park_reason(log)
+    assert park_reason("PARKED HTPR-1\n") == "no reason written", "a bare PARKED line says so"
+    assert park_reason("1. **Why:** the PR is red.\nConnection lost, reconnecting (attempt 1)...\nPARKED HTPR-2The chat listener stopped.\n") == "Why: the PR is red.", \
+        "noise lines are skipped and a glued suffix on the PARKED line does not matter"
+    assert park_reason("no final line here") == "", "no PARKED line: nothing to add"
+    assert len(park_reason("x" * 400 + " parked\nPARKED K-1")) == 160
     human = classify("RUNNER IDLE waiting on Valentin flag approval", 0, 600, "", 0, "HTPR-1")
     assert human["state"] == "FAULT" and human["park"] == "lead", human
     assert "unknown state" in human["detail"] and "flag approval" in human["detail"], human
@@ -418,6 +452,13 @@ def main():
             body = ""
         print(pr_progress(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", body), float(_arg("--since", "0") or 0)))
         return
+    if "--park-reason" in sys.argv:
+        try:
+            body = Path(_arg("--log")).read_text(errors="replace")
+        except OSError:
+            body = ""
+        print(park_reason(body))
+        return
     if "--redact" in sys.argv:
         sys.stdout.write(redact(sys.stdin.read()))
         return
@@ -427,7 +468,7 @@ def main():
                        overload=_arg("--overload", "0") == "1")
         print(json.dumps(row))
         return
-    sys.exit("usage: fleet/runner-state.py --classify | --pick-fail | --refs | --progress | --redact | --self-test")
+    sys.exit("usage: fleet/runner-state.py --classify | --pick-fail | --refs | --progress | --park-reason | --redact | --self-test")
 
 
 if __name__ == "__main__":
