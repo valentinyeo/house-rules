@@ -1083,19 +1083,21 @@ def focus_projects(n):
     return {p.lower() for p in f.get("projects", [])}
 
 
-def project_load():
+def project_load(group=None):
     """Valentin 2026-11-12: "make sure all projects get an equal share IF they have tickets". Per project: tickets in
-    its building columns now, then runs on its tickets in the last 24 hours. New work goes to the least loaded first."""
+    its building columns now, then runs on its tickets in the last 24 hours. New work goes to the least loaded first.
+    Valentin 2026-11-13: "HyperTask and Software Factory need an equal share": group=board sums the same measure per board."""
+    of = group or project
     by_key = {t["key"]: t for t in SNAP["tickets"]}
     load = defaultdict(lambda: [0, 0])
     for t in SNAP["tickets"]:
         if t["section"] in BOARDS[t["board"]][1]:
-            load[project(t)][0] += 1
+            load[of(t)][0] += 1
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
     for r in ledger_rows():
         t = by_key.get(r.get("ticket") or "")
         if t and str(r.get("ts", "")) >= since:
-            load[project(t)][1] += 1
+            load[of(t)][1] += 1
     return load
 
 
@@ -2466,8 +2468,8 @@ def choose(n, dry):
         if t:
             return t, "ci-lane"
     if not frozen:
-        load = project_load()
-        t = attempt(sorted(app_new, key=lambda t: (tuple(load[project(t)]), rank(t), BOARD_ORDER[t["board"]], t["created"])))
+        load, board_load = project_load(), project_load(lambda t: t["board"])
+        t = attempt(sorted(app_new, key=lambda t: (tuple(board_load[t["board"]]), tuple(load[project(t)]), rank(t), BOARD_ORDER[t["board"]], t["created"])))
         if t:
             return t, "board"
     if not full():
@@ -2603,6 +2605,13 @@ def fair_self_test():
     assert project(SNAP["tickets"][2]) == "triage" and project(SNAP["tickets"][0]) == "15"
     assert tuple(load["triage"]) < tuple(load["15"]) and tuple(load["triage"]) < tuple(load["multiprompt"]), \
         "a project with nothing in work goes before projects already being built"
+    # 13 Nov: boards share equally first; board 15 (one project) beats an idle SF app while board 2060 carries more load
+    SNAP["tickets"][:] = [tk("HTPR-2", "15", "In Progress"), tk("IGSH-2", "2060", "Doing", ["Multiprompt"]),
+                          tk("IGSH-3", "2060", "Doing", ["Chromescribe"]), tk("HTPR-3", "15", "Todo"), tk("IGSH-1", "2060", "Todo", ["Triage"])]
+    load, bl = project_load(), project_load(lambda t: t["board"])
+    order = sorted(SNAP["tickets"][3:], key=lambda t: (tuple(bl[t["board"]]), tuple(load[project(t)])))
+    assert tuple(bl["15"]) < tuple(bl["2060"]) and tuple(load["triage"]) < tuple(load["15"]) and order[0]["key"] == "HTPR-3", \
+        "board 15 with less load than 2060 goes before an idle Software Factory app"
     _LEDGER.clear(); SNAP = saved
 
 
