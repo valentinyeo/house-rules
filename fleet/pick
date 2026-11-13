@@ -802,7 +802,7 @@ def resting(n, dry):
         if t.get("prio") == "Urgent" and not t["waiting"] and t["section"] != "Valentin Review" and (now - when).total_seconds() > URGENT_REST:
             continue
         rest.add(key)
-    return rest
+    return rest | set(waits_until(now))
 
 
 class Skip:
@@ -1034,6 +1034,36 @@ def ledger_rows():
             pass
         _LEDGER.append(rows)
     return _LEDGER[0]
+
+
+WAIT_STREAK = 3  # this many WAIT_CHECK ends (a crash may retry) on one ticket within WAIT_WINDOW: it rests WAIT_WINDOW from the last
+WAIT_WINDOW = 2 * 3600
+ISO_AT = re.compile(r"(20\d\d-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z?)")
+
+
+def waits_until(now=None):
+    """Tickets a run said wait to a time, or that keep ending WAIT_CHECK/FAULT, mapped to when they may be offered again.
+    Valentin 2026-11-13: 1,735 Codex runs 9 to 12 Nov, 105 built anything. HTPR-8863 said "recheck 2026-11-12T02:30Z" and
+    was woken 117 times on 11 Nov, every 3 minutes, because each run's own park note changed the ticket and lifted its rest.
+    A stated recheck time and a streak hold whatever the ticket's updates say."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    hold, ends = {}, defaultdict(list)
+    for r in ledger_rows():
+        key, when = r.get("ticket"), stamp_time(r.get("ts", ""))
+        if not key or not when or (now - when).total_seconds() > REST_MAX or r.get("state") not in ("WAIT_CHECK", "FAULT"):
+            continue
+        if r.get("state") == "WAIT_CHECK":
+            ends[key].append(when)
+        for iso in ISO_AT.findall(str(r.get("reason", "")) + " " + str(r.get("detail", ""))):
+            at = stamp_time(iso if iso.endswith("Z") else iso + "Z")
+            if at and when < at and (at - when).total_seconds() <= REST_MAX:
+                hold[key] = max(hold.get(key, at), at)
+    for key, times in ends.items():
+        recent = [t for t in times if (now - t).total_seconds() < WAIT_WINDOW]
+        if len(recent) >= WAIT_STREAK:
+            until = max(recent) + dt.timedelta(seconds=WAIT_WINDOW)
+            hold[key] = max(hold.get(key, until), until)
+    return {k: v for k, v in hold.items() if v > now}
 
 
 def opencode_timed_out(key):
@@ -2044,6 +2074,26 @@ def fair_self_test():
     _LEDGER.clear(); SNAP = saved
 
 
+def wait_self_test():
+    now = dt.datetime(2026, 11, 11, 12, 0, tzinfo=dt.timezone.utc)
+    at = lambda m: (now - dt.timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    saved = list(_LEDGER)
+    _LEDGER[:] = [[{"ticket": "HTPR-1", "ts": at(5), "state": "WAIT_CHECK", "reason": "RUNNER IDLE recheck 2026-11-12T02:30Z"},
+                   {"ticket": "HTPR-2", "ts": at(30), "state": "WAIT_CHECK", "reason": "ci-pending"},
+                   {"ticket": "HTPR-2", "ts": at(20), "state": "WAIT_CHECK", "reason": "x"},
+                   {"ticket": "HTPR-2", "ts": at(10), "state": "WAIT_CHECK", "reason": "ci-pending"},
+                   {"ticket": "HTPR-3", "ts": at(10), "state": "WAIT_CHECK", "reason": "ci-pending"},
+                   {"ticket": "HTPR-4", "ts": at(10), "state": "WAIT_CHECK", "reason": "until 2026-11-11T11:00Z"}]]
+    try:
+        h = waits_until(now)
+    finally:
+        _LEDGER[:] = saved
+    assert h.get("HTPR-1") == dt.datetime(2026, 11, 12, 2, 30, tzinfo=dt.timezone.utc), "a stated recheck time holds the ticket"
+    assert "HTPR-2" in h, "three waits in two hours rest the ticket two hours"
+    assert "HTPR-3" not in h, "one wait alone keeps the old rest rules"
+    assert "HTPR-4" not in h, "a recheck time already past holds nothing"
+
+
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
@@ -2166,6 +2216,7 @@ def self_test():
     park_count_self_test()
     escalate_self_test()
     fair_self_test()
+    wait_self_test()
     print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes")
 
 
