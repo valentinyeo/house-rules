@@ -2099,6 +2099,11 @@ def factory_stopped():
     if not isinstance(rec, dict):
         return "unreadable stop record"
     if rec.get("cleared"):
+        cleared = rec["cleared"]
+        if not isinstance(cleared, dict) or any(
+            not isinstance(cleared.get(field), str) or not cleared[field].strip() for field in ("at", "by", "why")
+        ):
+            return "clear missing identity, time or reason"
         return ""
     by = rec.get("tripped_by")
     return ", ".join(str(x) for x in by) if isinstance(by, list) and by else "no rule named"
@@ -2153,10 +2158,34 @@ def busy_on_plan(n, plan):
             and ENGINES[runner_engine(m)]["plan"] == plan and running(m)]
 
 
+def factory_probe_allowed():
+    try:
+        rec = json.loads(FACTORY_STOP.read_text())
+        if not isinstance(rec, dict) or rec.get("cleared"):
+            return False
+        rules = rec.get("tripped_by")
+        if not isinstance(rules, list) or not rules or any(r not in ("R1", "R2", "R3", "R4") for r in rules):
+            return False
+        field = rec.get("probe") or {}
+        if not isinstance(field, dict):
+            return False
+        for at in (field.get("at"), rec.get("at")):
+            try:
+                if at and dt.datetime.fromisoformat(at.replace("Z", "+00:00")).tzinfo is not None:
+                    return True
+            except (AttributeError, TypeError, ValueError):
+                continue
+    except (OSError, ValueError):
+        pass
+    return False
+
+
 def probe_gate(n, why):
     """HYCI-359: a stop that idles every runner never fills the window its own clear reads, so the stop could only be lifted by
     hand. While it is active one runner per plan takes clean tickets as a probe; bin/factory-breaker clears the stop itself once
     those runs build 90% of 10. Under the line the stop holds."""
+    if not factory_probe_allowed():
+        raise SystemExit(f"none: factory stopped: {why}")
     log(f"factory stopped: {why}; probe: {PROBE_CAP} runner(s) per plan take clean tickets")
     busy = busy_on_plan(n, plan_of(n))
     if len(busy) >= PROBE_CAP:
@@ -2846,7 +2875,8 @@ def self_test():
     wait_gate_self_test()
     factory_stop_self_test()
     stage_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, probe and restart steps, "
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, test/unreadable stops hold all runners, "
+          "audited clears, factory stop, probe and restart steps, "
           "38 wait-gate checks")
 
 
@@ -2898,6 +2928,34 @@ def factory_stop_self_test():
         RUNNING.clear()
         RUNNING.update({m: None for m in engines})
         try:
+            stopped_payloads = ["{not json", "[]", "null"] + [
+                json.dumps({"at": "2026-11-13T09:00:00Z", "tripped_by": rules, "cleared": None})
+                for rules in (["TEST"], ["UNREADABLE"], ["R1", "TEST"], ["unknown"], [], None, "R1")
+            ] + [
+                json.dumps({"at": at, "tripped_by": ["R2"], "cleared": None})
+                for at in (None, "not a timestamp", "2026-11-13T09:00:00", 123)
+            ] + [json.dumps({"at": "2026-11-13T09:00:00Z", "tripped_by": ["R2"], "probe": "invalid"})] + [
+                json.dumps({"at": "2026-11-13T09:00:00Z", "tripped_by": ["R2"], "cleared": cleared})
+                for cleared in (True, "yes", {"at": "now", "by": "runner"}, {"at": "now", "by": "runner", "why": " "},
+                                {"at": "now", "by": "", "why": "fixed"}, {"at": "", "by": "runner", "why": "fixed"})
+            ]
+            for payload in stopped_payloads:
+                tmp.write_text(payload)
+                lines.clear()
+                assert not factory_probe_allowed(), payload
+                for n in range(1, RUNNERS + 1):
+                    assert exit_msg(n) == f"none: factory stopped: {factory_stopped()}", (n, payload)
+                assert not lines, "a full stop never opens the probe or reads ticket lanes"
+                globals()["incident_step"] = lambda n, dry: ({"key": "I-1"}, "incident")
+                try:
+                    assert choose(5, True)[1] == "incident", "a full stop still permits incidents"
+                finally:
+                    globals()["incident_step"] = lambda n, dry: None
+            for rule in ("R1", "R2", "R3", "R4"):
+                tmp.write_text(json.dumps({"at": "2026-11-13T09:00:00Z", "tripped_by": [rule], "cleared": None}))
+                assert factory_probe_allowed(), rule
+            tmp.write_text(json.dumps({"at": "bad", "tripped_by": ["R1"], "probe": {"at": "2026-11-13T09:00:00Z"}}))
+            assert factory_probe_allowed(), "a valid probe timestamp can supply an older record's missing trip time"
             # Valentin 13 Nov, "one runner PER plan": the cap counts runners of the same plan in a run, not the runner number
             ramped(1)
             assert factory_ramp() == (1, 1) and not factory_stopped(), "a cleared step 1 record runs"
