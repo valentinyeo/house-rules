@@ -1128,7 +1128,8 @@ def gate_parts(key):
             except Exception as e:
                 log(f"wait gate: open PR list unreadable ({str(e)[:60]}); PR part not compared")
         if SNAP["prs"] is not None:
-            prs = sorted([p["number"], p.get("head"), p.get("review"), p.get("mergeable"), p.get("checks")]
+            # GitHub sets every open PR to UNKNOWN for a while after each push to its base: only CONFLICTING counts as news
+            prs = sorted([p["number"], p.get("head"), p.get("review"), p.get("mergeable") == "CONFLICTING", p.get("checks")]
                          for p in SNAP["prs"] if pr_ticket(p) == key)
     rel = SNAP.get("rel", {}).get(key)
     if rel is None:
@@ -2431,6 +2432,10 @@ def wait_gate_self_test():
             assert held() == set(), f"{why} lifts the hold"
             SNAP["prs"][0][field] = pr(1, "HTPR-1")[field]
             assert held() == set(), "the lift stays when the fingerprint flips back"
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        held()
+        SNAP["prs"][0]["mergeable"] = "UNKNOWN"
+        assert held() == {"HTPR-1"}, "GitHub recomputing mergeable after a push to base is not a change"
         # ticket updated
         fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
         held()
@@ -2631,7 +2636,7 @@ def self_test():
     wait_self_test()
     wait_gate_self_test()
     factory_stop_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, 28 wait-gate checks")
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, 33 wait-gate checks")
 
 
 def factory_stop_self_test():
@@ -2870,6 +2875,19 @@ def wip_self_test():
     log = capture
     try_claim = lambda n, t, source, dry: claimed.append((t["key"], source)) or True
 
+    def gate_rows(*keys):
+        """The run ledger says each key's last run ended waiting on a review a minute ago; no keys clears the ledger."""
+        _LEDGER.clear()
+        _LEDGER.append([{"ticket": k, "ts": iso(0.02), "state": "WAIT_CHECK", "reason": "RUNNER IDLE waiting on human review",
+                         "detail": ""} for k in keys])
+        _GATE.clear()
+
+    def picked(n):
+        try:
+            return choose(n, True)[0]["key"]
+        except SystemExit:
+            return None
+
     def set_members(board, names):
         """The miss re-read loads members.json. Keep that file and the memory the same, or the test joins the live board."""
         LOGGED.clear()
@@ -2891,9 +2909,15 @@ def wip_self_test():
         SNAP["open"]["HYCI-1"] = True
         t, source = choose(2, True)
         assert source == "orphan" and t["key"] in ("HTPR-20", "HTPR-29"), (t["key"], source)
+        gate_rows("HTPR-20", "HTPR-29")
+        assert picked(2) not in ("HTPR-20", "HTPR-29"), "wait gate: the orphan lane leaves a gated ticket"
+        gate_rows()
         SNAP["tickets"] = [x for x in tickets if x["key"] not in ("HTPR-20", "HTPR-23", "HTPR-29")]
         t, source = choose(2, True)
         assert (t["key"], source) == ("HTPR-25", "pr"), (t["key"], source, "closed: a new-work ticket with an open PR is finished, not started")
+        gate_rows("HTPR-25")
+        assert picked(2) != "HTPR-25", "wait gate: the PR queue leaves a gated ticket"
+        gate_rows()
         SNAP["tickets"].append(tk("HTPR-31", "In Progress", "runner 1"))
         SNAP["prs"] = [pr(999991, "HTPR-21")]
         try:
@@ -2937,6 +2961,9 @@ def wip_self_test():
         assert choose(1, True) == (ci[1], "kept-slot"), "cap hit: a checks ticket an open ticket waits on still goes out"
         SNAP["rel"]["HYCI-3"] = [[], []]
         assert choose(1, True) == (ci[0], "kept-slot"), "cap hit: the kept slot still takes a plain checks ticket"
+        gate_rows("HYCI-2")
+        assert picked(1) != "HYCI-2", "wait gate: the kept slot leaves a gated ticket"
+        gate_rows()
         (STATE / "runner-2.log").write_text(f"{iso(0.05)} cursor: HYCI-2 composer-2.5 medium\n")
         RUNNING.clear()
         slot_logs.clear()
