@@ -14,6 +14,7 @@ HERE=$(dirname "$(readlink -f "$0")")
 SELF=$(readlink -f "$0")
 PICK_GATE=$HERE/tool-gate.py
 SESS_PFX=${FLEET_RUNNER_SESS_PREFIX:-ht-or-runner}
+START_PAUSE=${FLEET_RUNNER_START_PAUSE:-20}
 sess_name() { echo "${SESS_PFX}-$1"; }
 FIRST=${FLEET_RUNNER_FIRST:-1}
 LAST=${FLEET_RUNNER_LAST:-}
@@ -327,10 +328,19 @@ green() {
   [ "$avail" -gt 24 ]
 }
 
+# A slot is live only while one of its own pane processes runs. Its tmux session says nothing: a pane that fell back to a
+# shell after the loop quit kept the slot counted as running and the tick never started it, so a slot the pacer turned on
+# stayed dead for minutes (HYCI-362). A drill-idle pane is one of our own too.
+loop_pid() { pgrep -f -- "$SELF $1 --" 2>/dev/null | head -1; }
+
 start_one() {
   local n=$1 sess
   sess=$(sess_name "$n")
-  tmux has-session -t "=$sess" 2>/dev/null && { echo "running: $sess"; return 0; }
+  if [ -n "$(loop_pid "$n")" ]; then echo "running: $sess"; return 0; fi
+  if tmux has-session -t "=$sess" 2>/dev/null; then
+    tmux kill-session -t "=$sess" 2>/dev/null
+    log "restart: $sess had a session and no loop"
+  fi
   if [ "${FLEET_RUNNER_DRILL:-}" = 1 ]; then
     tmux new-session -d -s "$sess" -c "$HOME" "$SELF $n --drill-idle" || return 1
     tmux select-pane -t "$sess" -T "DRILL $n"
@@ -552,18 +562,78 @@ case "${1:-}" in
     expect 'a renewed login puts the slot back on Pi' "$(harness 1 codex)" pi-codex
     [ "$bad" = 0 ] && echo 'fleet/runner harness self-test ok'
     exit "$bad" ;;
+  loop-selftest)
+    # Proved without a model call or a real runner: a slot whose session outlived its loop is restarted, a live slot is left
+    # alone, a stopped slot is not touched, and status names the dead ones (HYCI-362).
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    mkdir -p "$tmp/bin" "$tmp/state"
+    cat > "$tmp/bin/pgrep" <<'PG'
+#!/usr/bin/env bash
+for a in "$@"; do p=$a; done
+for n in $(cat "$FAKE_LOOPS" 2>/dev/null); do case $p in *"runner $n --"*) echo 4242; exit 0 ;; esac; done
+exit 1
+PG
+    cat > "$tmp/bin/tmux" <<'TM'
+#!/usr/bin/env bash
+echo "$*" >> "$FAKE_TMUX_LOG"
+s=${3#=}
+case $1 in
+  has-session) grep -qx -- "$s" "$FAKE_SESSIONS" 2>/dev/null && exit 0 || exit 1 ;;
+  new-session) printf '%s\n' "${4#=}" >> "$FAKE_SESSIONS" ;;
+  kill-session) grep -vx -- "$s" "$FAKE_SESSIONS" > "$FAKE_SESSIONS.t" 2>/dev/null; mv "$FAKE_SESSIONS.t" "$FAKE_SESSIONS" ;;
+  list-sessions) cat "$FAKE_SESSIONS" 2>/dev/null ;;
+esac
+exit 0
+TM
+    chmod +x "$tmp/bin/pgrep" "$tmp/bin/tmux"
+    bad=0
+    expect() { [ "$2" = "$3" ] || { echo "loop self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    run() { # $1 loops, $2 sessions, then stop files
+      : > "$FAKE_TMUX_LOG"; printf '%s\n' "$1" > "$FAKE_LOOPS"; printf '%s\n' "$2" > "$FAKE_SESSIONS"
+      shift 2; rm -f "$tmp/state"/stop-*; for i in "$@"; do : > "$tmp/state/stop-$i"; done
+      printf '1\n' > "$tmp/state/pace-cap"; printf '1\n' > "$tmp/state/target"
+      FLEET_RUNNER_STATE=$tmp/state FLEET_RUNNER_FIRST=1 FLEET_RUNNER_LAST=3 FLEET_RUNNER_SKIP_GREEN=1 FLEET_RUNNER_DRILL=1 \
+        FLEET_RUNNER_START_PAUSE=0 FLEET_WATCH_STATE=$tmp/fw PATH="$tmp/bin:$PATH" "$SELF" tick >/dev/null 2>&1
+    }
+    export FAKE_LOOPS="$tmp/loops" FAKE_SESSIONS="$tmp/sessions" FAKE_TMUX_LOG="$tmp/tmux.log"
+    # slot 1: session alive, loop gone (the HYCI-362 fault). Target is 1, so it is the slot that must come back.
+    printf 'ht-or-runner-1\n' > "$FAKE_SESSIONS"
+    run '' ht-or-runner-1
+    expect 'a dead loop is killed and started' "$(grep -c 'new-session.*ht-or-runner-1' "$tmp/tmux.log")" 1
+    grep -q 'restart: ht-or-runner-1 had a session and no loop' "$tmp/state/keeper.log" \
+      || { echo 'loop self-test FAILED: no restart line in keeper.log' >&2; bad=1; }
+    # a live loop is left alone
+    run 1 ht-or-runner-1
+    expect 'a live slot is not touched' "$(grep -c 'new-session\|kill-session' "$tmp/tmux.log")" 0
+    # a stopped slot stays stopped; the free slot fills the target instead
+    run '' ht-or-runner-1 1
+    expect 'a stopped slot is not restarted' "$(grep -c 'new-session.*ht-or-runner-1' "$tmp/tmux.log")" 0
+    expect 'the free slot fills the target' "$(grep -c 'new-session.*ht-or-runner-2' "$tmp/tmux.log")" 1
+    # status names the slot that is on with no loop, and says nothing when every slot on has one
+    rm -f "$tmp/state"/stop-*; printf '1\n' > "$tmp/state/target"; printf '2\n' > "$tmp/state/pace-cap"; printf 'ht-or-runner-1\n' > "$FAKE_SESSIONS"; : > "$FAKE_LOOPS"
+    FLEET_RUNNER_STATE=$tmp/state FLEET_RUNNER_FIRST=1 FLEET_RUNNER_LAST=2 FLEET_RUNNER_SKIP_GREEN=1 FLEET_WATCH_STATE=$tmp/fw \
+      PATH="$tmp/bin:$PATH" "$SELF" status 2>/dev/null | grep -qx 'on but no loop: 1 ' \
+      || { echo 'loop self-test FAILED: status does not name the dead slot' >&2; bad=1; }
+    printf '1\n2\n' > "$FAKE_LOOPS"
+    FLEET_RUNNER_STATE=$tmp/state FLEET_RUNNER_FIRST=1 FLEET_RUNNER_LAST=2 FLEET_RUNNER_SKIP_GREEN=1 FLEET_WATCH_STATE=$tmp/fw \
+      PATH="$tmp/bin:$PATH" "$SELF" status 2>/dev/null | grep -q 'on but no loop' \
+      && { echo 'loop self-test FAILED: status flags a slot that runs' >&2; bad=1; }
+    [ "$bad" = 0 ] && echo 'fleet/runner loop self-test ok'
+    exit "$bad" ;;
   top-up)
     exec 9>"$STATE/.keeper.lock"; flock -n 9 || exit 0
     [ -f "$STATE/PAUSED" ] && exit 0
     validate_targets || exit 2
-    live=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | awk -v p="$SESS_PFX" '$0 ~ "^"p"-[0-9]+$" {n++} END {print n+0}')
+    # Only a live loop counts as a running slot (HYCI-362); a session that outlived its loop is a dead slot.
+    live=0
+    for n in $(seq $FIRST $LAST); do [ -n "$(loop_pid "$n")" ] && live=$((live+1)); done
     started=0
     for n in $(seq $FIRST $LAST); do
       [ "$live" -ge "$t" ] && break
-      tmux has-session -t "=$(sess_name "$n")" 2>/dev/null && continue
       [ -f "$STATE/stop-$n" ] && continue
+      [ -n "$(loop_pid "$n")" ] && continue
       [ "$started" -ge 2 ] && break
-      if green; then start_one "$n" && { started=$((started+1)); live=$((live+1)); sleep 20; } || break
+      if green; then start_one "$n" && { started=$((started+1)); live=$((live+1)); sleep "$START_PAUSE"; } || break
       else log "hold: $GREEN_WHY"; break; fi
     done
     [ -e "$STATE/last-start" ] || touch "$STATE/last-start"
@@ -579,6 +649,8 @@ case "${1:-}" in
       left=$(provider_busy_left "$p"); [ "${left:-0}" -gt 0 ] && echo "provider busy: $p ${left}s left"
     done; green && echo "green: $GREEN_WHY" || echo "not green: $GREEN_WHY"
     [ -f "$STATE/PAUSED" ] && echo "PAUSED"
+    dead=$(for i in $(seq $FIRST "$(target)"); do [ -f "$STATE/stop-$i" ] && continue; [ -n "$(loop_pid "$i")" ] || printf '%s ' "$i"; done)
+    [ -n "$dead" ] && echo "on but no loop: $dead"
     tmux ls 2>/dev/null | grep "^${SESS_PFX}-" || echo "no runner sessions" ;;
   stop-all)
     for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep "^${SESS_PFX}-"); do tmux kill-session -t "$s"; echo "stopped $s"; done ;;
@@ -596,7 +668,7 @@ case "${1:-}" in
       printf '%s\n' "$out" | tail -5
       grep -q RUNNER_LAUNCH_OK <<< "$out" && echo "launch-check ok: $eng $model $effort" || { echo "launch-check FAILED: exit $rc"; exit 1; }
     fi ;;
-  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | reply-cap-selftest | fail-tail-selftest | transcript-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
+  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | reply-cap-selftest | loop-selftest | fail-tail-selftest | transcript-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
   *)
     n=$1
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }

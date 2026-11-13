@@ -1,8 +1,8 @@
 [Unit]
-Description=Fleet runner tick every 10 minutes
+Description=Fleet runner tick every 2 minutes (a slot turned on starts within 5, HYCI-362)
 
 [Timer]
-OnCalendar=*:0/10
+OnCalendar=*:0/2
 Persistent=true
 Unit=fleet-runner-tick.service
 
