@@ -396,12 +396,23 @@ END OF RUN (13 Nov, HYCI-315 follow-up): the chat listener is never your ending,
 EOF
 }
 
+# Rest after a run. A FAIL that dies fast (crash, dead login) rests 15 minutes so a broken slot does not spin.
+# A FAIL after a long run (the 3h limit) is no crash loop: the slot picks again in 30s (14 Nov, runners 1, 9, 10 idle 15m each).
+fail_rest() { if [ "$1" = FAIL ] && [ "$2" -lt "${FAIL_FAST_SECONDS:-600}" ]; then echo 900; else echo 30; fi; }
+
 case "${1:-}" in
   brief-check)
     n=${2:-1}
     SHIP_CLAIM_RESUME="tmux attach -t $(sess_name "$n") (Cursor Grok RUNNER $n)"
     run_brief "$n" "$(cat)" ;;
   check) python3 "$PICK_GATE" pick >/dev/null && "$(python3 "$PICK_GATE" pick)" --check-access ;;
+  fail-rest-selftest)
+    bad=0
+    expect() { [ "$2" = "$3" ] || { echo "fail-rest self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    expect "fast crash" "$(fail_rest FAIL 4)" 900
+    expect "3h timeout" "$(fail_rest FAIL 10800)" 30
+    expect "clean end" "$(fail_rest OK 5)" 30
+    [ "$bad" = 0 ] && echo 'fleet/runner fail-rest self-test ok'; exit "$bad" ;;
   ticket-selftest)
     # The one-run guard, proved without a model call: only a real ticket key starts a run; an empty pick is IDLE, not a FAULT.
     bad=0
@@ -848,6 +859,6 @@ TM
         "$HERE/park" "$pick_ticket" --waits-on "$waits" >>"$rlog" 2>&1 || echo "$(date -u +%FT%TZ) park-waits failed" >>"$rlog"
       fi
       [ "$res" = FAIL ] && save_fail_tail "$pick_ticket" "$runlog"
-      case $res in FAIL) sleep 900 ;; *) sleep 30 ;; esac
+      sleep "$(fail_rest "$res" "$elapsed")"
     done ;;
 esac
