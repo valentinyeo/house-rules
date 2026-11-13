@@ -114,7 +114,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Agent-to-agent talk goes in the agent lane, never in people comments. Agent lane = `vcc activity add` (or your fleet's agent log). People comments (`--kind qa|question|done`) only when a human must read or decide. (2026-10-27, why: "agent chatter can go into the agent lane")
 - Chat replies use caveman only; no other output style (no Concise, no ADHD). Max 5 short lines per reply unless asked to explain. Restating state = one short line. (2026-10-25, why: "remove all other output style rules")
 - Chat replies use short bullet points, one fact each. (2026-10-25, why: Valentin asked "yea" to bullets)
-- Shipping and status updates use `/shipping-update`: pace verdict first, live highlights with links, then CI, PRs, runners. Every fleet. (2026-10-29, why: "i like this update a lot")
+- Shipping and status updates use `/shipping-update`. Runs against built first, per plan: `fleet/yield`. Then pace verdict, live highlights with links, then CI, PRs, runners. Every fleet. (2026-10-29, why: "i like this update a lot"; 2026-11-13: 1,871 Codex runs built 105, updates said "runners picked")
 - Every Claude session uses the official caveman plugin `caveman@caveman` (marketplace JuliusBrussee/caveman); no hand-copied caveman skills. Codex and hax follow the same caveman rules from this file. (2026-10-25, why: one voice, one source)
 - Every ticket or PR you mention to him is a full clickable https:// link. (2026-10-25, why: he clicks, never searches IDs)
 - Slack: reply only inside the starting thread (`slack-say <name> --thread <ts>`). Never a new top message for a reply. Every fleet. (2026-10-30, why: "use slack threads like above")

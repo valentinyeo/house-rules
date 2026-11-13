@@ -37,6 +37,7 @@ For each runner: active (working a ticket now) or idle. For every idle one, name
 - Cross-check with `/hypertask-triage` step 0: its `idle`, `orphans` and `stale` lines must be OK when you finish.
 
 ## 4. Report
+First line, always: the output of `~/.local/share/house-rules/fleet/yield` (runs against built per plan). A RED plan comes before anything else, with what you did about it. Runner counts are motion, not results.
 
 Use the [shipping-update](../shipping-update/SKILL.md) shape. Add one "Runners" section: claude X/Y, hax X/Y on one line, then every runner in the [runner-list](../runner-list/SKILL.md) format. Idle ones carry their reason and what you did.
 
