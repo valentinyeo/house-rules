@@ -124,6 +124,18 @@ provider_busy_wait() {
 # watch and keep the 3h run limit alone.
 REPLY_CAP=${REPLY_CAP:-600}
 CAP_TICK=${CAP_TICK:-15}
+# A failed run's log is wiped by the next run (`: > "$runlog"`), so its error text was lost and about 190 week-one FAULTs
+# could not be explained afterwards. Keep the last lines of a FAIL run, redacted by runner-state.py --redact, local only
+# (mode 0600), newest 200 files. The ledger never carries this text.
+save_fail_tail() {
+  local ticket=$1 log=$2 dir="$STATE/fail-tail" f old
+  [ -s "$log" ] || return 0
+  mkdir -p "$dir" 2>/dev/null && chmod 700 "$dir" 2>/dev/null || return 0
+  f="$dir/$(date -u +%Y%m%dT%H%M%SZ)-runner-${n:-0}-${ticket:-none}.log"
+  ( umask 077; tail -n 20 "$log" | python3 "$HERE/runner-state.py" --redact > "$f" ) 2>/dev/null || return 0
+  ls -1t "$dir" 2>/dev/null | tail -n +201 | while read -r old; do rm -f "$dir/$old"; done
+  return 0
+}
 stall_mark() { echo "$STATE/stall-${n:-0}"; }
 pi_session_dir() { echo "$STATE/pi-session-${n:-0}/$(date +%s)"; }
 newest_beat() {
@@ -338,6 +350,36 @@ case "${1:-}" in
       | grep -q '"state": "FAULT"' || { echo 'provider-busy self-test FAILED: a plain crash no longer reads as a fault' >&2; bad=1; }
     [ "$bad" = 0 ] && echo 'provider-busy self-test ok'
     exit "$bad" ;;
+  fail-tail-selftest)
+    # Proved without a model call: a failed run's last lines are kept, key-like strings and ANSI are removed, the file is
+    # private, an empty log keeps nothing, and the folder keeps the newest 200 files.
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    STATE=$tmp; n=7; bad=0
+    expect() { [ "$2" = "$3" ] || { echo "fail-tail self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    : > "$tmp/empty.log"
+    save_fail_tail HYCI-1 "$tmp/empty.log"
+    expect 'an empty log keeps nothing' "$(ls "$tmp/fail-tail" 2>/dev/null | wc -l)" 0
+    { for i in $(seq 1 30); do echo "line $i"; done
+      printf '\033[31mError: 401 invalid_refresh_token\033[0m\n'
+      echo 'Authorization: Bearer abcDEF123456789xyz'
+      echo 'secret=supersecretvalue99'
+      echo 'key sk-abcdefghijklmnop1234'
+      echo 'jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig'; } > "$tmp/fail.log"
+    save_fail_tail HYCI-2 "$tmp/fail.log"
+    f=$(ls "$tmp/fail-tail"/*HYCI-2.log 2>/dev/null | head -1)
+    [ -n "$f" ] || { echo 'fail-tail self-test FAILED: no file written' >&2; bad=1; f=/dev/null; }
+    expect 'the file holds the last 20 lines' "$(wc -l < "$f")" 20
+    expect 'the error text is kept' "$(grep -c 'invalid_refresh_token' "$f")" 1
+    expect 'ANSI is removed' "$(grep -c $'\033' "$f")" 0
+    for leak in abcDEF123456789xyz supersecretvalue99 sk-abcdefghijklmnop1234 eyJhbGci; do
+      expect "'$leak' is removed" "$(grep -c "$leak" "$f")" 0
+    done
+    expect 'the file is private' "$(stat -c %a "$f" 2>/dev/null)" 600
+    for i in $(seq 1 210); do touch -d "@$((1700000000 + i))" "$tmp/fail-tail/old-$i.log"; done
+    save_fail_tail HYCI-3 "$tmp/fail.log"
+    expect 'the folder keeps 200 files' "$(ls "$tmp/fail-tail" | wc -l)" 200
+    [ "$bad" = 0 ] && echo 'fail-tail self-test ok'
+    exit "$bad" ;;
   harness-selftest)
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
     STATE=$tmp; PI_AUTH=$tmp/auth.json; export PI_AUTH HARNESS_DOWN_TTL=21600
@@ -409,7 +451,7 @@ case "${1:-}" in
       printf '%s\n' "$out" | tail -5
       grep -q RUNNER_LAUNCH_OK <<< "$out" && echo "launch-check ok: $eng $model $effort" || { echo "launch-check FAILED: exit $rc"; exit 1; }
     fi ;;
-  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | reply-cap-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
+  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | reply-cap-selftest | fail-tail-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
   *)
     n=$1
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
@@ -501,6 +543,7 @@ case "${1:-}" in
       elif [ "$park_mode" = "waits" ] && [ -n "$waits" ] && [ "$waits" != "null" ]; then
         "$HERE/park" "$pick_ticket" --waits-on "$waits" >>"$rlog" 2>&1 || echo "$(date -u +%FT%TZ) park-waits failed" >>"$rlog"
       fi
+      [ "$res" = FAIL ] && save_fail_tail "$pick_ticket" "$runlog"
       case $res in FAIL) sleep 900 ;; *) sleep 30 ;; esac
     done ;;
 esac

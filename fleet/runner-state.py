@@ -47,6 +47,26 @@ def _out(state, result, park="", waits="", detail=""):
     return {"state": state, "result": result, "park": park, "waits": waits, "detail": detail[:500]}
 
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+REDACTIONS = [
+    (re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}", re.I), r"\1 [redacted]"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]+){0,2}"), "[redacted-jwt]"),
+    (re.compile(r"\b(?:sk|pk|ghp|gho|ghs|github_pat|xox[a-z]|AKIA|op)[-_A-Za-z0-9]{12,}"), "[redacted-key]"),
+    (re.compile(r"((?:api[_-]?key|token|secret|passw(?:or)?d|authorization|refresh_token|access_token)[\"']?\s*[:=]\s*[\"']?)[^\s\"',;]{4,}", re.I), r"\1[redacted]"),
+    (re.compile(r"[A-Za-z0-9+/_=-]{40,}"), "[redacted-long]"),
+]
+
+
+def redact(text):
+    """The saved tail of a failed run: no ANSI, no key-like strings, lines cut to 300 characters."""
+    out = []
+    for line in ANSI_RE.sub("", text).splitlines():
+        for rx, sub in REDACTIONS:
+            line = rx.sub(sub, line)
+        out.append(line[:300])
+    return "\n".join(out) + ("\n" if out else "")
+
+
 def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
     """One ending. `park` is lead, waits, or empty. `waits` is comma-separated ticket keys.
 
@@ -199,6 +219,11 @@ def self_test():
     ]
     assert {row["state"] for row in day} == set(STATES), sorted(row["state"] for row in day)
     assert all(row["state"] in STATES for row in day)
+    dirty = "\x1b[31mErr 401\x1b[0m\nAuthorization: Bearer abcDEF123456789xyz\nsecret=hunter2hunter2\nk sk-abcdefghijklmnop1234\njwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig\n"
+    clean = redact(dirty)
+    assert "Err 401" in clean and "\x1b" not in clean, clean
+    for leak in ("abcDEF123456789xyz", "hunter2hunter2", "sk-abcdefghijklmnop1234", "eyJhbGci"):
+        assert leak not in clean, (leak, clean)
     runner = Path(__file__).with_name("runner").read_text()
     assert 'grep -q "RUNNER IDLE"' not in runner
     assert "unknown state" in runner and "flag approval" in runner
@@ -219,13 +244,16 @@ def main():
             append_ledger(ledger, row)
         print(json.dumps(row))
         return
+    if "--redact" in sys.argv:
+        sys.stdout.write(redact(sys.stdin.read()))
+        return
     if "--classify" in sys.argv:
         row = classify(_arg("--final"), int(_arg("--rc", "0")), int(_arg("--elapsed", "0")),
                        _arg("--stop"), int(_arg("--waited", "0")), _arg("--ticket"),
                        overload=_arg("--overload", "0") == "1")
         print(json.dumps(row))
         return
-    sys.exit("usage: fleet/runner-state.py --classify | --pick-fail | --self-test")
+    sys.exit("usage: fleet/runner-state.py --classify | --pick-fail | --redact | --self-test")
 
 
 if __name__ == "__main__":
