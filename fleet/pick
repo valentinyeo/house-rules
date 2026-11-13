@@ -36,6 +36,9 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
   e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 11514
   f. the rest of the CI or infra lane, same cap
+Restart in steps (HYCI-345): a stop cleared by bin/factory-breaker carries a ramp step. Step 1 lets one runner take work, step 2 three,
+step 3 all; the log line "factory restart step K/3: N runner(s)" names the cap and a runner past it gets
+"none: factory restart step K/3, N runner(s)". Steps are earned by 24 good hours, decided by bin/factory-breaker.
 One runner holds one ticket until it is live. brain-extra-hard runs on the codex engine (Sol high) or the claude engine (Opus high); every other engine skips it.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
@@ -106,6 +109,8 @@ ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/p
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
 # HYCI-342: bin/factory-breaker writes this record when burn, runs and merged PRs stop matching. Present and not cleared: only incidents go out.
 FACTORY_STOP = Path(os.environ.get("FLEET_FACTORY_STOP", HOME / ".local/state/fleet/factory-stop.json"))
+# HYCI-345: after a clear the pool comes back in steps (bin/factory-breaker walks them on 24 good hours); the picker holds the cap.
+RAMP_CAPS = (1, 3, None)
 
 # board -> (new-work columns, building columns)
 BOARDS = {
@@ -2026,6 +2031,26 @@ def factory_stopped():
     return ", ".join(str(x) for x in by) if isinstance(by, list) and by else "no rule named"
 
 
+def factory_ramp():
+    """(step, cap) after a clear: bin/factory-breaker walks 1 runner, then 3, then all on 24 good hours. No ramp field means
+    the pool was cleared before steps existed, so every runner takes work: a new rule never throttles a running pool."""
+    try:
+        rec = json.loads(FACTORY_STOP.read_text())
+    except (OSError, ValueError):
+        return len(RAMP_CAPS), None
+    cleared = rec.get("cleared") if isinstance(rec, dict) else None
+    if not cleared:
+        return len(RAMP_CAPS), None
+    field = cleared.get("ramp") or {}
+    step = field.get("step") if isinstance(field.get("step"), int) else len(RAMP_CAPS)
+    step = min(max(step, 1), len(RAMP_CAPS))
+    return step, RAMP_CAPS[step - 1]
+
+
+def ramp_line(step, cap):
+    return f"factory restart step {step}/{len(RAMP_CAPS)}: {'all runners' if cap is None else f'{cap} runner(s)'}"
+
+
 def choose(n, dry):
     hit = incident_step(n, dry)
     if hit:
@@ -2034,6 +2059,11 @@ def choose(n, dry):
     if why:
         log(f"factory stopped: {why}")
         raise SystemExit(f"none: factory stopped: {why}")
+    step, cap = factory_ramp()
+    if cap is not None:
+        log(ramp_line(step, cap))
+        if n > cap:
+            raise SystemExit(f"none: factory restart step {step}/{len(RAMP_CAPS)}, {cap} runner(s)")
     hand_back_timeouts(n, dry)
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
@@ -2667,11 +2697,12 @@ def self_test():
     wait_self_test()
     wait_gate_self_test()
     factory_stop_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, 38 wait-gate checks")
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop and restart steps, 38 wait-gate checks")
 
 
 def factory_stop_self_test():
-    """HYCI-342: an active stop record takes every ticket except incidents. Absent, cleared: runs."""
+    """HYCI-342: an active stop record takes every ticket except incidents. Absent, cleared: runs.
+    HYCI-345: a cleared record with a ramp step caps how many runners take work, and the log names the cap."""
     global FACTORY_STOP
     saved = FACTORY_STOP
     tmp = STATE / "factory-stop-test.json"
@@ -2679,12 +2710,16 @@ def factory_stop_self_test():
         FACTORY_STOP = tmp
         tmp.unlink(missing_ok=True)
         assert factory_stopped() == "", "no record: the factory runs"
+        assert factory_ramp() == (3, None), "no record: no cap"
         tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R1", "R3"], "cleared": None}))
         assert factory_stopped() == "R1, R3", "an active record names its rules"
+        assert factory_ramp() == (3, None), "a stopped record caps nothing: the stop already holds every runner"
         tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R1"], "cleared": {"at": "y", "by": "t", "why": "t"}}))
         assert factory_stopped() == "", "a cleared record: the factory runs"
+        assert factory_ramp() == (3, None), "a clear from before restart steps keeps every runner"
         tmp.write_text("{not json")
         assert factory_stopped() == "unreadable stop record", "an unreadable record stops the factory"
+        assert factory_ramp() == (3, None), "an unreadable record caps nothing"
         tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": None}))
         # choose() takes nothing: after the incident step, before any ticket work
         saved_inc = incident_step
@@ -2698,6 +2733,38 @@ def factory_stop_self_test():
         globals()["incident_step"] = lambda n, dry: ({"key": "I-1"}, "incident")
         assert choose(5, True)[1] == "incident", "a stopped factory still takes an incident"
         globals()["incident_step"] = saved_inc
+
+        def ramped(step):
+            tmp.write_text(json.dumps({"at": "x", "tripped_by": ["R2"], "cleared": {
+                "at": "y", "by": "t", "why": "t", "ramp": {"step": step, "at": "y"}}}))
+
+        def exit_msg(n):
+            """The message choose() ends on: the ramp guard runs before any ticket work, so the rest of the board is empty here."""
+            try:
+                choose(n, True)
+                return ""
+            except SystemExit as e:
+                return str(e)
+
+        saved_log, saved_snap, saved_inc = log, SNAP, incident_step
+        lines = []
+        globals()["log"], globals()["incident_step"] = lines.append, lambda n, dry: None
+        globals()["SNAP"] = {"tickets": [], "rel": {}, "prs": [], "incidents": [], "open": {}}
+        try:
+            ramped(1)
+            assert factory_ramp() == (1, 1) and not factory_stopped(), "a cleared step 1 record runs"
+            assert exit_msg(5) == "none: factory restart step 1/3, 1 runner(s)", exit_msg(5)
+            assert "factory restart step 1/3: 1 runner(s)" in lines, "the picker log names the cap"
+            assert "factory restart" not in exit_msg(1), "runner 1 is inside the cap"
+            ramped(2)
+            assert factory_ramp() == (2, 3)
+            assert "factory restart" not in exit_msg(3) and "factory restart" in exit_msg(4), "step 2 lets three runners in"
+            ramped(3)
+            assert factory_ramp() == (3, None) and "factory restart" not in exit_msg(20), "the last step caps nothing"
+            ramped(9)
+            assert factory_ramp() == (3, None), "a step past the last is the last"
+        finally:
+            globals()["log"], globals()["SNAP"], globals()["incident_step"] = saved_log, saved_snap, saved_inc
     finally:
         FACTORY_STOP = saved
         tmp.unlink(missing_ok=True)
