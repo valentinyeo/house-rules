@@ -4,6 +4,7 @@
     fleet/pick <N> [--dry-run] [--json]    pick (and claim) one ticket for Runner N
     fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 11514?
     fleet/pick --wip                       read only: wip: N of M, the units counted and the ones left out
+    fleet/pick --replay-waits [DAYS]       offline: runs the wait gate would have held, from the run ledger
 
 Valentin 2026-11-07: one pool, Runner 1..N, each runner on the engine the pacer gives it (engine-N, else the engine file,
 else cursor): cursor (Cursor plan), codex (hax on Codex), opencode (hax on OpenCode Go) or claude (Claude Code on the Claude plan). The model per brain tag (and for
@@ -43,6 +44,13 @@ A ticket with an open BlockedBy link, in Valentin Review or waiting on someone i
 That someone may be Valentin or the board lead: fleet/park --lead leaves the ticket with the lead, and only a runner the lead
 hands it to starts it again. A ticket a lead or another agent holds is not new work on Fleet CI & Infra either, nor is one
 waiting on an agent (HYCI-276: a lead-parked board alarm came back to four runners).
+Wait gate (13 Nov): a ticket whose last run ended WAIT_CHECK, or FAULT naming CI, a PR or a blocker, is also held from every lane
+that reads resting() (own, orphan, kept slot, board, PR queue, incident, the pipeline count) until what it waits on changes: the PR
+head commit, review decision, mergeable state or check states, a BlockedBy ticket or its column, or the ticket itself (edited more
+than a minute after the end). The fingerprint is kept at the first pick after the end in STATE/wait-gate.json and read from data the
+pick already holds, so it costs no GitHub or board call. Cap 6 hours (Urgent 1 hour, incident 20 minutes); a wait with nothing to
+observe is held until its stated recheck time, else 30 minutes. Unreadable or late data, and any error, hold nothing.
+fleet/pick --replay-waits [DAYS] counts what it would have held in the run ledger. The park lane is not gated.
 A runner whose own unfinished ticket rests or waits (ship-claim HOLD names it) gets that ticket back with source "park" and
 briefs/park-job.txt: decide the fleet/park mode, run it, end. A ticket is handed back at most once per REST_MAX (ledger
 STATE/parks, any runner, written when the job is handed out), so a park run that fails to park cannot loop.
@@ -327,7 +335,7 @@ def load_snapshot():
     cache = os.environ.get("FLEET_PICK_CACHE")
     if cache and os.path.exists(cache) and time.time() - os.path.getmtime(cache) < (3600 if os.environ.get("FLEET_PICK_VIRTUAL") else CACHE_TTL):
         return json.load(open(cache))
-    snap = {"tickets": [], "rel": {}, "prs": None, "incidents": []}
+    snap = {"tickets": [], "rel": {}, "prs": None, "prs_at": None, "incidents": []}
     for board, (new, building) in BOARDS.items():
         for section in new + building:
             snap["tickets"] += list_section(board, section)
@@ -806,7 +814,7 @@ def resting(n, dry):
         if t.get("prio") == "Urgent" and not t["waiting"] and t["section"] != "Valentin Review" and (now - when).total_seconds() > URGENT_REST:
             continue
         rest.add(key)
-    return rest | set(waits_until(now))
+    return rest | set(waits_until(now)) | wait_gate(dry, now)
 
 
 class Skip:
@@ -1070,6 +1078,251 @@ def waits_until(now=None):
             until = max(recent) + dt.timedelta(seconds=WAIT_WINDOW)
             hold[key] = max(hold.get(key, until), until)
     return {k: v for k, v in hold.items() if v > now}
+
+
+# ---------------------------------------------------------------- wait gate
+# Valentin 2026-11-13: "the built share is horrible ... we are hemorrhaging money". 7 to 13 Nov: 3,087 runs, 1,782 ended
+# WAIT_CHECK, 715 FAULT, 413 BUILDING. A model session was started again and again only to look at a ticket that waits on CI,
+# a review or a blocker. Rests lifted when a run's own park note touched the ticket, and the 3-in-2h streak and ISO-time hold
+# ignored "recheck 17:30Z" and "WAIT_CHECK exceeded 30 min". The gate is a script: it records what the ticket waits on and
+# hands the ticket to no model until that changes.
+WAIT_GATE_CAP = 6 * 3600       # a wait is never held longer than this, whatever the fingerprint says
+WAIT_GATE_CAP_URGENT = 3600    # an Urgent ticket is looked at hourly
+WAIT_GATE_CAP_INCIDENT = 1200  # an incident or release-stop ticket every 20 minutes
+WAIT_GATE_BLIND = 1800         # nothing observable (no open PR, no BlockedBy): a stated recheck time, else 30 minutes
+WAIT_GATE_LATE = 1200          # a first look this long after the end cannot show what changed since: fail open
+WAIT_GATE_BUMP = 5             # tickets that share one updated minute were bulk-touched by a script, not by the work
+WAIT_PREFIX = re.compile(r"^\s*(?:CI/INFRA |CI |INFRA )?RUNNER IDLE\s*", re.I)
+WAIT_FAULT = re.compile(r"WAIT_CHECK exceeded|\bchecks?\b|\bCI\b|\bPR\b|BlockedBy|blocked on|waits? on|waiting on|recheck|pending|in flight|deploy", re.I)
+WAIT_CI = re.compile(r"\bchecks?\b|\bCI\b|pending|in flight|deploy|running|required", re.I)
+RECHECK_HM = re.compile(r"recheck(?: at)?\s+(\d{1,2}):(\d\d)\s*Z", re.I)
+_GATE = {}
+
+
+def wait_end(r):
+    """True when a ledger row is a run that ended waiting: WAIT_CHECK, or a FAULT whose text names CI, a PR or a blocker.
+    The 'CI RUNNER IDLE' prefix is stripped first, or every CI-lane FAULT would match on the word CI."""
+    if r.get("state") == "WAIT_CHECK":
+        return True
+    if r.get("state") != "FAULT":
+        return False
+    text = WAIT_PREFIX.sub("", str(r.get("reason", ""))) + " " + str(r.get("detail", ""))
+    return bool(WAIT_FAULT.search(text))
+
+
+def gate_cap(t):
+    """How long a wait may be held, by ticket type."""
+    if INCIDENT_LABEL in t["labels"]:
+        return WAIT_GATE_CAP_INCIDENT
+    return WAIT_GATE_CAP_URGENT if t.get("prio") == "Urgent" else WAIT_GATE_CAP
+
+
+def gate_parts(key):
+    """What a ticket waits on, read from data this pick already holds (the open-PR list, the relations cache, the board
+    snapshot): no new GitHub or board call. A part that cannot be read is None and is never compared."""
+    prs = None
+    if "prs" in SNAP:
+        if SNAP["prs"] is None:
+            try:
+                open_prs()
+            except Exception as e:
+                log(f"wait gate: open PR list unreadable ({str(e)[:60]}); PR part not compared")
+        if SNAP["prs"] is not None:
+            # GitHub sets every open PR to UNKNOWN for a while after each push to its base: only CONFLICTING counts as news
+            prs = sorted([p["number"], p.get("head"), p.get("review"), p.get("mergeable") == "CONFLICTING", p.get("checks")]
+                         for p in SNAP["prs"] if pr_ticket(p) == key)
+    rel = SNAP.get("rel", {}).get(key)
+    if rel is None:
+        rel = (stored_relations().get(key) or [0, None])[1]
+    blk = None
+    if rel is not None:
+        blk = sorted([b, (by_key(b) or {}).get("section") or "gone"] for b in rel[0])
+    return {"pr": prs, "blk": blk}
+
+
+def gate_state_path():
+    return STATE / "wait-gate.json"
+
+
+def gate_load():
+    try:
+        d = json.loads(gate_state_path().read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def gate_save(state):
+    tmp = gate_state_path().with_suffix(f".{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, gate_state_path())
+    except OSError:
+        pass
+
+
+def bulk_touched(stamp):
+    return sum(1 for x in SNAP["tickets"] if x["updated"][:16] == stamp[:16]) >= WAIT_GATE_BUMP
+
+
+def gate_verdict(t, when, row, base, parts, now):
+    """(held, cause) for one waiting ticket. `base` is the fingerprint kept at the first pick after the end."""
+    age = (now - when).total_seconds()
+    if base.get("cause"):  # once lifted it stays lifted for this end: a fingerprint that flips back is not a reason to hold again
+        return False, base["cause"]
+    if age > gate_cap(t):
+        return False, "cap"
+    changed = stamp_time(t["updated"])
+    if changed and (changed - when).total_seconds() > REST_GRACE and not bulk_touched(t["updated"]):
+        return False, "ticket updated"
+    if base.get("late"):
+        return False, "late baseline"
+    for name in ("pr", "blk"):
+        if parts[name] is not None and base["parts"].get(name) is not None and parts[name] != base["parts"][name]:
+            return False, f"{name} changed"
+    seen = base["parts"].get("pr"), base["parts"].get("blk")
+    text = WAIT_PREFIX.sub("", str(row.get("reason", "")))
+    # the wait names CI and the PR's checks had all finished when first read: the CI wait is over, a run has work to do
+    if seen[0] and not any("IN_PROGRESS" in c or "PENDING" in c or "QUEUED" in c for p in seen[0] for c in p[4] or []) \
+            and WAIT_CI.search(text) and not re.search(r"review", text, re.I):
+        return False, "checks already finished"
+    if not seen[0] and not seen[1]:
+        m = RECHECK_HM.search(text)
+        until = WAIT_GATE_BLIND
+        if m:
+            at = when.replace(hour=int(m[1]) % 24, minute=int(m[2]), second=0)
+            at = at + dt.timedelta(days=1) if at <= when else at
+            until = min((at - when).total_seconds(), gate_cap(t))
+        if age > until:
+            return False, "blind wait over"
+    return True, "held"
+
+
+def wait_gate(dry, now=None):
+    """Tickets whose last run ended waiting and whose wait has not changed: no lane hands them to a model.
+    The fingerprint is the PR head commit, review decision, mergeable state and check states, the BlockedBy tickets and their
+    columns, and the ticket's updated time. It is recorded at the first pick after the end. The hold lifts when a part
+    changes, or after the cap (6 hours, Urgent 1 hour, incident 20 minutes). Anything unreadable or late fails open, and an
+    error in the gate hands every ticket back, so the gate can only save runs, never stop the pool."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    memo = (id(SNAP), dry)
+    if _GATE.get("memo") == memo:
+        return _GATE["held"]
+    held = set()
+    try:
+        last = {}
+        for r in ledger_rows():
+            key, when = r.get("ticket"), stamp_time(r.get("ts", ""))
+            if key and when and (key not in last or when >= last[key][0]):
+                last[key] = (when, r)
+        state, dirty = gate_load(), False
+        for key, (when, row) in last.items():
+            if not wait_end(row) or (now - when).total_seconds() > WAIT_GATE_CAP:
+                if key in state and not dry:
+                    del state[key]
+                    dirty = True
+                continue
+            t = by_key(key)
+            if t is None:
+                continue
+            end = row["ts"]
+            parts = gate_parts(key)
+            base = state.get(key)
+            if not base or base.get("end") != end:
+                late = (now - when).total_seconds() > WAIT_GATE_LATE
+                base = {"end": end, "at": int(now.timestamp()), "late": late, "parts": parts}
+                state[key] = base
+                dirty = True
+                if late:
+                    log(f"wait gate: {key} first seen {int((now - when).total_seconds())}s after its wait ended; not held")
+            else:
+                for name in ("pr", "blk"):  # a part unreadable at the first look is filled in by the first readable one
+                    if base["parts"].get(name) is None and parts[name] is not None and not base.get("late"):
+                        base["parts"][name] = parts[name]
+                        dirty = True
+            ok, cause = gate_verdict(t, when, row, base, parts, now)
+            if ok:
+                held.add(key)
+            elif base.get("cause") != cause:
+                base["cause"] = cause
+                dirty = True
+                log(f"wait gate: {key} released ({cause}) {int((now - when).total_seconds())}s after its wait ended")
+        if dirty and not dry:
+            gate_save({k: v for k, v in state.items() if k in last})
+    except Exception as e:
+        log(f"wait gate: error, nothing held ({type(e).__name__}: {str(e)[:80]})")
+        held = set()
+    _GATE.update(memo=memo, held=held)
+    return held
+
+
+
+def replay_waits(days=7, out=print):
+    """Offline: what the wait gate would have held, from the run ledger alone (no board, no GitHub).
+    The ledger holds no PR or check history, so two bounds. MAX: no fingerprint ever changes, so every run that ended
+    inside a wait's cap window after the last unheld wait-end is held, including runs that built. MIN: the fingerprint
+    changes exactly when a run built, so the window closes at the first run that ended BUILDING or OWN_PR and that run is
+    not held. The true number lies between. Caps: a blind wait (nothing to observe) is 30 minutes; an observable one is 6
+    hours. Run ts is the END time, so a run is counted held when it ended inside the window; the reference stays at the last
+    unheld wait-end. Priority and incident labels are not in the ledger, so the 6-hour cap applies to every ticket."""
+    now = dt.datetime.now(dt.timezone.utc)
+    rows = []
+    for r in ledger_rows():
+        when = stamp_time(r.get("ts", ""))
+        if r.get("ticket") and when:
+            rows.append((when, r))
+    rows.sort(key=lambda x: x[0])
+    since = now - dt.timedelta(days=days)
+    split = dt.datetime(2026, 11, 11, 20, 14, tzinfo=dt.timezone.utc)  # PR 358: WAIT_CHECK and FAULT ends began to rest tickets
+    by_ticket = defaultdict(list)
+    for when, r in rows:
+        by_ticket[r["ticket"]].append((when, r))
+    eras = ("all", "before PR 358", "after PR 358")
+    tally = {(cap, bound, era): defaultdict(lambda: [0, 0]) for cap in ("observable", "blind") for bound in ("max", "min") for era in eras}
+    total = defaultdict(int)
+    lanes = {b: defaultdict(lambda: [0, 0, 0]) for b in ("min", "max")}  # lane -> held, held that built, all runs (6-hour cap)
+    productive = ("BUILDING", "OWN_PR")
+    for key, runs in by_ticket.items():
+        for cap_name, cap in (("observable", WAIT_GATE_CAP), ("blind", WAIT_GATE_BLIND)):
+            for bound in ("max", "min"):
+                ref = None
+                for when, r in runs:
+                    held = ref is not None and 0 < (when - ref).total_seconds() < cap
+                    if held and bound == "min" and r.get("state") in productive:
+                        held = False
+                    if held and when >= since:
+                        eng = r.get("engine") or "(park)"
+                        if cap_name == "observable":
+                            lane = lanes[bound][r.get("source") or "(none)"]
+                            lane[0] += 1
+                            lane[1] += r.get("state") in productive
+                        for era in eras:
+                            if era == "all" or (era == "before PR 358") == (when < split):
+                                cell = tally[(cap_name, bound, era)][eng]
+                                cell[0] += 1
+                                cell[1] += r.get("state") in productive
+                    if held:
+                        continue  # a held run never happened: the reference stays at the last unheld wait-end
+                    ref = when if wait_end(r) else None
+    for when, r in rows:
+        if when >= since:
+            total[r.get("engine") or "(park)"] += 1
+            total["BUILDING"] += r.get("state") in productive
+            total["ALL"] += 1
+            for b in lanes:
+                lanes[b][r.get("source") or "(none)"][2] += 1
+    out(f"replay of the run ledger, last {days} days: {total['ALL']} runs, {total['BUILDING']} ended BUILDING or OWN_PR")
+    for cap_name in ("observable", "blind"):
+        for era in eras:
+            for bound in ("min", "max"):
+                cells = tally[(cap_name, bound, era)]
+                held = sum(c[0] for c in cells.values())
+                built = sum(c[1] for c in cells.values())
+                per = ", ".join(f"{e} {c[0]}/{total[e]}" for e, c in sorted(cells.items(), key=lambda x: -x[1][0]))
+                out(f"{cap_name:10} {era:14} {bound}: held {held:5} runs, {built:4} of them ended BUILDING | {per}")
+    for bound in ("min", "max"):
+        out(f"by lane, {bound}, 6-hour cap: " + ", ".join(f"{k} {v[0]}/{v[2]} (built {v[1]})" for k, v in sorted(lanes[bound].items(), key=lambda x: -x[1][0])))
+    return tally, total
 
 
 def opencode_timed_out(key):
@@ -1403,13 +1656,23 @@ def open_prs_rest(tok, why):
     prs = json.loads(r.stdout.replace("][", ","))
     log(f"open PRs: GraphQL failed ({why[:60]}); read {len(prs)} over REST, check states unknown")
     return [{"number": p["number"], "title": p["title"], "draft": p["draft"], "branch": p["head"]["ref"],
-             "updated": p["updated_at"], "red": False} for p in prs]
+             "updated": p["updated_at"], "red": False, "head": p["head"]["sha"], "review": None, "mergeable": None,
+             "checks": None} for p in prs]
+
+
+def check_states(rollup):
+    """Sorted, de-duplicated 'name=state' strings of a PR's check runs and commit statuses. A check that is still running
+    reads IN_PROGRESS or PENDING, so a finishing check changes the list."""
+    return sorted({f"{c.get('name') or c.get('context') or '?'}={c.get('conclusion') or c.get('state') or c.get('status') or '?'}"
+                   for c in rollup or []})
 
 
 def open_prs():
     """Every open PR to production on hypertask-ai/hypertask, read once per pick. One GitHub read serves every
     runner's pick for PRS_FRESH_S, the same ten minutes fleet/pr-snapshot writes its copy; on a failed read (the
-    App's GraphQL limit ran out on 2026-11-10 and every pick stopped) a copy up to PRS_STALE_S old stands in."""
+    App's GraphQL limit ran out on 2026-11-10 and every pick stopped) a copy up to PRS_STALE_S old stands in.
+    SNAP["prs_at"] is when the list was read. Besides the title, branch and red flag, each PR carries its head commit, review
+    decision, mergeable state and check states: the wait gate (wait_gate) fingerprints them at no extra GitHub call."""
     if SNAP["prs"] is None:
         try:
             cached = json.loads(PRS_CACHE.read_text())
@@ -1417,20 +1680,20 @@ def open_prs():
         except (OSError, ValueError, KeyError, TypeError):
             cached, age = None, None
         if cached and age < PRS_FRESH_S:
-            SNAP["prs"] = cached["prs"]
+            SNAP["prs"], SNAP["prs_at"] = cached["prs"], cached["at"]
             return SNAP["prs"]
         tok = subprocess.run(["gh-app-token"], capture_output=True, text=True).stdout.strip()
         if not tok:
             raise RuntimeError("empty GitHub App token")
         r = subprocess.run(["gh", "pr", "list", "--repo", PR_REPO, "--base", "production", "--state", "open", "--limit", "1000",
-                            "--json", "number,title,isDraft,headRefName,updatedAt,statusCheckRollup"],
+                            "--json", "number,title,isDraft,headRefName,updatedAt,statusCheckRollup,headRefOid,reviewDecision,mergeable"],
                            capture_output=True, text=True, env=dict(os.environ, GH_TOKEN=tok), timeout=300)
         if r.returncode != 0 and cached and age < PRS_STALE_S:
             log(f"open PRs: GitHub read failed ({(r.stderr or '').strip()[:80]}); using a copy {int(age)}s old")
-            SNAP["prs"] = cached["prs"]
+            SNAP["prs"], SNAP["prs_at"] = cached["prs"], cached["at"]
             return SNAP["prs"]
         if r.returncode != 0:
-            SNAP["prs"] = open_prs_rest(tok, (r.stderr or "").strip()[:120])
+            SNAP["prs"], SNAP["prs_at"] = open_prs_rest(tok, (r.stderr or "").strip()[:120]), time.time()
             return SNAP["prs"]
         prs = json.loads(r.stdout)
         if not isinstance(prs, list) or len(prs) >= 1000:
@@ -1438,9 +1701,13 @@ def open_prs():
         SNAP["prs"] = [{"number": p["number"], "title": p["title"], "draft": p["isDraft"], "branch": p["headRefName"],
                         "updated": p["updatedAt"],
                         "red": any(c.get("conclusion") in ("FAILURE", "TIMED_OUT") or c.get("state") in ("FAILURE", "ERROR")
-                                   for c in p.get("statusCheckRollup") or [])} for p in prs]
+                                   for c in p.get("statusCheckRollup") or []),
+                        "head": p.get("headRefOid"), "review": p.get("reviewDecision") or "",
+                        "mergeable": p.get("mergeable") or "", "checks": check_states(p.get("statusCheckRollup"))}
+                       for p in prs]
+        SNAP["prs_at"] = time.time()
         tmp = PRS_CACHE.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"at": time.time(), "prs": SNAP["prs"]}))
+        tmp.write_text(json.dumps({"at": SNAP["prs_at"], "prs": SNAP["prs"]}))
         tmp.replace(PRS_CACHE)
         save_cache(SNAP)
     return SNAP["prs"]
@@ -2122,6 +2389,127 @@ def wait_self_test():
     assert "HTPR-4" not in h, "a recheck time already past holds nothing"
 
 
+def wait_gate_self_test():
+    """The wait gate: a waiting ticket is held until what it waits on changes, in every lane (they all read resting())."""
+    global SNAP, open_prs
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    ago = lambda m: (now - dt.timedelta(minutes=m)).strftime(fmt)
+    tk = lambda key, updated=360, labels=(), prio="Medium", section="In Progress": {
+        "key": key, "board": "15", "section": section, "title": "x", "labels": list(labels), "prio": prio, "holders": [],
+        "waiting": False, "updated": ago(updated), "created": ago(9999)}
+    pr = lambda num, key, head="aaa", checks=("ci=IN_PROGRESS",), review="", merge="MERGEABLE": {
+        "number": num, "title": f"{key} x", "branch": f"runner-1/{key.lower()}", "draft": False, "red": False, "updated": ago(30),
+        "head": head, "review": review, "mergeable": merge, "checks": list(checks)}
+    wait = lambda key, m, reason="RUNNER IDLE CI pending on the PR", state="WAIT_CHECK", detail="": {
+        "ticket": key, "ts": ago(m), "state": state, "reason": reason, "detail": detail}
+
+    def fresh(rows, tickets, prs=None, rel=None):
+        global SNAP
+        _LEDGER[:] = [rows]
+        _GATE.clear()
+        if gate_state_path().exists():
+            gate_state_path().unlink()
+        SNAP = {"tickets": tickets, "rel": rel or {}, "prs": prs if prs is not None else [], "incidents": []}
+
+    def held(at=None, dry=False):
+        _GATE.clear()
+        return wait_gate(dry, at or now)
+
+    saved_ledger, saved_snap, saved_open = list(_LEDGER), SNAP, open_prs
+    try:
+        # hold: the PR waits on a running check, nothing changed
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        assert held() == {"HTPR-1"}, "a ticket that ended waiting on a running check is held"
+        assert "HTPR-1" in resting(2, True) and "HTPR-1" in Skip(set(), resting(2, True)), "every lane reads the gate through resting()"
+        assert json.loads(gate_state_path().read_text())["HTPR-1"]["parts"]["pr"][0][1] == "aaa", "the fingerprint is kept at the first pick"
+        # each part releases
+        for field, value, why in (("head", "bbb", "a new commit"), ("review", "APPROVED", "a review decision"),
+                                  ("mergeable", "CONFLICTING", "a merge conflict"), ("checks", ["ci=SUCCESS"], "a finished check")):
+            fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+            assert held() == {"HTPR-1"}
+            SNAP["prs"][0][field] = value
+            assert held() == set(), f"{why} lifts the hold"
+            SNAP["prs"][0][field] = pr(1, "HTPR-1")[field]
+            assert held() == set(), "the lift stays when the fingerprint flips back"
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        held()
+        SNAP["prs"][0]["mergeable"] = "UNKNOWN"
+        assert held() == {"HTPR-1"}, "GitHub recomputing mergeable after a push to base is not a change"
+        # ticket updated
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        held()
+        SNAP["tickets"][0]["updated"] = ago(2)
+        assert held() == set(), "a ticket edit more than a minute after the end lifts the hold"
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1", 4.5)], [pr(1, "HTPR-1")])
+        assert held() == {"HTPR-1"}, "the run's own park note inside the grace does not lift it"
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1", 2)] + [tk(f"HTPR-9{i}", 2) for i in range(5)], [pr(1, "HTPR-1")])
+        assert "HTPR-1" in held(), "a script that touched six tickets in one minute is not news about this one"
+        # a PR that appears, or goes
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        held()
+        SNAP["prs"] = []
+        assert held() == set(), "the PR closing lifts the hold"
+        # BlockedBy
+        blocker = tk("HYCI-9", section="Backlog")
+        fresh([wait("HTPR-2", 5, "RUNNER IDLE waits on HYCI-9")], [tk("HTPR-2"), blocker], rel={"HTPR-2": [["HYCI-9"], []]})
+        assert held() == {"HTPR-2"}, "a ticket whose blocker has not moved is held"
+        blocker["section"] = "Done"
+        assert held() == set(), "the blocker moving lifts the hold"
+        fresh([wait("HTPR-2", 5, "RUNNER IDLE waits on HYCI-9")], [tk("HTPR-2"), tk("HYCI-9", section="Backlog")], rel={"HTPR-2": [["HYCI-9"], []]})
+        held()
+        SNAP["tickets"] = [tk("HTPR-2")]
+        assert held() == set(), "the blocker leaving the board lifts the hold"
+        # cap, by type
+        rows = [wait("HTPR-1", 5)]
+        fresh(rows, [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        assert held() == {"HTPR-1"}
+        assert held(now + dt.timedelta(minutes=300)) == {"HTPR-1"} and held(now + dt.timedelta(minutes=365)) == set(), "the cap is 6 hours"
+        fresh(rows, [tk("HTPR-1", prio="Urgent")], [pr(1, "HTPR-1")])
+        held()
+        assert held(now + dt.timedelta(minutes=50)) == {"HTPR-1"} and held(now + dt.timedelta(minutes=57)) == set(), "an Urgent ticket is looked at hourly"
+        fresh(rows, [tk("HTPR-1", labels=["incident"])], [pr(1, "HTPR-1")])
+        held()
+        assert held(now + dt.timedelta(minutes=10)) == {"HTPR-1"} and held(now + dt.timedelta(minutes=17)) == set(), "an incident every 20 minutes"
+        # fail open
+        fresh([wait("HTPR-1", 25)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        assert held() == set(), "a first look 25 minutes after the end cannot say what changed: not held"
+        fresh([wait("HTPR-1", 5), {"ticket": "HTPR-1", "ts": ago(2), "state": "BUILDING", "reason": "RUNNER DONE"}], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        assert held() == set(), "a later run that built clears the wait"
+        fresh([wait("HTPR-1", 5, "RUNNER IDLE crash exit 1", "FAULT", "exit 1"), wait("HTPR-3", 5, "CI RUNNER IDLE no model reply", "FAULT", "reply cap")],
+              [tk("HTPR-1"), tk("HTPR-3")], [pr(1, "HTPR-1")])
+        assert held() == set(), "a crash FAULT is not a wait, and the word CI in the CI-lane prefix does not make one"
+        fresh([wait("HTPR-1", 5, "CI RUNNER IDLE waiting on required checks for PR 1", "FAULT", "WAIT_CHECK exceeded 30 min")],
+              [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        assert held() == {"HTPR-1"}, "a FAULT that exceeded the wait limit on a PR is held like a WAIT_CHECK"
+        fresh([wait("HTPR-1", 5, "RUNNER IDLE CI pending")], [tk("HTPR-1")], [pr(1, "HTPR-1", checks=("ci=SUCCESS",))])
+        assert held() == set(), "CI named as the wait but every check had finished at the first look: not held"
+        fresh([wait("HTPR-1", 5, "RUNNER IDLE waiting on human review")], [tk("HTPR-1")], [pr(1, "HTPR-1", checks=("ci=SUCCESS",))])
+        assert held() == {"HTPR-1"}, "a review wait with green checks is held until the review changes"
+        # nothing to observe: the stated recheck time, else 30 minutes
+        fresh([wait("HTPR-4", 5, f"RUNNER IDLE production deploy in flight, recheck {(now + dt.timedelta(minutes=30)).strftime('%H:%M')}Z")], [tk("HTPR-4")])
+        assert held() == {"HTPR-4"} and held(now + dt.timedelta(minutes=29)) == {"HTPR-4"} and held(now + dt.timedelta(minutes=31)) == set(), \
+            "a stated recheck time ends the blind hold"
+        fresh([wait("HTPR-4", 5, "RUNNER IDLE production deploy in flight")], [tk("HTPR-4")])
+        assert held() == {"HTPR-4"} and held(now + dt.timedelta(minutes=31)) == set(), "a blind wait is held 30 minutes"
+        # dry runs write nothing; unreadable data and errors never hold
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+        assert held(dry=True) == {"HTPR-1"} and not gate_state_path().exists(), "a dry run keeps no state"
+        SNAP["prs"] = None
+
+        def unreadable():
+            raise RuntimeError("GitHub unreachable")
+        open_prs = unreadable
+        assert held() == {"HTPR-1"}, "an unreadable PR list leaves that part uncompared, not released or crashed"
+        open_prs = saved_open
+        SNAP["tickets"] = None
+        assert held() == set(), "an error in the gate hands every ticket back"
+    finally:
+        _LEDGER[:] = saved_ledger
+        SNAP, open_prs = saved_snap, saved_open
+        _GATE.clear()
+
+
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
@@ -2246,8 +2634,9 @@ def self_test():
     escalate_self_test()
     fair_self_test()
     wait_self_test()
+    wait_gate_self_test()
     factory_stop_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop")
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, factory stop, 33 wait-gate checks")
 
 
 def factory_stop_self_test():
@@ -2486,6 +2875,19 @@ def wip_self_test():
     log = capture
     try_claim = lambda n, t, source, dry: claimed.append((t["key"], source)) or True
 
+    def gate_rows(*keys):
+        """The run ledger says each key's last run ended waiting on a review a minute ago; no keys clears the ledger."""
+        _LEDGER.clear()
+        _LEDGER.append([{"ticket": k, "ts": iso(0.02), "state": "WAIT_CHECK", "reason": "RUNNER IDLE waiting on human review",
+                         "detail": ""} for k in keys])
+        _GATE.clear()
+
+    def picked(n):
+        try:
+            return choose(n, True)[0]["key"]
+        except SystemExit:
+            return None
+
     def set_members(board, names):
         """The miss re-read loads members.json. Keep that file and the memory the same, or the test joins the live board."""
         LOGGED.clear()
@@ -2507,9 +2909,15 @@ def wip_self_test():
         SNAP["open"]["HYCI-1"] = True
         t, source = choose(2, True)
         assert source == "orphan" and t["key"] in ("HTPR-20", "HTPR-29"), (t["key"], source)
+        gate_rows("HTPR-20", "HTPR-29")
+        assert picked(2) not in ("HTPR-20", "HTPR-29"), "wait gate: the orphan lane leaves a gated ticket"
+        gate_rows()
         SNAP["tickets"] = [x for x in tickets if x["key"] not in ("HTPR-20", "HTPR-23", "HTPR-29")]
         t, source = choose(2, True)
         assert (t["key"], source) == ("HTPR-25", "pr"), (t["key"], source, "closed: a new-work ticket with an open PR is finished, not started")
+        gate_rows("HTPR-25")
+        assert picked(2) != "HTPR-25", "wait gate: the PR queue leaves a gated ticket"
+        gate_rows()
         SNAP["tickets"].append(tk("HTPR-31", "In Progress", "runner 1"))
         SNAP["prs"] = [pr(999991, "HTPR-21")]
         try:
@@ -2553,6 +2961,9 @@ def wip_self_test():
         assert choose(1, True) == (ci[1], "kept-slot"), "cap hit: a checks ticket an open ticket waits on still goes out"
         SNAP["rel"]["HYCI-3"] = [[], []]
         assert choose(1, True) == (ci[0], "kept-slot"), "cap hit: the kept slot still takes a plain checks ticket"
+        gate_rows("HYCI-2")
+        assert picked(1) != "HYCI-2", "wait gate: the kept slot leaves a gated ticket"
+        gate_rows()
         (STATE / "runner-2.log").write_text(f"{iso(0.05)} cursor: HYCI-2 composer-2.5 medium\n")
         RUNNING.clear()
         slot_logs.clear()
@@ -2614,6 +3025,9 @@ def main():
         return check_access()
     if args == ["--self-test"]:
         return self_test()
+    if args[:1] == ["--replay-waits"]:  # offline: what the wait gate would have held in the last N days (default 7), from the ledger
+        replay_waits(int(args[1]) if len(args) > 1 and args[1].isdigit() else 7)
+        return
     if args == ["--wip"]:  # read only: the WIP line every pick logs, and the units behind it
         SNAP = load_snapshot()
         units, workers, excluded = pipeline()
