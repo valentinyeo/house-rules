@@ -102,7 +102,8 @@ pi_login_heal() {
 # DeepSeek runners on 2026-11-11 and each restart walked back into the same wall. One overload marks that plan busy for 15
 # minutes and every runner on it rests until the mark expires. It never picks another provider.
 PROVIDER_BUSY_SECONDS=${PROVIDER_BUSY_SECONDS:-900}
-OVERLOAD_RE='inference service is overloaded|429: .*server_error'
+# 2026-11-13: Codex answers a spent plan with "The usage limit has been reached"; that is the same rest, not a crash (runner 6 SOFT-1970 read FAULT).
+OVERLOAD_RE='inference service is overloaded|429: .*server_error|usage limit has been reached'
 plan_of_engine() {
   case $1 in
     opencode|pi-opencode) echo opencode ;; codex|pi-codex) echo codex ;; cursor|pi-cursor) echo cursor ;; claude) echo claude ;;
@@ -470,6 +471,11 @@ case "${1:-}" in
     mark_provider_busy opencode "$tmp/clean.log" 2>/dev/null
     expect 'a clean log marks nothing' "$?" 1
     expect 'a clean log leaves the plan free' "$(provider_busy_left opencode)" 0
+    printf 'Codex error: The usage limit has been reached\n' > "$tmp/quota.log"
+    mark_provider_busy pi-codex "$tmp/quota.log"
+    expect 'a Codex usage limit marks codex busy' "$?" 0
+    expect 'the codex mark is set' "$([ "$(provider_busy_left codex)" -gt 0 ] && echo yes)" yes
+    rm -f "$(provider_busy_path codex)"
     mark_provider_busy pi-opencode "$tmp/overload.log"
     expect 'an overload marks its plan busy' "$?" 0
     left=$(provider_busy_left opencode)
