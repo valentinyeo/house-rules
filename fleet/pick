@@ -67,7 +67,7 @@ is held from every lane (through resting()) and logged as "one-run: <KEY> PR ope
 watch, the merge and the live check (HYCI-352), and a model wakes on the ticket only when the PR is red, conflicting or has a
 change request. Read from the shared open-PR list, so no extra GitHub call. Live only when ~/.local/state/fleet/one-run.on exists:
 no script merges green hypertask-ai/hypertask PRs before HYCI-352 ships, so until then the line is a shadow log and nothing is
-held. A PR untouched for 6 hours (Urgent 1) is released. An incident is never held. fleet/runner refuses a launch with no ticket key.
+held. A PR untouched for 6 hours (Urgent 1) is released. An incident is never held. Flag or not, the orphan lane skips a ticket whose open PR checks are still running (HYCI-358: two orphan parks in two minutes). fleet/runner refuses a launch with no ticket key.
 Cannot be built yet (HYCI-355): a new-work ticket that says it needs Valentin, a key only he or an admin can place, access,
 a design sign-off or a person at a PC is refused before any model starts ("cannot be built yet: <what>"). Text only, no
 board read. An incident and a ticket with an open PR are never held. bin/replay-built [DAYS] counts the first runs since
@@ -2496,6 +2496,8 @@ def choose(n, dry):
             why = "ticket design-pass or pool hold"
         elif not can_join(n, t["board"]):
             why = f"runner {n} is not a member of board {t['board']}"
+        elif INCIDENT_LABEL not in t["labels"] and pr_checks_pending(t["key"]):
+            why = "open PR checks still running; the next run only merges once they end (HYCI-358 orphan parks 13 Nov 16:31, 16:33)"
         elif in_lane(t) and full():
             why = "checks lane full"
         elif frozen and not in_lane(t):
