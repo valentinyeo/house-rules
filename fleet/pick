@@ -107,6 +107,8 @@ PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYC
 RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 CI_LABELS = {"ci", "hypertask ci"}
 BASE_SKIP = set()
+WASTED = "wasted runs"  # fleet/waste-mark adds it after three empty runs in a row; every lane leaves the ticket for its owner
+WASTED_WHY = "wasted runs: examine the ticket"
 BRAINS = ("light", "medium", "hard", "extra-hard")
 SKIP_ALL = {"brain-extra-hard"}  # cursor default; set_engine recomputes it per engine
 SKIP_APP = {"design-pass"}
@@ -494,7 +496,7 @@ def pc_waits():
 
 def skipped(t):
     """This runner's engine does not take t, or t waits on Valentin's PC while it is off."""
-    return bool(set(t["labels"]) & SKIP_ALL) or timed_out_here(t) or t["key"] in pc_waits()
+    return bool(set(t["labels"]) & SKIP_ALL) or WASTED in t["labels"] or timed_out_here(t) or t["key"] in pc_waits()
 
 
 def hand_back_timeouts(n, dry):
@@ -848,6 +850,8 @@ def sf_eligible(t):
 def eligible_reason(t):
     """Why a runner may not start this ticket from its new-work column, or None when it may."""
     labels = set(t["labels"])
+    if WASTED in labels:
+        return WASTED_WHY
     if labels & SKIP_ALL:
         return "label skip: " + ", ".join(sorted(labels & SKIP_ALL))
     if skipped(t):
@@ -1625,6 +1629,8 @@ def pipeline_reason(t, skip_brains, pr, rest=frozenset()):
     labels = set(t["labels"])
     if INCIDENT_LABEL in labels:
         return "incident"
+    if WASTED in labels:
+        return "wasted runs"
     if labels & skip_brains:
         return "brain"
     if t["waiting"] or t["section"] == "Valentin Review":
@@ -2347,6 +2353,9 @@ def wip_self_test():
     assert eligible_reason(tk("HYCI-9", "Backlog", "Chief Of Staff")) == "held by agent Chief Of Staff", \
         "a 11514 ticket the fleet chief holds is not new work (board 15 makes the same call)"
     assert eligible_reason(tk("HYCI-9", "Backlog")) is None, "an unheld 11514 ticket is still new work"
+    wasted = tk("HYCI-9", "Backlog", labels=["wasted runs"])
+    assert eligible_reason(wasted) == "wasted runs: examine the ticket" and skipped(wasted) \
+        and pipeline_reason(wasted, set(), False) == "wasted runs", "three empty runs mark a ticket and every lane leaves it"
 
     SNAP = {"tickets": [tk("HTPR-10", "In Progress"), tk("HTPR-11", "In Progress"), tk("HTPR-12", "In Progress", waiting=True)],
             "rel": {}, "prs": [], "incidents": []}

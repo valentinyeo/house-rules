@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""Mark a ticket "Wasted Runs" after three empty runs in a row, so runners stop waking on it and its owner examines it.
+
+Valentin 2026-11-13: "the ticket should have a mark in there if there's been excess bad runs ... after three runs, the
+ticket needs to obviously be examined". Codex ended 1,871 runs 8 to 13 Nov and 105 built anything; HTPR-8863 was woken 117
+times in one day.
+
+Data shape: fleet/runner writes one line per ended run to the run ledger (ts, runner, ticket, engine, state, reason, detail).
+Per ticket, the run ends since its last progress (state BUILDING or DONE) are the streak. A run that ends WAIT_CHECK, FAULT
+or PARKED is empty. Idle states and a run with no ticket are neither empty nor progress and are ignored. Three or more empty
+ends in a row, none of them before the "since" stamp kept for the ticket, mark it:
+  - label "Wasted Runs" added through vcc (created on the board first when missing)
+  - one agent-lane note with the run count, the engines and the distinct reasons runners gave
+fleet/pick skips a ticket carrying the label in every lane. The owner fixes the ticket at the source, then removes the label.
+Idempotent: a marked ticket is never marked or noted again until the label was removed and three new empty runs follow.
+The per-ticket "since" stamp (newest run already counted) lives in ~/.local/state/waste-mark/since.json.
+
+    fleet/waste-mark              mark every ticket over the line; prints one "marked: KEY ..." line each
+    fleet/waste-mark --dry-run    same output ("would mark:"), writes nothing to the board or the state file
+    fleet/waste-mark --self-test  synthetic ledger and stub board, no network
+"""
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from collections import defaultdict
+from pathlib import Path
+
+HOME = Path.home()
+os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
+LEDGER = Path(os.environ.get("WASTE_MARK_LEDGER", HOME / ".local/state/ht-or-runners/run-ledger.jsonl"))
+STATE = Path(os.environ.get("WASTE_MARK_STATE", HOME / ".local/state/waste-mark/since.json"))
+LABEL = "Wasted Runs"
+STREAK = 3
+EMPTY = {"WAIT_CHECK", "FAULT", "PARKED"}
+PROGRESS = {"BUILDING", "DONE"}
+# the columns fleet/pick offers or owns tickets from (its BOARDS table). A ticket anywhere else (Done, Flag: Everyone, Agent Blocked,
+# Later, Valentin Review) is not being woken, so marking it is noise.
+COLUMNS = {15: {"Backlog", "Bugs", "Improvements", "Features", "In Progress", "AI Review", "QA"},
+           2060: {"Todo", "Doing", "AI Review"}, 11514: {"Backlog", "In Progress", "AI Review"}}
+REASONS_MAX = 5
+REASON_WIDTH = 140
+IDLE_PREFIX = re.compile(r"^(?:(?:CI|INFRA|MP) )?RUNNER IDLE\s*")  # every runner ends "RUNNER IDLE <reason>"; the prefix says nothing
+
+
+def read_rows(path):
+    rows = []
+    try:
+        for line in open(path):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and r.get("ticket") and r.get("ts"):
+                rows.append(r)
+    except OSError:
+        pass
+    return sorted(rows, key=lambda r: r["ts"])
+
+
+def streaks(rows, since):
+    """ticket -> its empty run ends after the last progress run and after since[ticket], oldest first."""
+    run = defaultdict(list)
+    for r in rows:
+        state = r.get("state") or r.get("result")
+        key = r["ticket"]
+        if state in PROGRESS:
+            run[key] = []
+        elif state in EMPTY:
+            run[key].append(r)
+    return {k: [r for r in v if r["ts"] > since.get(k, "")] for k, v in run.items()}
+
+
+def reasons(runs):
+    seen, out = set(), []
+    for r in reversed(runs):
+        text = " ".join(str(r.get("reason") or r.get("detail") or "no reason given").split())
+        text = IDLE_PREFIX.sub("", text) or text
+        sig = re.sub(r"\d+", "#", text.lower())
+        if sig not in seen:
+            seen.add(sig)
+            out.append(text if len(text) <= REASON_WIDTH else text[:REASON_WIDTH - 3] + "...")
+        if len(out) == REASONS_MAX:
+            break
+    return out
+
+
+def engines(runs):
+    return sorted({str(r.get("engine") or "unknown") for r in runs})
+
+
+def summary(runs):
+    return f"{len(runs)} runs since the last progress, engines {', '.join(engines(runs))}, reasons: {' | '.join(reasons(runs))}"
+
+
+def note(runs):
+    return (f"Wasted Runs. {len(runs)} runs ended without progress since the last build. "
+            f"Engines: {', '.join(engines(runs))}. Reasons runners gave: {'; '.join(reasons(runs))}. "
+            "Runners now skip this ticket. Read it and its agent lane, fix the ticket at the source "
+            "(rewrite it, link BlockedBy, set a waits-on date, or re-tag the brain), then remove the Wasted Runs label.")
+
+
+def vcc(*args):
+    r = subprocess.run(["vcc", "--json", *args], capture_output=True, text=True, timeout=300)
+    try:
+        out = json.loads(r.stdout[r.stdout.index("{"):])
+    except ValueError:
+        out = None
+    if r.returncode != 0 or out is None or out.get("success") is False:
+        raise RuntimeError(f"vcc {' '.join(args[:3])} failed: {(r.stderr or r.stdout).strip()[-200:]}")
+    return out
+
+
+class Board:
+    """The real board through vcc. The self-test swaps in a stub with the same four methods."""
+
+    def __init__(self):
+        self.has_label = {}
+
+    def get(self, key):
+        t = vcc("task", "get", key)["tasks"][0]
+        names = [(x.get("name") if isinstance(x, dict) else str(x)) for x in t.get("labels") or []]
+        return {"labels": names, "section": t.get("section"), "status": t.get("status"), "board": t.get("projectId")}
+
+    def ensure_label(self, board):
+        if board not in self.has_label:
+            names = {x["name"] for x in vcc("labels", "list", "--project", str(board)).get("labels", [])}
+            if LABEL not in names:
+                vcc("labels", "create", "--project", str(board), "--name", LABEL)
+            self.has_label[board] = True
+
+    def add_label(self, key):
+        vcc("task", "update", key, "--add-labels", LABEL)
+
+    def add_note(self, key, text):
+        vcc("activity", "add", key, "--text", text)
+
+
+def sweep(rows, since, board, dry=False, save=None):
+    """Returns (lines, new since map, errors). Writes to the board only when dry is False. save(since) runs after each
+    ticket is settled, so a killed run never marks a ticket twice."""
+    lines, errors, since = [], [], dict(since)
+    for key, runs in sorted(streaks(rows, since).items()):
+        if len(runs) < STREAK:
+            continue
+        newest = runs[-1]["ts"]
+        try:
+            t = board.get(key)
+        except Exception as e:
+            errors.append(f"{key}: {e}")
+            continue
+        if LABEL in t["labels"] or t["status"] != "Normal" or t["section"] not in COLUMNS.get(t["board"], ()):
+            since[key] = newest  # already marked, archived or out of the pool's columns: the next streak counts from here
+            save and not dry and save(since)
+            continue
+        if dry:
+            lines.append(f"would mark: {key}  {summary(runs)}")
+            continue
+        try:
+            board.ensure_label(t["board"])
+            board.add_label(key)
+        except Exception as e:
+            errors.append(f"{key}: {e}")
+            continue
+        since[key] = newest
+        save and save(since)
+        lines.append(f"marked: {key}  {summary(runs)}")
+        try:
+            board.add_note(key, note(runs))
+        except Exception as e:
+            errors.append(f"{key}: label added, note failed: {e}")
+    return lines, since, errors
+
+
+def load_since():
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_since(since):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=STATE.parent)
+    with os.fdopen(fd, "w") as f:
+        json.dump(since, f, sort_keys=True)
+    os.replace(tmp, STATE)
+
+
+class Stub:
+    def __init__(self, tickets):
+        self.tickets, self.added, self.notes = tickets, [], []
+
+    def get(self, key):
+        return self.tickets[key]
+
+    def ensure_label(self, board):
+        pass
+
+    def add_label(self, key):
+        self.added.append(key)
+        self.tickets[key]["labels"].append(LABEL)
+
+    def add_note(self, key, text):
+        self.notes.append((key, text))
+
+
+def self_test():
+    def run(ticket, state, n, engine="codex", reason="waiting", t0=0):
+        return [{"ts": f"2026-11-13T00:{t0 + i:02d}:00Z", "ticket": ticket, "state": state, "engine": engine,
+                 "reason": f"{reason} {i}"} for i in range(n)]
+
+    def ticket(**kw):
+        return {"labels": [], "section": "In Progress", "status": "Normal", "board": 15, **kw}
+
+    rows = (run("A-1", "WAIT_CHECK", 3) + run("B-2", "FAULT", 2, t0=10) + run("C-3", "WAIT_CHECK", 2, t0=20)
+            + [{"ts": "2026-11-13T00:30:00Z", "ticket": "C-3", "state": "BUILDING", "engine": "codex", "reason": ""}]
+            + run("C-3", "PARKED", 2, t0=31) + run("D-4", "PARKED", 4, "opencode", "same reason", t0=40)
+            + [{"ts": "2026-11-13T00:50:00Z", "ticket": "", "state": "IDLE_NO_TICKET"},
+               {"ts": "2026-11-13T00:51:00Z", "ticket": "A-1", "state": "IDLE_CAP"}]
+            + run("E-5", "WAIT_CHECK", 2, t0=0) + [{"ts": "2026-11-13T00:12:00Z", "ticket": "E-5", "state": "FAULT",
+                                                     "engine": "pi", "reason": "crash"}]
+            + run("F-6", "WAIT_CHECK", 3, t0=0) + [{"ts": "2026-11-13T00:05:00Z", "ticket": "F-6", "result": "DONE"}])
+    rows += run("H-8", "FAULT", 3, t0=0) + run("I-9", "FAULT", 3, t0=0)
+    rows.sort(key=lambda r: r["ts"])
+
+    board = Stub({"A-1": ticket(), "B-2": ticket(), "C-3": ticket(), "D-4": ticket(),
+                  "E-5": ticket(section="Done"), "F-6": ticket(),
+                  "H-8": ticket(section="Agent Blocked", board=11514), "I-9": ticket(status="Archive")})
+    saves = []
+    lines, since, errors = sweep(rows, {}, board, save=lambda m: saves.append(dict(m)))
+    assert [len(m) for m in saves] == [1, 2, 3, 4, 5], saves              # the stamp is saved after every settled ticket
+    marked = {l.split()[1] for l in lines}
+    assert marked == {"A-1", "D-4"}, lines            # 3 mark; 2 does not; BUILDING resets; Done ticket skipped
+    assert not errors and board.added == ["A-1", "D-4"] and [k for k, _ in board.notes] == ["A-1", "D-4"]
+    assert "4 runs" in lines[1] and "opencode" in lines[1] and lines[1].count("same reason") == 1, lines[1]
+    assert not {"E-5", "H-8", "I-9"} & marked and all(since[k] for k in ("E-5", "H-8", "I-9"))  # Done, Agent Blocked, archived: stamp only
+    assert "F-6" not in marked                                      # DONE after three empty runs reset the streak
+
+    again, since2, _ = sweep(rows, since, board)                    # a second tick: nothing, no second label or note
+    assert again == [] and len(board.notes) == 2 and board.added == ["A-1", "D-4"]
+
+    board.tickets["A-1"]["labels"] = []                             # label removed by the owner: 2 new runs do not mark
+    more = rows + run("A-1", "WAIT_CHECK", 2, t0=55)
+    lines, since3, _ = sweep(more, since2, board)
+    assert lines == [], lines
+    more += run("A-1", "FAULT", 1, t0=58)                           # the third new empty run marks again
+    lines, since4, _ = sweep(more, since3, board)
+    assert [l.split()[1] for l in lines] == ["A-1"] and len(board.notes) == 3, lines
+
+    marked_already = Stub({"A-1": ticket(labels=[LABEL])})          # carries the label already: skipped, stamp advances
+    lines, since5, _ = sweep(run("A-1", "WAIT_CHECK", 3), {}, marked_already)
+    assert lines == [] and marked_already.notes == [] and since5["A-1"]
+
+    dry_board = Stub({"A-1": ticket()})                             # dry run: names it, writes nothing
+    lines, since6, _ = sweep(run("A-1", "FAULT", 3), {}, dry_board, dry=True)
+    assert lines and lines[0].startswith("would mark: A-1") and not dry_board.added and not dry_board.notes and since6 == {}
+
+    many = [{"ts": f"2026-11-13T01:{i:02d}:00Z", "ticket": "G-7", "state": "WAIT_CHECK", "engine": "codex",
+             "reason": f"x{'y' * 200} {i}"} for i in range(7)]
+    assert len(reasons(many)) <= REASONS_MAX and all(len(x) <= REASON_WIDTH for x in reasons(many))
+    assert reasons([{"reason": "CI RUNNER IDLE checks-pending PR 9"}, {"reason": "RUNNER IDLE checks-pending PR 12"}]) \
+        == ["checks-pending PR 12"], "the idle prefix goes and near-identical reasons collapse"
+    print("fleet/waste-mark self-test ok: 3 empty runs mark, 2 do not, progress resets, marked ticket skipped, "
+          "relabel needs 3 new runs, dry run writes nothing")
+
+
+def main(argv):
+    if argv == ["--self-test"]:
+        self_test()
+        return 0
+    if argv not in ([], ["--dry-run"]):
+        print(__doc__)
+        return 2
+    dry = argv == ["--dry-run"]
+    if not dry:  # two real runs at once (a timer tick during a long one) would label and note a ticket twice
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        lock = open(STATE.parent / "lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return 0
+    lines, since, errors = sweep(read_rows(LEDGER), load_since(), Board(), dry, None if dry else save_since)
+    print("\n".join(lines) or "waste-mark: nothing over the line")
+    for e in errors:
+        print(f"error: {e}", file=sys.stderr)
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
