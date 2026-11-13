@@ -63,11 +63,12 @@ observe is held until its stated recheck time, else 30 minutes. A run that built
 too while its PR's checks run at the first pick (canary HYCI-358: the next run only found them running). Unreadable or late data, and any error, hold nothing.
 fleet/pick --replay-waits [DAYS] counts what it would have held in the run ledger. The park lane is not gated.
 One ticket, one run, one PR (13 Nov): a ticket whose open PR has pending or green checks, no conflict and no change request
-is held from every lane (through resting()) and logged as "one-run: <KEY> PR open, checks pending|green"; a script owns the check
+is held from every lane (through resting()) and logged as "one-run: <KEY> checks pending, skipped" or "one-run: <KEY> PR open, checks green"; a script owns the check
 watch, the merge and the live check (HYCI-352), and a model wakes on the ticket only when the PR is red, conflicting or has a
-change request. Read from the shared open-PR list, so no extra GitHub call. Live only when ~/.local/state/fleet/one-run.on exists:
-no script merges green hypertask-ai/hypertask PRs before HYCI-352 ships, so until then the line is a shadow log and nothing is
-held. A PR untouched for 6 hours (Urgent 1) is released. An incident is never held. Flag or not, the orphan lane skips a ticket whose open PR checks are still running (HYCI-358: two orphan parks in two minutes). fleet/runner refuses a launch with no ticket key.
+change request. Read from the shared open-PR list, so no extra GitHub call. PENDING checks are held live now, no flag (14 Nov: a
+pending check needs no model; the next pick after the checks end handles red or green). GREEN checks are held only when
+~/.local/state/fleet/one-run.on exists: no script merges green hypertask-ai/hypertask PRs before HYCI-352 ships, so until then
+the green line is a shadow log and nothing is held. A PR untouched for 6 hours (Urgent 1) is released. An incident is never held. Flag or not, the orphan lane skips a ticket whose open PR checks are still running (HYCI-358: two orphan parks in two minutes). fleet/runner refuses a launch with no ticket key.
 Cannot be built yet (HYCI-355): a new-work ticket that says it needs Valentin, a key only he or an admin can place, access,
 a design sign-off or a person at a PC is refused before any model starts ("cannot be built yet: <what>"). Text only, no
 board read. An incident and a ticket with an open PR are never held. bin/replay-built [DAYS] counts the first runs since
@@ -1504,7 +1505,8 @@ def one_run_hold(dry, now=None):
     live check (HYCI-352); a model wakes on the ticket again only when the PR is red, conflicting or has a change request.
     Read from the open-PR list the pick already holds (shared 10-minute cache): no new GitHub call. An incident is never
     held, and a PR untouched for gate_cap(t) (6 hours, Urgent 1 hour) is released so a stalled merge gets looked at.
-    Off unless ONE_RUN_FLAG exists: the log line is written either way ("shadow" when off) so the effect is measurable first."""
+    Pending checks are held live, flag or not (a pending check needs no model). Green checks are held only when ONE_RUN_FLAG
+    exists (no script merges green PRs before HYCI-352 ships); off, the green line is logged as "shadow" so the effect is measurable."""
     now = now or dt.datetime.now(dt.timezone.utc)
     memo = (id(SNAP), dry, ONE_RUN_FLAG.exists())
     if _ONE_RUN.get("memo") == memo:
@@ -1528,6 +1530,13 @@ def one_run_hold(dry, now=None):
             if newest is None or (now - newest).total_seconds() > gate_cap(t):
                 continue
             word = "pending" if any(s[0] == "pending" for s in states) else "green"
+            if word == "pending":
+                # Running checks need no model, so this hold is live with no flag (14 Nov: 78% of extra runs were WAIT_CHECK re-picks).
+                # The next pick after the checks end sees red, conflicting or green and handles it.
+                log(f"one-run: {key} checks pending, skipped")
+                held.add(key)
+                note(key, "one-run: PR open, checks pending")
+                continue
             msg = f"one-run: {key} PR open, checks {word}"
             log(msg if on else f"{msg} (shadow: {ONE_RUN_FLAG} missing, not skipped)")
             if on:
@@ -3093,8 +3102,8 @@ def not_now_self_test():
 
 
 def one_run_self_test():
-    """One ticket, one run, one PR: pending or green checks hold the ticket from every lane once the flag file exists; red,
-    conflicting, change-requested, draft, unread, incident and stalled PRs are never held; off, the skip is only logged."""
+    """One ticket, one run, one PR: pending checks hold the ticket from every lane always, green checks once the flag file exists
+    (off, the green skip is only logged); red, conflicting, change-requested, draft, unread, incident and stalled PRs are never held."""
     global SNAP, ONE_RUN_FLAG, log
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
@@ -3119,11 +3128,16 @@ def one_run_self_test():
 
     try:
         flag.unlink(missing_ok=True)
-        assert held([tk("HTPR-1")], [pr(1, "HTPR-1")]) == set(), "flag off: nothing is held"
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1")]) == set(), "flag off: green is not held"
         assert lines == [f"one-run: HTPR-1 PR open, checks green (shadow: {flag} missing, not skipped)"], lines
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", ("ci=IN_PROGRESS", "e2e=SUCCESS"))]) == {"HTPR-1"}, "flag off: pending checks are held live"
+        assert lines == ["one-run: HTPR-1 checks pending, skipped"], lines
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="BLOCKED")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 checks pending, skipped"], \
+            "flag off: BLOCKED with every listed check green reads pending, held live"
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", ("ci=FAILURE",))]) == set() and not lines, "flag off: a red PR is never held"
         flag.write_text("")
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1", ("ci=IN_PROGRESS", "e2e=SUCCESS"))]) == {"HTPR-1"}, "pending checks hold the ticket"
-        assert lines == ["one-run: HTPR-1 PR open, checks pending"], lines
+        assert lines == ["one-run: HTPR-1 checks pending, skipped"], lines
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks green"], \
             "green checks hold the ticket"
         assert "HTPR-1" in resting(2, True) and "HTPR-1" in Skip(set(), resting(2, True)), "every lane reads the hold through resting()"
@@ -3132,7 +3146,7 @@ def one_run_self_test():
                            ("a draft", {"draft": True}), ("an unread check list", {"checks": []}), ("a REST-only list", {"checks": None}),
                            ("a stalled PR", {"updated": 400})):
             assert held([tk("HTPR-1")], [pr(1, "HTPR-1", **extra)]) == set() and not lines, f"{why} is a model's job: not held"
-        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="BLOCKED")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks pending"], \
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="BLOCKED")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 checks pending, skipped"], \
             "all listed checks green but GitHub BLOCKED: a required check has not reported, held as pending"
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="CLEAN")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks green"], "CLEAN reads green"
         assert held([tk("HTPR-1", prio="Urgent")], [pr(1, "HTPR-1", updated=90)]) == set(), "an Urgent PR is released after an hour"
