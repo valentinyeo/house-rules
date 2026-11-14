@@ -16,6 +16,27 @@ ORPHANS=${HOUSE_RULES_ORPHANS:-$HOME/.local/state/house-rules-orphans}
 say() { echo "house-rules-sync: $*" >&2; }
 pull() { git -C "$DIR" pull --ff-only -q; }
 
+# A main that fails rules-lint never reaches the fleet: lint what the pull would add, before it moves the tree.
+# The new lint script comes from origin/main itself. A repo without one skips the gate.
+lint_gate() {
+  local up lint out
+  up=$(git -C "$DIR" rev-parse -q --verify '@{upstream}') || return 0
+  [ "$up" = "$(git -C "$DIR" rev-parse HEAD)" ] && return 0
+  lint=$(mktemp)
+  if git -C "$DIR" show "$up:scripts/rules-lint" > "$lint" 2>/dev/null; then
+    if ! out=$(python3 -I "$lint" --root "$DIR" --diff HEAD --head "$up" 2>&1); then
+      rm -f "$lint"
+      say "refused: origin/main fails rules-lint, the shared copy stays on $(git -C "$DIR" rev-parse --short HEAD)"
+      printf '%s\n' "$out" >&2
+      exit 1
+    fi
+  fi
+  rm -f "$lint"
+}
+
+git -C "$DIR" fetch -q origin 2>/dev/null || { say "pull from origin failed; the shared copy is not on the newest main"; exit 1; }
+lint_gate
+
 if ! pull; then
   if [ -n "$(git -C "$DIR" status --porcelain --untracked-files=no)" ]; then
     mkdir -p "$ORPHANS"
