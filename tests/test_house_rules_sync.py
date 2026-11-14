@@ -116,6 +116,26 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(git(self.shared, "rev-parse", "HEAD"), head)
         self.assertFalse(self.orphans.exists())
 
+    def test_main_failing_rules_lint_is_refused(self):
+        lint = (REPO / "scripts/rules-lint").read_text()
+        (self.writer / "scripts").mkdir()
+        (self.writer / "scripts/rules-lint").write_text(lint)
+        before = git(self.shared, "rev-parse", "HEAD")
+        self.push_upstream("house-rules.md", "rule one\n- Never do X (2026-11-14, why: he said so).\n")
+
+        r = self.run_sync()
+
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("refused: origin/main fails rules-lint", r.stderr)
+        self.assertEqual(git(self.shared, "rev-parse", "HEAD"), before)
+        self.assertFalse((self.home / ".codex/AGENTS.md").exists())
+
+        head = self.push_upstream("house-rules.md", "rule one\n- Never do X.\n", "fix")
+        r = self.run_sync()
+
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(git(self.shared, "rev-parse", "HEAD"), head)
+
 
 if __name__ == "__main__":
     unittest.main()

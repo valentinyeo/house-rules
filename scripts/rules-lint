@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""rules-lint: structural checks for house rules and skills. Style is judged by the blind eval, not regex.
+
+  rules-lint [FILE...]                  lint whole files (default: house-rules.md, skills/*/SKILL.md, reference/*.md)
+  rules-lint --diff BASE [--head REV]   lint only what a change adds since BASE (CI and sync use this)
+  rules-lint --self-test
+
+Checks:
+  date         a rule line with "(20xx-" or "why:". Dates and reasons go in the PR body.
+  frontmatter  SKILL.md without name, description, a trigger ("use when ...") in it, or a description over 1024 characters
+  size         SKILL.md over 500 lines: move detail to reference/<topic>.md
+  table        a path in the "Read X when Y" table of house-rules.md that does not exist
+  orphan       a reference/*.md file that house-rules.md and no skill points to
+  words        house-rules.md over 1500 words (in --diff mode: over 1500 and growing)
+
+Exit 1 on any hit, with file:line. Reads only: never edits a file, starts no job.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+MAX_FILE_WORDS = 1500
+MAX_DESC = 1024
+MAX_SKILL_LINES = 500
+
+DATE_RE = re.compile(r"\(20\d\d-|\bwhy:", re.I)
+CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+URL_RE = re.compile(r"https?://\S+")
+
+
+def sh(root, *args, check=True):
+    r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True)
+    if check and r.returncode:
+        sys.exit("rules-lint: git %s failed: %s" % (" ".join(args), r.stderr.strip()))
+    return r.stdout if r.returncode == 0 else None
+
+
+def read(root, head, path):
+    if head is None:
+        full = os.path.join(root, path)
+        if not os.path.isfile(full):
+            return None
+        with open(full, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    return sh(root, "show", "%s:%s" % (head, path), check=False)
+
+
+def tree(root, head):
+    """Repo-relative file paths at head (the working tree when head is None)."""
+    if head is None:
+        out = []
+        for dirpath, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            out += [os.path.relpath(os.path.join(dirpath, n), root) for n in names]
+        return sorted(out)
+    return [x for x in (sh(root, "ls-tree", "-r", "--name-only", head, check=False) or "").split("\n") if x]
+
+
+def rule_lines(text):
+    """(lineno, text) for prose lines: outside frontmatter and code fences, not headings or table rows."""
+    lines = text.split("\n")
+    i = 0
+    if lines and lines[0].strip() == "---":
+        i = 1
+        while i < len(lines) and lines[i].strip() != "---":
+            i += 1
+        i += 1
+    fence = False
+    out = []
+    for n in range(i, len(lines)):
+        s = lines[n].strip()
+        if s.startswith("```"):
+            fence = not fence
+        elif not fence and s and not s.startswith(("#", "|", "<!--")):
+            out.append((n + 1, s))
+    return out
+
+
+def line_problems(s):
+    c = URL_RE.sub("URL", CODE_SPAN_RE.sub("CODE", s))
+    if DATE_RE.search(c):
+        return [("date", "dates and why: go in the PR body, not the rule")]
+    return []
+
+
+def parse_frontmatter(text):
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None
+    fm, key = {}, None
+    for ln in lines[1:]:
+        if ln.strip() == "---":
+            return fm
+        m = re.match(r"^([A-Za-z_-]+):\s*(.*)$", ln)
+        if m:
+            key = m.group(1)
+            fm[key] = m.group(2).strip()
+        elif key and ln.startswith((" ", "\t")):
+            fm[key] = (fm[key] + " " + ln.strip()).strip()
+    return None
+
+
+def frontmatter_problems(text):
+    fm = parse_frontmatter(text)
+    if fm is None:
+        return ["no frontmatter: add name and description"]
+    out = []
+    for k in ("name", "description"):
+        if not fm.get(k) or fm[k] in (">", "|", ">-", "|-"):
+            out.append("frontmatter %s missing or empty" % k)
+    d = fm.get("description", "")
+    if d and not re.search(r"\b(use|when|trigger)", d, re.I):
+        out.append("description has no trigger: say when to use it")
+    if len(d) > MAX_DESC:
+        out.append("description over %d characters" % MAX_DESC)
+    return out
+
+
+def lint_file(root, head, path, only_lines, report):
+    text = read(root, head, path)
+    if text is None:
+        return
+    if path.endswith("SKILL.md"):
+        for msg in frontmatter_problems(text):
+            report(path, 1, "frontmatter", msg)
+        if len(text.split("\n")) > MAX_SKILL_LINES:
+            report(path, 1, "size", "over %d lines: move detail to reference/<topic>.md" % MAX_SKILL_LINES)
+    for n, s in rule_lines(text):
+        if only_lines is None or n in only_lines:
+            for code, msg in line_problems(s):
+                report(path, n, code, msg)
+
+
+def structure_problems(root, head, report):
+    files = set(tree(root, head))
+    hr = read(root, head, "house-rules.md") or ""
+    intable = False
+    for n, ln in enumerate(hr.split("\n"), 1):
+        if ln.startswith("#"):
+            intable = bool(re.search(r"read .* when", ln, re.I))
+        elif intable and ln.startswith("|") and ln.count("|") >= 2:
+            for p in re.findall(r"`([^`]+)`", ln.split("|")[1]):
+                if not p.startswith(("~", "/")) and not re.search(r"[<*]", p) and p not in files:
+                    report("house-rules.md", n, "table", "read-table target does not exist: %s" % p)
+    pointers = hr + "".join(read(root, head, f) or "" for f in files if re.fullmatch(r"skills/[^/]+/SKILL\.md", f))
+    for f in sorted(files):
+        if re.fullmatch(r"reference/[^/]+\.md", f) and f not in pointers:
+            report(f, 1, "orphan", "house-rules.md and no skill points to this file")
+
+
+def added_lines(root, base, head):
+    """{path: set(new line numbers)} for the linted files."""
+    args = ["diff", "-U0", "--no-color", base] + ([head] if head else []) + ["--", "house-rules.md", "skills/*/SKILL.md", "reference/*.md"]
+    res, path, cur = {}, None, None
+    for ln in sh(root, *args).split("\n"):
+        if ln.startswith("+++ "):
+            path = None if ln.endswith("/dev/null") else ln[6:]
+            if path:
+                res.setdefault(path, set())
+        elif ln.startswith("@@"):
+            m = re.match(r"@@ -\S+ \+(\d+)(?:,(\d+))?", ln)
+            cur = None if m.group(2) == "0" else int(m.group(1))
+        elif ln.startswith("+") and path and cur is not None:
+            res[path].add(cur)
+            cur += 1
+    return res
+
+
+def run(root, files, base, head, out):
+    hits = []
+
+    def report(path, n, code, msg):
+        hits.append((path, n, code, msg))
+        print("%s:%d: %s: %s" % (path, n, code, msg), file=out)
+
+    wc = lambda t: len(t.split()) if t else 0
+    structure_problems(root, head, report)
+    if base is None:
+        paths = files or ["house-rules.md"] + [x for x in tree(root, head) if re.fullmatch(r"skills/[^/]+/SKILL\.md|reference/[^/]+\.md", x)]
+        for p in paths:
+            lint_file(root, head, p, None, report)
+        if "house-rules.md" in paths and wc(read(root, head, "house-rules.md")) > MAX_FILE_WORDS:
+            report("house-rules.md", 1, "words", "%d words, max %d" % (wc(read(root, head, "house-rules.md")), MAX_FILE_WORDS))
+    else:
+        for p, lines in sorted(added_lines(root, base, head).items()):
+            lint_file(root, head, p, lines, report)
+        new, old = wc(read(root, head, "house-rules.md")), wc(read(root, base, "house-rules.md"))
+        if new > MAX_FILE_WORDS and new > old:
+            report("house-rules.md", 1, "words", "%d words, max %d: shrink it" % (new, MAX_FILE_WORDS))
+    print("RULES-LINT bad=%d" % len(hits), file=out)
+    return 1 if hits else 0
+
+
+def self_test():
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("PASS " if cond else "FAIL ") + name)
+        ok = ok and cond
+
+    check("clean line", not line_problems("Switch flags yourself; never ask Valentin."))
+    check("dated line", bool(line_problems("Do X. (2026-11-14, Valentin).")))
+    check("why line", bool(line_problems("Do X, why: because.")))
+    check("code span ignored", not line_problems("Run `git log --since 2026-11-01`."))
+    check("frontmatter missing", bool(frontmatter_problems("# no fm\n")))
+    check("frontmatter ok", not frontmatter_problems("---\nname: a\ndescription: Use when b.\n---\nbody\n"))
+    check("frontmatter no trigger", bool(frontmatter_problems("---\nname: a\ndescription: Does things.\n---\n")))
+    check("frontmatter empty desc", bool(frontmatter_problems("---\nname: a\ndescription:\n---\n")))
+
+    class Buf:
+        def __init__(self):
+            self.t = ""
+
+        def write(self, s):
+            self.t += s
+
+    with tempfile.TemporaryDirectory() as d:
+        def g(*a):
+            subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True)
+
+        def put(path, text, mode="w"):
+            os.makedirs(os.path.dirname(os.path.join(d, path)), exist_ok=True)
+            with open(os.path.join(d, path), mode) as f:
+                f.write(text)
+
+        g("init", "-q", "-b", "main")
+        put("house-rules.md", "# Rules\n- Never do X (2026-11-01, why: old).\n")
+        g("add", "-A"); g("commit", "-qm", "base")
+        b = Buf()
+        check("full mode fails on old file", run(d, None, None, None, b) == 1 and "bad=1" in b.t)
+        put("house-rules.md", "- Run the lint before every pull request.\n", "a")
+        g("commit", "-qam", "good")
+        check("diff mode grandfathers old bad line", run(d, None, "HEAD~1", "HEAD", Buf()) == 0)
+        put("house-rules.md", '- Never skip it (2026-11-14, why: Valentin said "never skip it").\n', "a")
+        g("commit", "-qam", "bad")
+        b = Buf()
+        check("diff mode refuses dated line", run(d, None, "HEAD~1", "HEAD", b) == 1 and "house-rules.md:4: date" in b.t)
+        put("skills/x/SKILL.md", "# no frontmatter\nDo the thing.\n")
+        g("add", "-A"); g("commit", "-qm", "skill")
+        b = Buf()
+        check("new skill without frontmatter refused", run(d, None, "HEAD~1", "HEAD", b) == 1 and "frontmatter" in b.t)
+        put("reference/boards.md", "Board 15 is Hypertask.\n")
+        put("house-rules.md", "## Read X when Y\n| Read | When |\n|---|---|\n| `reference/missing.md` | boards |\n", "a")
+        g("add", "-A"); g("commit", "-qm", "ref")
+        b = Buf()
+        run(d, None, "HEAD~1", "HEAD", b)
+        check("read-table missing target refused", ": table:" in b.t)
+        check("orphan reference refused", "reference/boards.md:1: orphan" in b.t)
+        put("house-rules.md", "- Pad line. " + "pad " * 1600 + "\n", "a")
+        g("commit", "-qam", "big")
+        b = Buf()
+        run(d, None, "HEAD~1", "HEAD", b)
+        check("diff mode refuses file growing past cap", ": words:" in b.t)
+    print("SELF-TEST " + ("ok" if ok else "FAILED"))
+    return 0 if ok else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("files", nargs="*")
+    ap.add_argument("--diff", metavar="BASE")
+    ap.add_argument("--head", help="git rev to read (default: working tree; use HEAD in CI)")
+    ap.add_argument("--root", help="repo root (default: the repo this script lives in)")
+    ap.add_argument("--self-test", action="store_true")
+    a = ap.parse_args()
+    if a.self_test:
+        sys.exit(self_test())
+    root = a.root or os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.exit(run(root, a.files, a.diff, a.head, sys.stdout))
+
+
+if __name__ == "__main__":
+    main()

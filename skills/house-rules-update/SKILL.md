@@ -1,39 +1,40 @@
 ---
 name: house-rules-update
-description: Add or change a house rule in valentinyeo/house-rules. Use on "/house-rules-update [rule]", "add this to house rules", or when Valentin gives a standing rule for every agent. No argument = capture every standing rule Valentin gave in this conversation.
+description: Add or change a house rule in valentinyeo/house-rules. Use on "/house-rules-update [rule]", "add this to house rules", or when Valentin gives a standing rule for every agent. No argument means capture every standing rule from this conversation.
 ---
 
 # /house-rules-update [rule]
 
-Any manager or session may contribute. One PR per batch, same day.
+## Write
 
-## 1. Collect
-- With an argument: that rule.
-- No argument: scan this conversation for every standing rule Valentin gave (always/never/from now on/HARD). Skip one-off asks and project-only rules (those go in the project's own repo).
+- Write one imperative line. Short sentences. No reason, date, quote or history. The PR body and git keep those.
+- Put the line under the section it belongs to. Already covered? Edit that line. Contradicts a line? Replace it.
+- Rule for one role only? Put it in that role's skill, not in `house-rules.md`.
+- Needs more than one line? Write `skills/<name>/SKILL.md` or `reference/<topic>.md`. Add one row to the "Read X when Y" table in `house-rules.md`.
+- Something keeps breaking? Ship a script that refuses it in the same PR. Never add more prose.
+- Keep `house-rules.md` under 1,500 words. Over? Cut or move first.
+- Skip one-off asks and project-only rules. They belong in that project's repo.
 
-## 2. Write each rule
-- One line, imperative, caveman: max 8 words per sentence.
-- End with `(YYYY-MM-DD, why: <8 words max>)`; quote Valentin if short.
-- Put it under the right existing section. New section only if none fits.
-- Already covered? Edit that line instead. Never add a duplicate. Contradicts a line? Replace it; newest wins.
-- A rule against something that keeps happening ships with its enforcer in the same PR: a script, timer, lint or tool refusal. Prose alone is not a fix. Name the enforcer in the rule line. Valentin, 2026-11-02: "this type of pile up is not acceptable pls setup processes that prvent that fix the /house-rules-update for it".
-- Keep the file lean. Long procedures become a skill in `skills/<name>/SKILL.md`, with one pointer line in the file.
+## Ship
 
-## 3. PR
 ```
-cd ~/.local/share/house-rules && git checkout main && git pull --ff-only -q
+git clone -q git@github.com:valentinyeo/house-rules.git /tmp/hr-$$ && cd /tmp/hr-$$
 git checkout -b rule/<short-what>
-# edit house-rules.md (and skills/ if needed)
-git commit -am "rule: <what>" && git push -u origin HEAD
-gh pr create --repo valentinyeo/house-rules --title "rule: <what>" --body "<Valentin's words + where he said it>"
+# edit house-rules.md, skills/, reference/
+python3 scripts/rules-lint --diff origin/main
+git commit -am "rule: <what> (<TICKET>)" && git push -u origin HEAD
+gh pr create --repo valentinyeo/house-rules --title "rule: <what> (<TICKET>)" --body "<Valentin's words, where and when he said them>"
 ```
-- Small PR. Self-check: one line per rule, dated, no duplicate, no secrets, voice rules met.
 
-## 4. Merge or ask
-- Only restates what Valentin said: `gh pr merge --squash --delete-branch`.
-- New idea, or contradicts Valentin: do not merge. Ask Valentin through your own lead, with your recommendation.
+- Never edit `~/.local/share/house-rules` by hand.
+- `rules-lint` is a required check. A red check blocks the merge and the fleet sync.
 
-## 5. After merge
-- `git checkout main && git pull -q && ~/.local/bin/house-rules-sync`
-- Check: `grep -c "<new rule words>" ~/.codex/AGENTS.md ~/.config/hax/AGENTS.md`
+## Merge
+
+- The PR only restates what Valentin said: `gh pr merge --squash --delete-branch` once the check is green.
+- New idea, or it contradicts Valentin: do not merge. Ask Valentin through your own lead with your recommendation.
+
+## After merge
+
+- Run `~/.local/bin/house-rules-sync`.
 - Tell the other managers in one line: `house-rules updated: <rule>. Run /house-rules.`
