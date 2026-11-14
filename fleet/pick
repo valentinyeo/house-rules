@@ -1640,11 +1640,26 @@ def merged_after(key, when):
     return False
 
 
+def pr_needs_owner(key):
+    """The word one_run_state gives for the ticket's open PR when it needs the owner runner (red, conflicting, change request), else ''."""
+    for p in (SNAP.get("prs") or []):
+        if pr_ticket(p) == key:
+            word, script = one_run_state(p)
+            if word in ("red", "conflicting", "change request"):
+                return word
+    return ""
+
+
 def gate_verdict(t, when, row, base, parts, now):
     """(held, cause) for one waiting ticket. `base` is the fingerprint kept at the first pick after the end."""
     age = (now - when).total_seconds()
     if base.get("cause"):  # once lifted it stays lifted for this end: a fingerprint that flips back is not a reason to hold again
         return False, base["cause"]
+    # HYCI-352 (14 Nov, 3 runners "Red, no Fix run": R3, R8, R10): a PR that needs its owner (red, conflicting, change request) is
+    # never held by the wait gate. The fingerprint saw nothing change because the run ended with the PR already red.
+    need = pr_needs_owner(t["key"])
+    if need:
+        return False, f"pr {need}"
     if age > gate_cap(t):
         return False, "cap"
     changed = stamp_time(t["updated"])
@@ -3685,6 +3700,11 @@ def wait_gate_self_test():
         held()
         SNAP["prs"] = []
         assert held() == set(), "the PR closing lifts the hold"
+        # HYCI-352: a red PR is never held by the gate, however the wait ended
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1", checks=("ci=FAILURE",))])
+        assert held() == set(), "a ticket whose PR is red is handed to its owner for a Fix run"
+        fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1", merge="CONFLICTING")])
+        assert held() == set(), "a conflicting PR too"
         # BlockedBy
         blocker = tk("HYCI-9", section="Backlog")
         fresh([wait("HTPR-2", 5, "RUNNER IDLE waits on HYCI-9")], [tk("HTPR-2"), blocker], rel={"HTPR-2": [["HYCI-9"], []]})
