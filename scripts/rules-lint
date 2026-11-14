@@ -23,7 +23,7 @@ import sys
 import tempfile
 
 MAX_FILE_WORDS = 1500
-WORD_CEILING = 8896  # ratchet: in --diff mode the file may not grow past this until the rewrite lowers it to MAX_FILE_WORDS
+WORD_CEILING = MAX_FILE_WORDS  # in --diff mode the file may not grow past the cap
 MAX_DESC = 1024
 MAX_SKILL_LINES = 500
 

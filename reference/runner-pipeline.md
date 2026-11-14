@@ -27,7 +27,7 @@ The model never waits inside a run. It ends the run while review and checks run.
 - A runner never takes a new ticket while it owns one in In Progress, AI Review or QA. Exception: its ticket waits on something outside the runner 30+ minutes. Then it takes one more. The first wins every pick. Max 2.
 - Pick order: orphaned pipeline tickets, Urgent new work, the PR queue, new work.
 - New work is shared equally between boards 15 and 2060, then across apps within a board: the app with the fewest tickets in work and runs in 24 hours goes first. Then the priority field: Urgent, High, Medium, Low.
-- WIP cap (shared pool only; solo devs are uncapped): work being built never outnumbers live runners. That counts building columns plus open PRs. At or over the cap, no new work starts. Runners take incidents, own tickets, orphans and PRs. Blocking or Urgent Fleet CI & Infra tickets still go out.
+- WIP cap (shared pool only; solo devs are uncapped): work being built never outnumbers live runners. That counts building columns plus open PRs. At or over the cap, no new work starts. Runners take incidents, own tickets, orphans and PRs. Blocking or Urgent Fleet CI & Infra tickets still go out. Temporarily stopped runners keep their tickets. An idle rest without a blocker lasts 2 hours. Paused work returns to its starting runner.
 - Temporarily stopped runners keep their tickets. Only permanently removed roster slots become orphans.
 - CI blocks the PR? File it per the CI snag rule in `reference/boards.md`.
 - A ticket in Not now is parked by Valentin. Runners never take it. Board 2060 has the column, before Todo. Add it to any board that needs one.

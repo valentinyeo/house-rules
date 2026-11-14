@@ -41,3 +41,5 @@ Read when you set up a session, change a role, start or stop runners, or work wi
 - Chief Of Staff changes, closes or restarts runners: reuse each runner's login. Never mint a new one. Rerun the identity check the same turn.
 - A dismantled runner login has no live session for 24 hours and is not a fixed pool login in `fleet/roster.json`. Chief Of Staff deletes it and never asks. Never delete Runner 1-17, leads, inne or Wazig.
 - `/agent-housekeeping` runs every Monday. One agent per live session, named `HT <Role> Lead` or `RUNNER N`. Other agents: delete only on his direct order, else one Question on one ticket.
+- No agent-to-agent messaging unless Valentin asks, per case. Agents talk on tickets.
+- Cross-manager messages only when Valentin asks, or to announce a house-rules change.

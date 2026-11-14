@@ -33,3 +33,5 @@ A CI snag blocks an app ticket? Every fleet, session and runner:
 - Every lead turn runs `skills/hypertask-triage/scripts/board-dupes <boards>` and clears every pair.
 - Tag every ticket with its app or cluster label at creation. Reuse existing tags. Tags in Title Case. Check old tickets too.
 - Every label cluster has a board view filtered by that label. The board manager creates it the same day.
+- Agent Blocked holds only broken tools or servers. A tool or infra error goes to Agent Blocked Infra and your own lead.
+- Drafts for outside people use normal sentences, not caveman.

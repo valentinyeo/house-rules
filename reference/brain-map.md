@@ -42,3 +42,8 @@ Choose per `~/projects/poteto-2-advisor/brain-rules.md`.
 - Hard: hard bug, security, money, many systems.
 - Extra-hard: rare, auth or security plus money. Runners skip it.
 - Unsure between medium and hard: medium. Never two tags. Never blank.
+
+## Pstack roles
+
+- Code, bug-fix and judgment: Sonnet high. Opus medium only for the hardest tasks. Lookups: Haiku. Set in `~/.claude/rules/pstack-models.md`.
+- Say "DeepSeek 4.1 Flash", never "V4.1".
