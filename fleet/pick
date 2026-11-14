@@ -1558,6 +1558,21 @@ def gate_parts(key):
     return {"pr": prs, "blk": blk}
 
 
+def gate_fresh_prs(when):
+    """The baseline of a wait is its PR's checks at the first pick after the end. The shared PR copy is up to ten minutes old, so it can
+    predate the push the run just made: it then lists the PR's old checks as finished, the gate reads "checks already finished", and the
+    ticket is handed to a model 76 s after a run that ended on "checks pending" (14 Nov, HTPR-9055 on runner 4: two runs in two minutes,
+    both WAIT_CHECK). A copy older than the end is read again, once per wait end, because the baseline is then saved."""
+    if "prs" not in SNAP:
+        return
+    at = SNAP.get("prs_at")
+    if SNAP["prs"] is None or (at and at < when.timestamp()):
+        try:
+            open_prs(fresh=True)
+        except Exception as e:
+            log(f"wait gate: fresh PR list unreadable ({str(e)[:60]}); the copy stands")
+
+
 def gate_state_path():
     return STATE / "wait-gate.json"
 
@@ -1697,8 +1712,10 @@ def wait_gate(dry, now=None):
             if t is None:
                 continue
             end = row["ts"]
-            parts = gate_parts(key)
             base = state.get(key)
+            if (not base or base.get("end") != end) and (now - when).total_seconds() <= WAIT_GATE_LATE:
+                gate_fresh_prs(when)
+            parts = gate_parts(key)
             if not base or base.get("end") != end:
                 late = (now - when).total_seconds() > WAIT_GATE_LATE
                 base = {"end": end, "at": int(now.timestamp()), "late": late, "parts": parts,
@@ -3450,6 +3467,26 @@ def wait_gate_self_test():
         assert held() == {"HTPR-1"}, "a ticket that ended waiting on a running check is held"
         assert "HTPR-1" in resting(2, True) and "HTPR-1" in Skip(set(), resting(2, True)), "every lane reads the gate through resting()"
         assert json.loads(gate_state_path().read_text())["HTPR-1"]["parts"]["pr"][0][1] == "aaa", "the fingerprint is kept at the first pick"
+        # 14 Nov (HTPR-9055): the shared PR copy predates the run's push and lists the old checks as finished. The baseline reads the list again.
+        reads = []
+
+        def open_prs_after_push(fresh=False):
+            reads.append(fresh)
+            SNAP["prs"] = [pr(1, "HTPR-1", head="new", checks=("ci=IN_PROGRESS",))]
+            SNAP["prs_at"] = now.timestamp()
+            return SNAP["prs"]
+
+        try:
+            open_prs = open_prs_after_push
+            fresh([wait("HTPR-1", 1)], [tk("HTPR-1")], [pr(1, "HTPR-1", head="old", checks=("ci=SUCCESS",))])
+            SNAP["prs_at"] = (now - dt.timedelta(minutes=5)).timestamp()
+            assert held() == {"HTPR-1"} and reads == [True], f"a PR copy older than the wait's end is read again, so the new push's running checks hold it ({reads})"
+            reads.clear()
+            fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+            SNAP["prs_at"] = (now - dt.timedelta(minutes=1)).timestamp()
+            assert held() == {"HTPR-1"} and reads == [], "a copy newer than the end is not read again"
+        finally:
+            open_prs = saved_open
         # each part releases
         for field, value, why in (("head", "bbb", "a new commit"), ("review", "APPROVED", "a review decision"),
                                   ("mergeable", "CONFLICTING", "a merge conflict"), ("checks", ["ci=SUCCESS"], "a finished check")):
@@ -3606,7 +3643,7 @@ def wait_gate_self_test():
         assert held(dry=True) == {"HTPR-1"} and not gate_state_path().exists(), "a dry run keeps no state"
         SNAP["prs"] = None
 
-        def unreadable():
+        def unreadable(fresh=False):
             raise RuntimeError("GitHub unreachable")
         open_prs = unreadable
         assert held() == {"HTPR-1"}, "an unreadable PR list leaves that part uncompared, not released or crashed"

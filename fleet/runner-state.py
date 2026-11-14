@@ -673,6 +673,12 @@ def self_test():
     git("branch", "-q", "-D", "runner-3/hyci-77-fix")
     assert progress_count(tmp, ticket_refs(tmp, key) or {"runner-3/hyci-77-fix": "x"}, {}) == 1, "a removed branch counts one"
     assert ticket_refs(tmp, "") == {} and ticket_refs("/nonexistent", key) == {}
+    # The launcher's call shape: --classify with a --progress value must classify, not run the progress mode (14 Nov).
+    cli = lambda *extra: json.loads(subprocess.run([sys.executable, str(Path(__file__).resolve()), "--classify", "--final", "RUNNER IDLE checks pending on PR 9",
+                                                    "--rc", "0", "--elapsed", "300", "--stop", "", "--waited", str(7 * 3600), "--ticket", "HTPR-1",
+                                                    "--overload", "0", *extra], capture_output=True, text=True, check=True).stdout)
+    assert cli("--progress", "2")["state"] == "WAIT_CHECK", "a run that pushed work restarts the 6 h wait through the real CLI"
+    assert cli("--progress", "0")["detail"] == "WAIT_CHECK exceeded 6 h", "no progress: the 6 h cap still holds"
     print("runner-state self-test ok")
 
 
@@ -694,7 +700,10 @@ def main():
         for name, sha in sorted(ticket_refs(_arg("--repo"), _arg("--ticket")).items()):
             print(f"{sha} {name}")
         return
-    if "--progress" in sys.argv:
+    # 14 Nov (fleet-watch waste): `--classify ... --progress N` passes the progress count as a flag value, and this mode switch read the same
+    # word first and printed "0". fleet/runner's two reclassify steps (progress restarts the 6 h wait; a clean run that pushed work and printed no
+    # end line is the script's wait) got "0" from jq, never WAIT_CHECK, so runs that pushed work still ended FAULT "WAIT_CHECK exceeded 6 h".
+    if "--progress" in sys.argv and "--classify" not in sys.argv:
         def snap(path):
             try:
                 return {l.split(" ", 1)[1]: l.split(" ", 1)[0] for l in Path(path).read_text().splitlines() if " " in l}
