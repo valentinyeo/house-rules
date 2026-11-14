@@ -327,15 +327,17 @@ def drill_cap_deadlock(ctx):
             if got:
                 offers.append((n, got[0]["key"], got[1]))
         detected = time.time()
-        keys = {k for _, k, _ in offers}
         kept = [o for o in offers if o[2] == "kept-slot"]
         # The pool counts one unit per live runner, so 12 app tickets under one runner no longer close new work and the
-        # app bait is open to a free runner (HYCI-433). What must hold is the kept slot: both Fleet CI & Infra tickets go
-        # out before any new app work, so a heavy app pipeline can never starve CI or tools work.
+        # app bait is open to a free runner (HYCI-433). HYCI-386: only the ticket an open app ticket waits on takes the
+        # kept slot, and it still beats urgent app work. Plain urgent infra does not.
         app_at = next((i for i, o in enumerate(offers) if o[1] == "HTPR-9400"), None)
-        ci_at = [i for i, o in enumerate(offers) if o[1] in ("HYCI-9300", "HYCI-9301")]
-        ok = ({"HYCI-9300", "HYCI-9301"} <= keys and len(kept) >= 2
-              and (app_at is None or app_at > max(ci_at, default=-1)))
+        blocker_at = next((i for i, o in enumerate(offers) if o[1] == "HYCI-9300"), None)
+        plain_at = next((i for i, o in enumerate(offers) if o[1] == "HYCI-9301"), None)
+        ok = (blocker_at is not None and any(o[1] == "HYCI-9300" and o[2] == "kept-slot" for o in kept)
+              and app_at is not None and blocker_at < app_at
+              and (plain_at is None or app_at < plain_at)
+              and not any(o[1] == "HYCI-9301" and o[2] == "kept-slot" for o in offers))
         detail = "" if ok else f"offers={offers[:8]}"
         return row("cap-deadlock", start, detected, detected if ok else None, ok, detail)
     except (Exception, SystemExit) as e:

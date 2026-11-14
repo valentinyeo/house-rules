@@ -28,9 +28,10 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      and new-work tickets with an open PR remain.
       Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI & Infra (11514)
      tickets that are Urgent or that an open ticket is BlockedBy still go out, to runners that can join 11514 (LANE_CAP applies).
-  Kept slot (HYCI-186): while no other runner is on a Fleet CI & Infra (11514) ticket, this runner takes
-     one before its own app ticket, before orphans and before the PR queue. The WIP cap and LANE_CAP do not hold that one
-     ticket. The stderr line starts with "kept slot:". App work only when no such ticket is open.
+  Kept slot (HYCI-186, HYCI-386): while no other runner is on a Fleet CI & Infra (11514) ticket, this runner takes
+     one blocking ticket before its own app ticket, before orphans and before the PR queue. Blocking means an open app
+     ticket (board 15 or 2060) waits on it, or it is an incident. A plain infra ticket does not. The WIP cap and LANE_CAP
+     do not hold that one ticket. The stderr line starts with "kept slot:". Urgent app work runs when no blocker is open.
   c. Urgent new work on any board, then the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
   e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 11514
@@ -2264,6 +2265,27 @@ def blocks_known(t):
     return bool(rel) and any(is_open(k) for k in rel[1])
 
 
+def blocks_open_app(t):
+    """An open app ticket (board 15 or 2060) waits on t. A stored link is free. A missing link costs one relations read inside the cap."""
+    rel = (SNAP.get("rel") or {}).get(t["key"]) if SNAP else None
+    if rel is None:
+        if CHECKED[0] >= RELATION_CAP[0]:
+            return False
+        CHECKED[0] += 1
+        rel = relations(t["key"])
+    for k in rel[1]:
+        if PREFIX_BOARD.get((k or "").split("-")[0]) not in ("15", "2060"):
+            continue
+        if is_open(k):
+            return True
+    return False
+
+
+def spare_blocker(t):
+    """HYCI-386. The spare slot preempts app work only for an incident, or a ticket an open app ticket waits on."""
+    return INCIDENT_LABEL in (t.get("labels") or []) or blocks_open_app(t)
+
+
 def infra_count(n):
     """Other runners running a Fleet CI & Infra ticket right now."""
     return sum(1 for m in range(1, RUNNERS + 1) if m != n and (active_run(m) or "").startswith("HYCI-"))
@@ -2318,6 +2340,8 @@ def slot_candidates(n, me, skip):
         building_col = t["section"] in BOARDS[t["board"]][1]
         if not new_col and not building_col:
             continue
+        if not spare_blocker(t):
+            continue
         if not can_join(n, t["board"]):
             missed = True
             continue
@@ -2339,7 +2363,7 @@ def slot_candidates(n, me, skip):
 
 
 def take_kept_slot(n, me, cands, dry):
-    """Claim the first checks or tools ticket. None when every claim is refused."""
+    """Claim the first blocking infra ticket. None when every claim is refused."""
     log(f"kept slot: blocker {cands[0]['key']} open; app work withheld")
     for t in cands:
         if me in names(t) and t["section"] in BOARDS[t["board"]][1]:
@@ -2957,7 +2981,7 @@ def choose(n, dry):
     SKIP[0] = skip
     building = [t for t in SNAP["tickets"] if t["section"] in BOARDS[t["board"]][1]]
 
-    # kept slot: one runner on a checks or tools ticket before its own app work (HYCI-186)
+    # kept slot: one runner on a blocking infra ticket before app work (HYCI-186, HYCI-386)
     held = other_on_blocker(n)
     if held:
         log(f"kept slot: held on {held}")
@@ -4628,8 +4652,8 @@ def wip_self_test():
         MEMBERS[board] = set(names)
     try:
         t, source = choose(2, True)
-        assert (t["key"], source) == ("HYCI-1", "kept-slot"), (t["key"], source)
-        assert any(s.startswith("kept slot: blocker HYCI-1 open") for s in slot_logs), slot_logs
+        assert source == "orphan" and t["key"] in ("HTPR-20", "HTPR-29"), (t["key"], source)
+        assert any(s.startswith("kept slot: no blocker open") for s in slot_logs), slot_logs
         tickets = [x for x in tickets if x["key"] != "HYCI-1"]
         SNAP["tickets"] = list(tickets)
         SNAP["open"]["HYCI-1"] = True
@@ -4682,11 +4706,23 @@ def wip_self_test():
         SNAP["rel"]["HYCI-3"] = [[], ["HTPR-52"]]
         assert pipeline()[0] == {"HTPR-50", "HTPR-51"} and len(pipeline()[1]) == 2
         assert [t["key"] for t in ci_blockers(ci)] == ["HYCI-4", "HYCI-3"], "Urgent first, then the one an open ticket waits on"
-        assert choose(1, True) == (ci[2], "kept-slot"), "cap hit: an Urgent checks ticket still goes out on the kept slot"
+        slot_logs.clear()
+        assert choose(1, True) == (ci[1], "kept-slot"), "cap hit: an open app waiter still goes out on the spare slot"
+        assert any(s.startswith("kept slot: blocker HYCI-3 open") for s in slot_logs), slot_logs
         ci[2]["prio"] = "Medium"
-        assert choose(1, True) == (ci[1], "kept-slot"), "cap hit: a checks ticket an open ticket waits on still goes out"
         SNAP["rel"]["HYCI-3"] = [[], []]
-        assert choose(1, True) == (ci[0], "kept-slot"), "cap hit: the kept slot still takes a plain checks ticket"
+        slot_logs.clear()
+        try:
+            choose(1, True)
+            raise AssertionError("cap hit: a plain checks ticket took the spare slot")
+        except SystemExit as e:
+            assert "new work closed" in str(e), e
+        assert any(s.startswith("kept slot: no blocker open") for s in slot_logs), slot_logs
+        ci[2]["prio"] = "Urgent"
+        slot_logs.clear()
+        assert choose(1, True) == (ci[2], "ci-lane"), "cap hit: Urgent infra still goes out, not on the spare slot"
+        assert any(s.startswith("kept slot: no blocker open") for s in slot_logs), slot_logs
+        ci[2]["prio"] = "Medium"
         gate_rows("HYCI-2")
         assert picked(1) != "HYCI-2", "wait gate: the kept slot leaves a gated ticket"
         gate_rows()
@@ -4713,7 +4749,7 @@ def wip_self_test():
         (STATE / "runner-2.log").write_text(f"{iso(0.05)} cursor: HTPR-50 composer-2.5 medium\n")
         RUNNING.clear()
         ci[2]["prio"] = "Urgent"
-        assert choose(1, True) == (ci[2], "kept-slot"), "busy pool: the free runner still takes the blocker"
+        assert choose(1, True) == (ci[1], "kept-slot"), "busy pool: the free runner still takes the app blocker"
         # HYCI-277: a Backlog alarm that waits on an open ticket is not the kept slot. A closed blocker offers it again.
         alarm = tk("HYCI-277", "Backlog")
         alarm["prio"] = "Urgent"
@@ -4725,13 +4761,15 @@ def wip_self_test():
         SNAP["open"] = {}
         CHECKED[0] = 0
         set_members("11514", {"runner 1", "runner 2"})
+        slot_logs.clear()
         got = choose(2, True)
-        assert (got[0]["key"], got[1]) == ("HYCI-1", "kept-slot"), got
+        assert (got[0]["key"], got[1]) == ("HYCI-1", "ci-lane"), got
+        assert any(s.startswith("kept slot: no blocker open") for s in slot_logs), slot_logs
         SNAP["tickets"] = [alarm, plain]
         SNAP["rel"] = {"HYCI-277": [["HYCI-233"], []], "HYCI-1": [[], []]}
         SNAP["open"] = {"HYCI-233": False}
         got = choose(2, True)
-        assert (got[0]["key"], got[1]) == ("HYCI-277", "kept-slot"), got
+        assert (got[0]["key"], got[1]) == ("HYCI-277", "ci-lane"), got
         # HYCI-388: a pick that would end idle reads the links its budget left unread, up to the hard ceiling
         real_ht = ht
         reads = []
@@ -4764,6 +4802,45 @@ def wip_self_test():
         finally:
             ht = real_ht
             TRACE["why"].clear()
+        # HYCI-386: plain and Urgent infra yield to an Urgent app ticket. An app waiter, or an incident, still goes first.
+        urgent_app = tk("HTPR-386", "Bugs")
+        urgent_app["prio"] = "Urgent"
+        plain_infra = tk("HYCI-386", "Backlog")
+        urgent_infra = tk("HYCI-387", "Backlog")
+        urgent_infra["prio"] = "Urgent"
+        infra_only = tk("HYCI-390", "Backlog")
+        app_blocker = tk("HYCI-388", "Backlog")
+        soft = tk("SOFT-1", "Todo")
+        soft_blocker = tk("HYCI-391", "Backlog")
+        incident = tk("HYCI-389", "Backlog", labels=["incident"])
+        set_members("15", {"runner 1", "runner 2"})
+        set_members("2060", {"runner 1", "runner 2"})
+        SNAP["tickets"] = [urgent_app, plain_infra, urgent_infra, infra_only]
+        SNAP["rel"] = {t["key"]: [[], []] for t in SNAP["tickets"]}
+        SNAP["rel"]["HYCI-387"] = [[], ["HYCI-390"]]
+        SNAP["prs"] = []
+        SNAP["open"] = {}
+        CHECKED[0] = 0
+        slot_logs.clear()
+        got = choose(1, True)
+        assert (got[0]["key"], got[1]) == ("HTPR-386", "board"), got
+        assert any(s.startswith("kept slot: no blocker open") for s in slot_logs), slot_logs
+        assert not spare_blocker(plain_infra) and not spare_blocker(urgent_infra)
+        SNAP["tickets"] = [urgent_app, plain_infra, urgent_infra, app_blocker, soft, soft_blocker]
+        SNAP["rel"] = {t["key"]: [[], []] for t in SNAP["tickets"]}
+        SNAP["rel"]["HYCI-388"] = [[], ["HTPR-386"]]
+        SNAP["rel"]["HYCI-391"] = [[], ["SOFT-1"]]
+        assert spare_blocker(app_blocker) and spare_blocker(soft_blocker) and not spare_blocker(urgent_infra)
+        slot_logs.clear()
+        got = choose(1, True)
+        assert (got[0]["key"], got[1]) == ("HYCI-388", "kept-slot"), got
+        assert any(s.startswith("kept slot: blocker HYCI-388 open") for s in slot_logs), slot_logs
+        SNAP["tickets"] = [urgent_app, incident]
+        SNAP["rel"] = {t["key"]: [[], []] for t in SNAP["tickets"]}
+        got = choose(1, True)
+        assert (got[0]["key"], got[1]) == ("HYCI-389", "incident"), got
+        MEMBERS["15"] = None
+        MEMBERS["2060"] = None
         (STATE / "runner-2.log").unlink()
         RUNNING.clear()
         SNAP["tickets"] = [tk("HTPR-50", "AI Review")]
@@ -4774,6 +4851,7 @@ def wip_self_test():
         try_claim = real_claim
         log = real_log
         (STATE / "stop-3").unlink()
+    print("HYCI-386 spare slot ok")
 
 
 def main():
