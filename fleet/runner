@@ -57,7 +57,7 @@ validate_targets() {
 }
 log() { echo "$(date -u +%FT%TZ) $*" >> "$STATE/keeper.log"; }
 engine() { cat "$STATE/engine-${1:-0}" 2>/dev/null || cat "$STATE/engine" 2>/dev/null || echo "${HT_RUNNER_ENGINE:-cursor}"; }
-known_engine() { case $1 in cursor|codex|opencode|claude|pi-codex|pi-opencode) return 0 ;; *) return 1 ;; esac; }
+known_engine() { case $1 in cursor|codex|opencode|claude|vercel|pi-codex|pi-opencode|pi-vercel) return 0 ;; *) return 1 ;; esac; }
 # harness-N holding "pi" runs this runner's codex and opencode picks in Pi with TokenEconomizer instead of hax.
 # Same plan, same model; the pacer and picker never see it.
 PI_BIN=${PI_BIN:-$HOME/.npm-global/bin/pi}
@@ -85,7 +85,7 @@ pi_mark_auth_failure() {
   why=$(grep -a -m1 -oE 'invalid_refresh_token|invalid_grant|OAuth refresh failed[^"]*|401 Unauthorized' "$2" 2>/dev/null) || return 1
   printf '%s %s\n' "$(date -u +%FT%TZ)" "$why" > "$(pi_down_mark "$eng")"
 }
-harness() { local want=$2; [ "$(cat "$STATE/harness-$1" 2>/dev/null)" = pi ] || { echo "$want"; return; }; case $want in codex|opencode) pi_down "$want" && echo "$want" || echo "pi-$want" ;; *) echo "$want" ;; esac; }
+harness() { local want=$2; [ "$want" = vercel ] && { echo pi-vercel; return; }; [ "$(cat "$STATE/harness-$1" 2>/dev/null)" = pi ] || { echo "$want"; return; }; case $want in codex|opencode) pi_down "$want" && echo "$want" || echo "pi-$want" ;; *) echo "$want" ;; esac; }
 # The Codex CLI and Pi share one refresh token, and a refresh rotates it for the other, so Pi's copy dies
 # whenever the CLI gets there first: 9 Nov to 13 Nov of Pi Codex runs fell back to hax on exactly that (HYCI-349).
 # Pi has no login of its own; fleet/pi-login copies the CLI's live tokens in, which makes the login file newer
@@ -106,7 +106,7 @@ PROVIDER_BUSY_SECONDS=${PROVIDER_BUSY_SECONDS:-900}
 OVERLOAD_RE='inference service is overloaded|429: .*server_error|usage limit has been reached'
 plan_of_engine() {
   case $1 in
-    opencode|pi-opencode) echo opencode ;; codex|pi-codex) echo codex ;; cursor|pi-cursor) echo cursor ;; claude) echo claude ;;
+    opencode|pi-opencode) echo opencode ;; vercel|pi-vercel) echo vercel ;; codex|pi-codex) echo codex ;; cursor|pi-cursor) echo cursor ;; claude) echo claude ;;
     *) echo "$1" ;;
   esac
 }
@@ -283,6 +283,7 @@ launch() {
     opencode) base=("$HOME/.local/bin/hax" --provider=opencode-go --model="$model" --effort="$effort" --no-session -p) ;;
     pi-codex) base=("$PI_BIN" -p --provider openai-codex --model "$model" --thinking "$effort") ;;
     pi-opencode) base=("$PI_BIN" -p --provider opencode-go --model "$model" --thinking "$effort") ;;
+    pi-vercel) base=("$PI_BIN" -p --provider vercel-ai-gateway --model "$model" --thinking "$effort") ;;
     claude) base=("$HOME/.local/bin/claude" -p --model "$model" --effort "$effort" --permission-mode bypassPermissions
                   --output-format text --disallowedTools Agent Task) ;;
     *) echo "unknown engine: $eng" >&2; return 2 ;;
@@ -294,7 +295,7 @@ launch() {
   case $eng in claude)
     sid=$(cat /proc/sys/kernel/random/uuid); beat="claude-session:$sid"; base+=(--session-id "$sid") ;;
   esac
-  case $eng in pi-codex|pi-opencode)
+  case $eng in pi-codex|pi-opencode|pi-vercel)
     beat=$(pi_session_dir); base+=(--session-dir "$beat")
     [ "${LAUNCH_DRY:-}" = 1 ] || { find "$STATE/pi-session-${n:-0}" -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf {} + 2>/dev/null; mkdir -p "$beat"; } ;;
   esac
@@ -302,7 +303,7 @@ launch() {
     printf 'cd %q &&' "$repo"
     case $eng in codex|opencode) printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1' ;; claude) printf ' (ANTHROPIC_* unset: subscription login, RUNNER_EVENTS_WAIT_MAX=%s)' "${RUNNER_EVENTS_WAIT_MAX:-1}" ;; esac
     [ "$eng" = opencode ] && printf ' OPENCODE_API_KEY=<from stack-key, %s>' "$([ -n "${OC_KEY:-}" ] && echo loaded || echo 'not loaded')"
-    case $eng in pi-codex|pi-opencode) printf ' PATH=%q:$PATH' "$HERE/no-wait-bin" ;; esac
+    case $eng in pi-codex|pi-opencode|pi-vercel) printf ' PATH=%q:$PATH' "$HERE/no-wait-bin" ;; esac
     printf ' timeout 3h'; printf ' %q' "${base[@]}"
     if [ "$eng" = cursor ]; then printf ' <brief, %d chars>\n' "${#brief}"; else printf ' < <brief, %d chars on stdin>\n' "${#brief}"; fi
     return 0
@@ -328,11 +329,12 @@ launch() {
         [ "$eng" = opencode ] && export OPENCODE_API_KEY="$OC_KEY"
         # TokenEconomizer's own calls stay on the run's plan, never Pi's default provider (OpenRouter, paid).
         case $eng in pi-codex) export TE_PYTHON=python3 TE_PAID_MODEL=openai-codex/gpt-6-luna ;;
-                     pi-opencode) export TE_PYTHON=python3 TE_PAID_MODEL=opencode-go/deepseek-v4.1-flash ;; esac
+                     pi-opencode) export TE_PYTHON=python3 TE_PAID_MODEL=opencode-go/deepseek-v4.1-flash ;;
+                     pi-vercel) export TE_PYTHON=python3 TE_PAID_MODEL=vercel-ai-gateway/deepseek/deepseek-v4.1-flash ;; esac
         # te-off-N: the A/B control runner. TokenEconomizer logs cost but acts on nothing (Valentin 8 Nov: "how good it is").
         [ -f "$STATE/te-off-${n:-0}" ] && export TE_SHADOW=1
         # No waiting inside a run (HYCI-414): Pi attempts get a `sleep` that refuses 60s or more, so the run ends on its own check read.
-        case $eng in pi-codex|pi-opencode) export PATH="$HERE/no-wait-bin:$PATH" NO_WAIT_LOG="$STATE/no-wait.log" NO_WAIT_RUNNER="${n:-0}" ;; esac
+        case $eng in pi-codex|pi-opencode|pi-vercel) export PATH="$HERE/no-wait-bin:$PATH" NO_WAIT_LOG="$STATE/no-wait.log" NO_WAIT_RUNNER="${n:-0}" ;; esac
         printf '%s' "$brief" | timeout 3h "${base[@]}"
       ) & apid=$!
     fi
@@ -404,7 +406,7 @@ run_brief() {
     codex) engine_line="you run in hax on the Codex plan ($model, effort $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok or Claude only. Single thread: never start hax helpers, subagents or any other agent." ;;
     claude) engine_line="you run in Claude Code on the Claude subscription ($model, effort $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok, Codex or hax only. Single thread: never use the Agent or Task tool, never start subagents, helpers or any other agent, and never use an API key." ;;
     opencode) engine_line="you run in hax on the OpenCode Go plan with DeepSeek 4.1 Flash (effort $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok, Codex or Claude only. Single thread: never start hax helpers, subagents or any other agent, and never use any other provider or key." ;;
-    pi-codex|pi-opencode) engine_line="you run in Pi on the ${eng#pi-} plan ($model, thinking $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok, Codex, hax or Claude only. Single thread: never start helpers, subagents or any other agent, and never use any other provider or key." ;;
+    pi-codex|pi-opencode|pi-vercel) engine_line="you run in Pi on the ${eng#pi-} plan ($model, thinking $effort) as RUNNER $n, one pool for every kind of ticket. That is allowed; ignore any line below that says Cursor, Grok, Codex, hax or Claude only. Single thread: never start helpers, subagents or any other agent, and never use any other provider or key." ;;
   esac
   echo "ENGINE (Valentin 2026-11-07): $engine_line" \
        "YOUR TICKET THIS RUN (set by the launcher, overrides every pick rule below): $ticket ($source; claimed for you). Work only on $ticket; do not run pr-drain-pick, ci-pick or any other picker and do not pick another ticket." \
@@ -471,6 +473,7 @@ case "${1:-}" in
     [ "$(wc -l < "$NO_WAIT_LOG")" = 6 ] || { echo "no-wait self-test FAILED: refusals not logged: $(cat "$NO_WAIT_LOG")" >&2; bad=1; }
     grep -q 'runner=9 sleep=480s' "$NO_WAIT_LOG" || { echo 'no-wait self-test FAILED: log line wrong' >&2; bad=1; }
     LAUNCH_DRY=1 launch pi-opencode deepseek-v4.1-flash high /tmp x 2>&1 | grep -q "no-wait-bin" || { echo 'no-wait self-test FAILED: the dry launch does not put no-wait-bin on PATH' >&2; bad=1; }
+    LAUNCH_DRY=1 launch pi-vercel deepseek/deepseek-v4.1-flash low /tmp x 2>&1 | grep -q "no-wait-bin" || { echo 'no-wait self-test FAILED: the pi-vercel dry launch does not put no-wait-bin on PATH' >&2; bad=1; }
     [ "$bad" = 0 ] && echo 'fleet/runner no-wait self-test ok'
     exit "$bad" ;;
   reply-cap-selftest)
@@ -677,6 +680,10 @@ case "${1:-}" in
     expect 'a mark moves the slot to hax' "$(harness 1 codex)" codex
     touch -d '7 hours ago' "$(pi_down_mark codex)"
     expect 'a rejected refresh token stays down past six hours' "$(harness 1 codex)" codex
+    expect 'Vercel Token Pass always runs in Pi, never on hax or another provider' "$(harness 2 vercel)" pi-vercel
+    expect 'Vercel Token Pass ignores a pi harness file too' "$(harness 1 vercel)" pi-vercel
+    expect 'pi-vercel is the vercel plan' "$(plan_of_engine pi-vercel)" vercel
+    LAUNCH_DRY=1 launch pi-vercel deepseek/deepseek-v4.1-flash low /tmp x 2>&1 | grep -q -- '--provider vercel-ai-gateway --model deepseek/deepseek-v4.1-flash' || { echo 'harness self-test FAILED: pi-vercel launches another provider or model' >&2; bad=1; }
     echo pi > "$STATE/harness-3"; printf '401 Unauthorized\n' > "$tmp/open.log"; pi_mark_auth_failure pi-opencode "$tmp/open.log"
     expect 'a down opencode login falls back the same way' "$(harness 3 opencode)" opencode
     touch "$PI_AUTH"
@@ -784,7 +791,7 @@ TM
   tick) "$SELF" top-up ;;
   status)
     echo "target=$(target) max=$(maxcap) engines: $(for i in $(seq 1 "$(target)"); do printf '%s=%s ' "$i" "$(engine "$i")"; done)"
-    for p in cursor codex opencode claude; do
+    for p in cursor codex opencode vercel claude; do
       left=$(provider_busy_left "$p"); [ "${left:-0}" -gt 0 ] && echo "provider busy: $p ${left}s left"
     done; green && echo "green: $GREEN_WHY" || echo "not green: $GREEN_WHY"
     [ -f "$STATE/PAUSED" ] && echo "PAUSED"
@@ -797,7 +804,8 @@ TM
     # Proves the launch path for one engine without a ticket: prints the command; --noop also runs it on a one-line
     # brief in an empty directory and checks the reply.
     eng=${2:-}; model=${3:-}; effort=${4:-medium}
-    known_engine "$eng" && [ -n "$model" ] || { echo 'fleet/runner launch-check <cursor|codex|opencode|claude> <model> <effort> [--noop]' >&2; exit 2; }
+    [ "$eng" = vercel ] && eng=pi-vercel
+    known_engine "$eng" && [ -n "$model" ] || { echo 'fleet/runner launch-check <cursor|codex|opencode|vercel|claude> <model> <effort> [--noop]' >&2; exit 2; }
     [ "$eng" = opencode ] && { opencode_key || { echo "no OpenCode Go key from stack-key" >&2; exit 1; }; }
     dir=$(mktemp -d); noop="Reply with exactly this line and nothing else: RUNNER_LAUNCH_OK"
     LAUNCH_DRY=1 launch "$eng" "$model" "$effort" "$dir" "$noop"

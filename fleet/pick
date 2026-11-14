@@ -224,6 +224,8 @@ ENGINES = {
                   park=("gpt-6.1-terra", "medium"), incident=None),
     "opencode": dict(plan="opencode", brains={"light": ("deepseek-v4.1-flash", "low"), "medium": ("deepseek-v4.1-flash", "high")},
                      park=("deepseek-v4.1-flash", "low"), incident=None),
+    "vercel": dict(plan="vercel", brains={"light": ("deepseek/deepseek-v4.1-flash", "low"), "medium": ("deepseek/deepseek-v4.1-flash", "low")},
+                   park=("deepseek/deepseek-v4.1-flash", "low"), incident=None),
     "claude": dict(plan="claude", brains={"light": ("sonnet", "medium"), "medium": ("sonnet", "medium"),
                                           "hard": ("sonnet", "high")},  # HYCI-396: Sonnet high for hard; extra-hard skips Claude (Opus only on Valentin's order)
                    park=("sonnet", "medium"), incident=None),
@@ -567,17 +569,18 @@ def brain_tag(t):
 
 # DeepSeek medium runs, 7 to 10 Nov: FEATURE or IMPROVEMENT tickets timed out on 9 of 26 (35%), others on 0 of 25 (HYCI-243).
 OPENCODE_SKIP_LABELS = {"feature", "improvement", "design-pass"}
+DEEPSEEK_ENGINES = ("opencode", "vercel")
 
 
 def engine_skips(e, t):
     """Engine e does not take t: it skips t's brain (opencode and brain-hard), t timed out on OpenCode in the last 24h,
     or t is a feature or improvement, which OpenCode keeps timing out on whatever its brain tag says."""
-    return brain_tag(t) not in ENGINES[e]["brains"] or (e == "opencode" and (
+    return brain_tag(t) not in ENGINES[e]["brains"] or (e in DEEPSEEK_ENGINES and (
         opencode_timed_out(t["key"]) or bool(OPENCODE_SKIP_LABELS & set(t["labels"]))))
 
 
 def timed_out_here(t):
-    return ENGINE == "opencode" and opencode_timed_out(t["key"])
+    return ENGINE in DEEPSEEK_ENGINES and opencode_timed_out(t["key"])
 
 
 PC_PORT = int(os.environ.get("FLEET_PC_PORT", "15037"))
@@ -1748,7 +1751,7 @@ def opencode_timed_out(key):
     review bot until the clock runs out (9 of 88 runs on 2026-11-10), so the ticket goes to another engine."""
     now = dt.datetime.now(dt.timezone.utc)
     for r in ledger_rows():
-        if (r.get("ticket") == key and r.get("engine") in ("opencode", "pi-opencode")
+        if (r.get("ticket") == key and r.get("engine") in ("opencode", "pi-opencode", "vercel", "pi-vercel")
                 and str(r.get("detail", "")).startswith("timeout")):
             when = stamp_time(r.get("ts", ""))
             if when and (now - when).total_seconds() < ESCALATE_WINDOW:
@@ -3503,6 +3506,9 @@ def self_test():
     assert "never change its code" not in render(5, t, "board")["brief"], "build work is never told it is a cross-QA"
     assert "never change its code" in render(5, t, "cross-qa")["brief"], "a cross-qa run gets the check-only rule"
     assert engine_skips("opencode", {**t, "labels": ["brain-medium", "feature"]}), "OpenCode skips medium features"
+    assert engine_skips("vercel", {**t, "labels": ["brain-medium", "feature"]}), "the same DeepSeek model skips medium features on the Token Pass too"
+    assert not engine_skips("vercel", {**t, "labels": ["brain-medium", "bug"]}) and engine_skips("vercel", {**t, "labels": ["brain-hard"]}), "Token Pass takes light and medium only"
+    assert ENGINES["vercel"]["brains"]["medium"][0] == "deepseek/deepseek-v4.1-flash", "one named model"
     assert not engine_skips("cursor", {**t, "labels": ["brain-medium", "feature"]}), "Cursor still takes medium features"
     assert brain(hard)[1:] == ("grok-4.7-high", "high"), "no allocation: the built-in map"
     m = {"light": {"id": "composer-2.5", "effort": "medium"}, "medium": {"id": "composer-2.5", "effort": "medium"},
