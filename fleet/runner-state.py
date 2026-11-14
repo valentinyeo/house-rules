@@ -54,6 +54,35 @@ STALL = re.compile(r"no model reply|reply cap|reply stalled", re.I)
 # back every 20 to 30 minutes while the CI repair it named was still open. A line that names another ticket as what it is blocked by,
 # awaiting or blocked on is a wait on that ticket: PARKED with waits, which fleet/park turns into a BlockedBy hold.
 TICKET_WAIT = re.compile(r"waits on|waiting on|parked on|BlockedBy|blocked by|blocked on|awaiting|awaits", re.I)
+# HYCI-408 (HTPR-7766, 8 and 9 Nov: 165 runs in nine hours, median 0.6 minutes apart): a runner whose board write was
+# refused (`vcc: ... has no board login; refusing to write`, a write guard, an identity or permission guard) ended as
+# `RUNNER IDLE board-write-blocked`. That read as a plain wait, the picker brought the same ticket back, and nothing
+# named the guard. A refused write is a FAULT that names the guard and parks on the lead, so the ticket leaves the pool
+# on its first run. Only the write-guard words match: a real wait on checks, a person or another ticket stays a wait.
+BOARD_WRITE_REFUSED = re.compile(
+    r"board[- ]?writ|write[- ]?guard|write[- ]?blocked|identity[- ]?guard|identity[- ]?blocked"
+    r"|(?:helper|runner|launcher|board)[- ]?guard"
+    r"|(?:runner|helper|board|launcher)[- ](?:identity|access|authorization|permissions?)"
+    r"|board[- ]?(?:access|authorization|permissions)|authorization[- ]blocked|board[- ]identity"
+    r"|has no board login|empty board login|refus(?:ed|ing)[^.;]{0,40}\bwrit"
+    r"|(?:cross[- ]?qa[- ]failed|failed[- ]?qa)[^.;]{0,20}(?:routing|transition|recording)[- ]blocked", re.I)
+GUARDS = (
+    (re.compile(r"no board login|empty board login|identity|authorization|permissions?|access|helper", re.I),
+     "vcc identity guard"),
+    (re.compile(r"routing|transition|recording", re.I), "vcc completion guard"),
+)
+
+
+def refused_guard(line):
+    """The guard a refused board write names, or "" when the line is not a refusal. HYCI-408."""
+    if not line or not BOARD_WRITE_REFUSED.search(line):
+        return ""
+    for rx, name in GUARDS:
+        if rx.search(line):
+            return name
+    return "board write guard"
+
+
 # Live proof that needs Valentin's PC or the check phone, while it is off (IGSH-1923, IGSH-1925, HYCI-256, 11 Nov night).
 PC_WAIT = re.compile(r"\b(?:desktops?|laptops?|PC|phone|computer|Windows)\b[^.;]{0,40}\b(?:disconnected|unavailable|unreachable|offline|cannot be reached)"
                      r"|\b(?:disconnected|unavailable|unreachable|offline)\b[^.;]{0,20}\b(?:desktops?|laptops?|PC|phone)\b", re.I)
@@ -151,6 +180,9 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False, progress=
         return _out("FAULT", "FAIL", detail=line[:160])
     if line and PC_WAIT.search(line):
         return _out("PARKED", "PARKED", park="pc", detail=line[:160])
+    guard = refused_guard(line)
+    if guard:
+        return _out("FAULT", "FAULT", park="lead", detail=f"board write refused by the {guard}: {line[:120]}")
     if line and HUMAN.search(line):
         why = "unknown state: flag approval is not a state" if re.search(r"flag approval", line, re.I) else "unknown state: waiting on a person is not a state"
         return _out("FAULT", "FAULT", park="lead", detail=why)
@@ -387,6 +419,48 @@ def self_test():
     human = classify("RUNNER IDLE waiting on Valentin flag approval", 0, 600, "", 0, "HTPR-1")
     assert human["state"] == "FAULT" and human["park"] == "lead", human
     assert "unknown state" in human["detail"] and "flag approval" in human["detail"], human
+    # HYCI-408: the exact endings HTPR-7766 looped on for 165 runs on 8 and 9 Nov. Each is a fault that names the guard and
+    # parks on the lead, so the ticket leaves the pool on run 1 of the replay instead of coming back every minute.
+    replay = [
+        "RUNNER IDLE HTPR-7766 board-write-blocked",
+        "RUNNER IDLE board-write-guard",
+        "RUNNER IDLE board-write-guard-blocked",
+        "RUNNER IDLE HTPR-7766 board-write-guard",
+        "RUNNER IDLE HTPR-7766 board-write guard blocks HTPR-7766 QA handoff",
+        "RUNNER IDLE board-write guard blocks failed-QA routing",
+        "RUNNER IDLE cross-qa-failed board-writes-blocked",
+        "RUNNER IDLE identity-guard-blocked",
+        "RUNNER IDLE HTPR-7766 runner-identity-blocked",
+        "RUNNER IDLE helper-guard blocks HTPR-7766 QA handoff",
+        "RUNNER IDLE authorization-blocked",
+        "RUNNER IDLE HTPR-7766 board-write authorization blocked",
+        "RUNNER IDLE board-write-permissions",
+        "RUNNER IDLE blocked-board-permissions",
+        "RUNNER IDLE write-guard-blocked",
+        "RUNNER IDLE failed-QA-routing-blocked",
+        "RUNNER IDLE board-identity-guard",
+        "RUNNER IDLE HTPR-7766 cross-QA failed; board-write guard blocked handoff",
+    ]
+    for note in replay:
+        row = classify(note, 0, 40, "", 0, "HTPR-7766")
+        assert row["state"] == "FAULT" and row["result"] == "FAULT" and row["park"] == "lead", (note, row)
+        assert "board write refused" in row["detail"] and "guard" in row["detail"], (note, row)
+    assert "identity guard" in classify("RUNNER IDLE identity-guard-blocked", 0, 40, "", 0, "HTPR-1")["detail"]
+    assert "completion guard" in classify("RUNNER IDLE failed-QA-routing-blocked", 0, 40, "", 0, "HTPR-1")["detail"]
+    assert "board write guard" in classify("RUNNER IDLE board-write-guard", 0, 40, "", 0, "HTPR-1")["detail"]
+    vcc_line = "vcc: ht-or-runner-5 has no board login; refusing to write as Valentins Claude Code"
+    vcc_refusal = classify("RUNNER IDLE " + vcc_line, 0, 40, "", 0, "HTPR-1")
+    assert vcc_refusal["state"] == "FAULT" and vcc_refusal["park"] == "lead" and "identity guard" in vcc_refusal["detail"], vcc_refusal
+    # The risk the ticket names: a real wait must not be read as a refusal.
+    for note, state, park in (
+            ("RUNNER IDLE checks pending", "WAIT_CHECK", ""),
+            ("RUNNER IDLE HTPR-7766 recheck 02:10 UTC", "WAIT_CHECK", ""),
+            ("RUNNER IDLE HTPR-7766 in QA for an independent cross-QA", "WAIT_CHECK", ""),
+            ("RUNNER IDLE HYCI-1 blocked by HYCI-140", "PARKED", "waits"),
+            ("RUNNER IDLE something new", "WAIT_CHECK", "")):
+        row = classify(note, 0, 40, "", 0, note.split()[2] if len(note.split()) > 2 and "-" in note.split()[2] else "")
+        assert row["state"] == state and row["park"] == park, (note, row)
+    assert not refused_guard("RUNNER IDLE checks pending") and not refused_guard("RUNNER IDLE blocked by HYCI-140"), "a wait is no refusal"
     assert classify("RUNNER IDLE waits on Valentin for a flag", 0, 600, "", 0, "HTPR-1")["park"] == "lead"
     done = classify("INFRA RUNNER DONE HYCI-1 Done", 0, 400, "", 0, "HYCI-1")
     assert done["state"] == "BUILDING" and done["result"] == "DONE" and done["park"] == ""
@@ -522,6 +596,7 @@ def self_test():
     runner = Path(__file__).with_name("runner").read_text()
     assert 'grep -q "RUNNER IDLE"' not in runner
     assert "unknown state" in runner and "flag approval" in runner
+    assert '--lead --why "$detail"' in runner, "a lead-parked fault (a refused write) reaches fleet/park --lead in the same run"
     import tempfile
     tmp = tempfile.mkdtemp()
     git = lambda *a: subprocess.run(["git", "-C", tmp, "-c", "user.email=t@t", "-c", "user.name=t", *a], capture_output=True, text=True, check=True)
