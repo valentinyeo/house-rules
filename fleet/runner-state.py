@@ -60,10 +60,24 @@ ONE_RUN_FLAG = Path(os.environ.get("FLEET_ONE_RUN_FLAG", Path.home() / ".local/s
 PR_WAIT = re.compile(r"\bPR\s*#?\d+\b", re.I)
 
 
-def _wait_detail(line):
-    """Detail of a WAIT_CHECK ending. A wait on a named PR while the one-run hold is live is a script's wait, not a runner's leave."""
+# 14 Nov (HYCI-388, SOFT-1974 run 3): the run opened follow-up PR 979 and ended "RUNNER IDLE checks pending" without the PR number.
+# fleet/sf-release-watch already held the ticket in state pr or release (sf-release-wait.json), so that wait was the script's too.
+SF_WAIT_FILE = Path(os.environ.get("SF_RELEASE_WAIT") or Path.home() / ".local/state/fleet/sf-release-wait.json")
+
+
+def _sf_script_waits(ticket):
+    """True when fleet/sf-release-watch holds this ticket in state pr or release."""
+    try:
+        row = json.loads(SF_WAIT_FILE.read_text()).get("tickets", {}).get(ticket or "", {})
+    except (OSError, ValueError, AttributeError):
+        return False
+    return row.get("state") in ("pr", "release")
+
+
+def _wait_detail(line, ticket=""):
+    """Detail of a WAIT_CHECK ending. A wait on a named PR while the one-run hold is live, or on a ticket sf-release-watch holds, is a script's wait, not a runner's leave."""
     text = line[:160]
-    if PR_WAIT.search(line) and ONE_RUN_FLAG.exists():
+    if (PR_WAIT.search(line) and ONE_RUN_FLAG.exists()) or _sf_script_waits(ticket):
         return ("script owns: " + text)[:160]
     return text
 
@@ -126,7 +140,7 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
     if line and WAIT.search(line):
         if waited is not None and int(waited) >= WAIT_LIMIT:
             return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 6 h")
-        return _out("WAIT_CHECK", "WAIT_CHECK", detail=_wait_detail(line))
+        return _out("WAIT_CHECK", "WAIT_CHECK", detail=_wait_detail(line, ticket))
     if line and OWN.search(line):
         return _out("OWN_PR", "DONE", detail=line[:160])
     if line and TICKET_WAIT.search(line):
@@ -142,7 +156,7 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
     if line and re.search(r"\bRUNNER IDLE\b", line):
         if waited is not None and int(waited) >= WAIT_LIMIT:
             return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 6 h")
-        return _out("WAIT_CHECK", "WAIT_CHECK", detail=_wait_detail(line))
+        return _out("WAIT_CHECK", "WAIT_CHECK", detail=_wait_detail(line, ticket))
     if int(rc) == 124 or int(elapsed) >= 3 * 3600 - 10:
         return _out("FAULT", "FAIL", detail="timeout: hit the 3h run limit")
     if not line and (int(rc) != 0 or int(elapsed) < 120):
@@ -398,6 +412,17 @@ def self_test():
         nopr = classify("RUNNER IDLE checks pending", 0, 400, "", 0, "HYCI-1")
         assert not nopr["detail"].startswith("script owns"), "no PR named: still the runner's wait"
     ONE_RUN_FLAG = saved_flag
+    global SF_WAIT_FILE
+    saved_sf = SF_WAIT_FILE
+    with tempfile.TemporaryDirectory() as td:
+        SF_WAIT_FILE = Path(td) / "sf-release-wait.json"
+        SF_WAIT_FILE.write_text(json.dumps({"tickets": {"SOFT-1974": {"state": "pr"}, "SOFT-1975": {"state": "attention"}}}))
+        held = classify("RUNNER IDLE checks pending", 0, 400, "", 0, "SOFT-1974")
+        assert held["detail"].startswith("script owns: "), "sf-release-watch holds it: the script's wait"
+        assert leave_verdict(held["state"], held["detail"], json.loads(VALID_LEAVES.read_text()))[0] == "skip"
+        red = classify("RUNNER IDLE checks pending", 0, 400, "", 0, "SOFT-1975")
+        assert not red["detail"].startswith("script owns"), "a red PR (attention) is the runner's"
+    SF_WAIT_FILE = saved_sf
     pc = classify("RUNNER IDLE IGSH-1923 desktop disconnected; live proof pending", 0, 400, "", 0, "IGSH-1923")
     assert pc["state"] == "PARKED" and pc["park"] == "pc", pc
     assert classify("RUNNER IDLE IGSH-1925 live-proof unavailable; laptops disconnected", 0, 400, "", 0, "IGSH-1925")["park"] == "pc"
