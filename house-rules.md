@@ -18,7 +18,7 @@ Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house
 
 ## Models
 - Fast mode off everywhere.
-- No automatic model fallback or router chain. Paid APIs (DeepSeek, OpenRouter) only when Valentin says so, per case, prepaid, one named model. Otherwise subscription auth only.
+- No automatic model fallback or router chain. DeepSeek is allowed.
 - A runner's brain comes from the ticket's brain tag. Map, roles, engines: `reference/brain-map.md`, `reference/engines.md`.
 - HARD: script first. Anything a script can do runs as a script on a timer, with no model. A model wakes only when the script finds work it cannot do. Then climb the ladder: Haiku, Sonnet, Opus only for the hardest cases. A chat with Valentin may run on Opus; its checks, crons and loops may not. Code work goes to the runner pool as a ticket. Opus in a timer needs `# opus-scan: allow` and a reason.
 - HARD: Cursor has no extra charges. Never report, propose or count Cursor extra usage as money.
