@@ -48,6 +48,7 @@ EXTRA_REPOS = [r for r in (os.environ.get("SF_EXTRA_REPOS") or "valentinyeo/hous
 EXTRA_BOARD = "11514"
 EXTRA_COLUMNS = ("In Progress", "AI Review")
 LOOKBACK_S = 24 * 3600  # a PR merged longer ago than this is not this ticket's release wait
+LOOKUP_CAP = 10  # tickets per repo per sweep looked up by number when no recent PR names them (HYCI-431)
 STALL_S = 3 * 3600  # a release this late is a model's job
 SF_PREFIXES = ("IGSH", "SOFT")
 SESSION = os.environ.get("SHIP_SESSION_NAME") or "Multi Bot Opus Lead"
@@ -214,6 +215,15 @@ class Hub:
                        "number,title,headRefName,state,isDraft,mergedAt,mergeCommit,updatedAt,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus",
                        plain=repo in EXTRA_REPOS)
 
+    def find_prs(self, repo, number):
+        """HYCI-431: PRs naming board 2060 ticket `number` that fell out of prs()'s 30 most recent (SOFT-1773: PR 843 merged 13 Nov
+        23:03 and released, yet newer PRs hid it, so the ticket read "none", never moved to Done and a runner waited on it again
+        and again). A GitHub title search for the number, kept only when the title or branch names the ticket."""
+        rows = self.gh("pr", "list", "-R", repo, "--state", "all", "--limit", "10", "--search", f"{number} in:title", "--json",
+                       "number,title,headRefName,state,isDraft,mergedAt,mergeCommit,updatedAt,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus",
+                       plain=repo in EXTRA_REPOS) or []
+        return [p for p in rows if names_ticket(p.get("title"), number) or names_ticket(p.get("headRefName"), number)]
+
     def releases(self, repo):
         rows = self.gh("release", "list", "-R", repo, "--limit", "20", "--json", "tagName,publishedAt,isDraft,isPrerelease")
         return [r for r in rows if not r["isDraft"] and not r["isPrerelease"] and r.get("publishedAt")]
@@ -277,10 +287,19 @@ def sweep(hub, now):
                 releases = hub.releases(repo)
             return releases
 
+        lookups = 0
         for key, n, section, labels in tickets:
             try:
+                mine_prs = prs
+                if lookups < LOOKUP_CAP and not any(names_ticket(p.get("title"), n) or names_ticket(p.get("headRefName"), n) for p in prs):
+                    lookups += 1  # no recent PR names this ticket: look it up by number, a few per repo per sweep
+                    try:
+                        have = {p["number"] for p in prs}
+                        mine_prs = prs + [p for p in hub.find_prs(repo, n) if p["number"] not in have]
+                    except RuntimeError:
+                        mine_prs = prs
                 state, detail, since, tag, sha = classify(
-                    n, prs, lazy_releases() if any(p["state"] == "MERGED" for p in prs) else [],
+                    n, mine_prs, lazy_releases() if any(p["state"] == "MERGED" for p in mine_prs) else [],
                     lambda s, t: hub.contains(repo, s, t), lambda t: hub.notes(repo, t), lambda s: hub.run_failed(repo, s), now, section)
                 if state == "merge" and "wasted runs" in labels:  # three empty runs: its owner looks at it first, the script does not merge it
                     state, detail = "attention", f"{detail}, ticket has Wasted Runs"
@@ -397,6 +416,9 @@ def self_test():
 
         def prs(self, repo):
             return self._prs
+
+        def find_prs(self, repo, number):
+            return []
 
         def releases(self, repo):
             return self._rel

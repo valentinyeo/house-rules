@@ -912,7 +912,29 @@ def resting(n, dry):
     # only lifts on a ticket edit or after two hours, so it held SOFT-2277 (Runner 3, 13 Nov 22:06) for two hours after PR 975
     # turned red while the gate had already let it go.
     rest -= _GATE.get("tracked", set())
+    rest -= fault_rest_over(rest, now)
     return rest | set(waits_until(now)) | gate | one_run_hold(dry, now)
+
+
+FAULT_REST = 600  # a run that died is rested ten minutes, not two hours
+
+
+def fault_rest_over(rest, now):
+    """HYCI-431 (14 Nov): a rest says "this ticket waits on someone else". A FAULT that names no CI, PR or blocker (died, unknown end
+    state, provider outage, empty note) waits on nobody, yet rested the ticket two hours: SOFT-2276 on R7 after "unknown state".
+    Keys whose newest run is such a FAULT, older than FAULT_REST, leave the rest. A wait-like FAULT (wait_end) keeps it."""
+    if not rest:
+        return set()
+    try:
+        last = {}
+        for r in ledger_rows():
+            key, when = r.get("ticket"), stamp_time(r.get("ts", ""))
+            if key in rest and when and (key not in last or when >= last[key][0]):
+                last[key] = (when, r)
+        return {k for k, (when, r) in last.items()
+                if r.get("state") == "FAULT" and not wait_end(r) and (now - when).total_seconds() > FAULT_REST}
+    except Exception:
+        return set()
 
 
 class Skip:
@@ -1410,6 +1432,14 @@ def gate_verdict(t, when, row, base, parts, now):
             and WAIT_CI.search(text) and not re.search(r"review", text, re.I):
         return False, "checks already finished"
     if not seen[0] and not seen[1]:
+        # HYCI-431 (14 Nov): fleet/sf-release-watch listed the PR red after the run ended on "checks pending": SOFT-2279 and SOFT-1969
+        # sat out their 30 blind minutes with a red PR and nobody to fix it. The watch is the script that sees the PR, so a red read
+        # newer than the end ends the hold, at most once per ticket per blind window (a run that ends waiting on the same red PR is
+        # held again instead of looping).
+        red = sf_attention(t, now)
+        if red and red[0] > when.timestamp() and now.timestamp() - base.get("sf_rel", 0) > WAIT_GATE_BLIND:
+            base["sf_rel"] = now.timestamp()
+            return False, f"sf red: {red[1]}"[:60]
         m = RECHECK_HM.search(text)
         until = WAIT_GATE_BLIND
         if m:
@@ -1439,6 +1469,22 @@ def sf_wait_listed(t, now):
         return row.get("detail") or row["state"]
     except Exception:
         return ""
+
+
+def sf_attention(t, now):
+    """(file time, detail) when fleet/sf-release-watch lists this ticket as attention (a red, conflicting or change-requested PR, a
+    failed release): a model has work. Same file and freshness as sf_wait_listed. Fails open (None)."""
+    try:
+        doc = json.loads(SF_RELEASE_WAIT.read_text())
+        at = float(doc["at"])
+        if now.timestamp() - at > SF_WAIT_FRESH_S or INCIDENT_LABEL in t["labels"]:
+            return None
+        row = next((r for k, r in doc["tickets"].items() if ticket_id(k) == ticket_id(t["key"])), None)
+        if not row or row.get("state") != "attention":
+            return None
+        return at, row.get("detail") or "attention"
+    except Exception:
+        return None
 
 
 def wait_gate(dry, now=None):
@@ -1473,7 +1519,8 @@ def wait_gate(dry, now=None):
             base = state.get(key)
             if not base or base.get("end") != end:
                 late = (now - when).total_seconds() > WAIT_GATE_LATE
-                base = {"end": end, "at": int(now.timestamp()), "late": late, "parts": parts}
+                base = {"end": end, "at": int(now.timestamp()), "late": late, "parts": parts,
+                        "sf_rel": (base or {}).get("sf_rel", 0)}
                 state[key] = base
                 dirty = True
                 if late:
@@ -1762,6 +1809,23 @@ def opencode_timed_out(key):
             if when and (now - when).total_seconds() < ESCALATE_WINDOW:
                 return True
     return False
+
+
+def release_timed_out_owners(owners, dry):
+    """HYCI-431 (14 Nov): a ticket that hit the 3h run limit on a DeepSeek engine is skipped by every DeepSeek runner for 24 hours
+    (engine_skips), and its durable owner is a DeepSeek runner, so nobody could take it: SOFT-2275 (red PR 974) and HTPR-9274 sat
+    held on R13 and R10. Same as TOO HARD: the owner pin goes so a runner on another engine adopts it as an orphan. Owners.prepare
+    would rebind it from the board assignee, so the pin is cleared in memory on every pick; the record is dropped before a bind."""
+    for t in SNAP["tickets"] + SNAP.get("incidents", []):
+        o = t.get("_owner")
+        if not o:
+            continue
+        engine = o.get("engine") or runner_engine(o["runner"])
+        if engine in DEEPSEEK_ENGINES and opencode_timed_out(t["key"]):
+            if not dry:
+                owners.release(t["key"])
+            t["_owner"] = None
+            log(f"owner released: {t['key']} timed out on {engine} (Runner {o['runner']}); another engine may adopt it")
 
 
 PARK_MERGE = 90  # seconds: a run's PARKED result and the fleet/park action it triggers are one park
@@ -2547,7 +2611,13 @@ def choose(n, dry):
             if f"runner {n}" not in names(t) and not try_claim(n, t, "board", dry):
                 raise SystemExit(f"none: Runner {n} keeps {t['key']}; assignment could not resume")
             return t, "own"
-        raise SystemExit(f"none: Runner {n} keeps {owned[0]['key']}; waiting, no hand-off")
+        # HYCI-431 (14 Nov): the "one runner, one ticket until live" rule binds a runner to tickets in In Progress, AI Review or QA
+        # (a building column). An owned ticket in Backlog or Todo that waits (BlockedBy, a rest) does not: R9 sat idle on HTPR-9205
+        # (Backlog, BlockedBy open) while new work was open. Only a waiting ticket in a building column ends the pick here.
+        building_wait = next((t for t in owned if t["section"] in BOARDS[t["board"]][1]), None)
+        if building_wait:
+            raise SystemExit(f"none: Runner {n} keeps {building_wait['key']}; waiting, no hand-off")
+        log(f"own: Runner {n} keeps {owned[0]['key']} in {owned[0]['section']} (not a building column); new work may start")
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
     others = {k for k, who in taken.items() if who != str(n)}
@@ -4071,6 +4141,7 @@ def main():
         SNAP = load_snapshot()
         owners = Owners(STATE, HERE / "roster.json")
         owners.prepare(SNAP["tickets"] + SNAP.get("incidents", []), write=not dry)
+        release_timed_out_owners(owners, dry)
         owned = sorted((t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == n),
                        key=lambda t: (t["created"], t["key"]))
         if owned and owned[0]["_owner"].get("engine"):
