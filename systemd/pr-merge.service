@@ -1,0 +1,9 @@
+[Unit]
+Description=Merge green pull requests, one script instance per PR, no model (HYCI-352)
+
+[Service]
+Type=oneshot
+Nice=10
+TimeoutStartSec=900
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 %h/.local/share/house-rules/fleet/pr-merge

@@ -1,0 +1,700 @@
+#!/usr/bin/env python3
+"""fleet/pr-merge: merge a green pull request with a script, no model, no shared queue (HYCI-352).
+
+    fleet/pr-merge [--dry-run] [--repo OWNER/NAME]      sweep: start one `one` process per open PR that needs an action
+    fleet/pr-merge one OWNER/NAME NUMBER [--dry-run]    act on one PR (what each sweep process runs)
+    fleet/pr-merge --self-test
+
+Valentin 14 Nov (HYCI-352): "yes build it like that". Merge needs no AI. Every PR is looked after by its own script process the moment
+its review and checks pass. There is no queue, no cap and no sleep between PRs: two green PRs merge in the same tick, each by its own
+process, and one PR that hangs cannot hold another. The only shared thing is the branch update throttle below. This is not the old
+bin/pr-merger (deleted in f50e752: one loop, MAX_PER_TICK, one update at a time).
+
+The data, per PR (gh pr view): number, title, isDraft, labels, baseRefName, headRefOid, mergeStateStatus, mergeable, reviewDecision,
+statusCheckRollup, updatedAt. From that, decide() returns one action and a plain reason:
+  ignore  not this script's: closed, draft, no ticket key, a hold label, the merge freeze, the wrong base, or a ticket that is not in a
+          building column with an assignee (nobody owns the PR, so nobody would do the live check).
+  wait    checks run, GitHub says UNKNOWN or BLOCKED (a required check or the review has not reported), no checks listed yet.
+  rerun   only cancelled checks are left: rerun that run once (twice at most).
+  update  all checks green but GitHub says BEHIND, or ship-check says the PR is behind production: update the branch.
+  fix     red check, merge clash, change request, or a check cancelled again: an owner runner has work. This script only writes one
+          agent-lane note per head commit; fleet/pick reads the same PR state and resumes the owner for a Fix run.
+  merge   every check green and GitHub says CLEAN.
+After a merge: remove the Wasted Runs label if the ticket has it, write DEPLOY_WAIT (hypertask-ai/hypertask only) until the production
+deploy of the merge commit ends, and log the row. fleet/pick then resumes the owner runner for the live check (QA). The owner is never
+resumed to merge.
+
+Identity (HYCI-432): hypertask-ai repos merge as the hypertask-runners GitHub App (gh-app-token), valentinyeo repos as the
+software-factory-runners App (gh-app-token-sf). Never the valentinyeo login. If the App is refused on house-rules, the merge is logged
+and left, not retried with a person's login.
+
+The branch update throttle: updating a branch reruns its CI, and each merge makes every other branch behind again. An update starts only
+when no other PR of the repo had its branch updated in the last UPDATE_WINDOW_S. Merges are never throttled.
+
+Log: STATE/pr-merge/merges.jsonl, one row per merge, update, rerun and refusal. Per-PR memory: STATE/pr-merge/pr/<repo>-<n>.json.
+"""
+import calendar
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+HOME = Path.home()
+STATE = Path(os.environ.get("PR_MERGE_STATE") or HOME / ".local/state/pr-merge")
+FLEET_STATE = Path(os.environ.get("FLEET_STATE") or HOME / ".local/state/fleet")
+FREEZE = Path(os.environ.get("PR_MERGE_FREEZE") or FLEET_STATE / "merge-freeze")
+DEPLOY_WAIT = Path(os.environ.get("FLEET_DEPLOY_WAIT") or FLEET_STATE / "deploy-wait.json")  # read by fleet/pick
+LOG = STATE / "merges.jsonl"
+GH = str(HOME / ".local/bin/gh") if (HOME / ".local/bin/gh").exists() else "gh"
+HT = str(HOME / ".local/bin/hypertask") if (HOME / ".local/bin/hypertask").exists() else "hypertask"
+VCC = str(HOME / ".local/bin/vcc") if (HOME / ".local/bin/vcc").exists() else "vcc"
+
+# repo -> (token kind, base branch). app: hypertask-runners App. sf: software-factory-runners App (all valentinyeo repos).
+REPOS = {
+    "hypertask-ai/hypertask": ("app", "production"),
+    "hypertask-ai/astro-rs": ("app", "main"),
+    "valentinyeo/multiprompt": ("sf", "master"),
+    "valentinyeo/postbox": ("sf", "main"),
+    "valentinyeo/astro-rs": ("sf", "main"),
+    "valentinyeo/house-rules": ("sf", "main"),
+}
+DEPLOY_REPOS = {"hypertask-ai/hypertask"}
+BUILDING = {"in progress", "ai review", "doing", "qa"}
+HOLD_LABELS = {"hold", "valentin-review", "do-not-merge"}
+TICKET = re.compile(r"^\[?([A-Z][A-Z0-9]*-\d+)\b")
+RUN_URL = re.compile(r"/actions/runs/(\d+)")
+OK_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+PENDING_STATES = {"PENDING", "EXPECTED"}
+EMPTY_WAIT_S = 600       # no check listed yet this long after the last update: the repo may have none, merge on CLEAN
+RERUNS_PER_RUN = 2
+UPDATE_WINDOW_S = 45 * 60
+TICKET_TTL_S = 300
+DEPLOY_NO_BUILD_S = 10 * 60
+DEPLOY_CAP_S = 45 * 60
+STATE_KEEP_S = 14 * 86400
+SWEEP_BUDGET_S = 540
+PR_FIELDS = ("number,title,isDraft,labels,baseRefName,headRefName,headRefOid,mergeStateStatus,mergeable,reviewDecision,"
+             "statusCheckRollup,updatedAt,state")
+
+
+def now_iso(t=None):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t if t is not None else time.time()))
+
+
+def stamp(iso):
+    return calendar.timegm(time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S"))
+
+
+def slug(repo, n):
+    return f"{repo.replace('/', '-')}-{n}"
+
+
+# ---------------------------------------------------------------- pure: checks and the decision
+def effective_checks(rollup):
+    """One row per check as GitHub counts it: when a name appears twice (an older attempt), the newest start wins.
+    Row: {name, kind: ok|pending|failed|cancelled, detail, run}. run is the Actions run id, None for a status."""
+    latest = {}
+    for i, c in enumerate(rollup or []):
+        if c.get("__typename") == "StatusContext" or ("context" in c and "name" not in c):
+            key, name, st = ("status", c.get("context")), c.get("context"), c.get("state")
+            kind = "ok" if st == "SUCCESS" else "pending" if st in PENDING_STATES else "failed"
+            row = {"name": name, "kind": kind, "detail": st, "run": None}
+        else:
+            name = c.get("name")
+            key = ("check", c.get("workflowName") or "", name)
+            if c.get("status") != "COMPLETED":
+                kind, detail = "pending", c.get("status")
+            elif c.get("conclusion") in OK_CONCLUSIONS:
+                kind, detail = "ok", c.get("conclusion")
+            elif c.get("conclusion") == "CANCELLED":
+                kind, detail = "cancelled", "CANCELLED"
+            else:
+                kind, detail = "failed", c.get("conclusion") or "unknown"
+            m = RUN_URL.search(c.get("detailsUrl") or "")
+            row = {"name": name, "kind": kind, "detail": detail, "run": m.group(1) if m else None}
+        order = (c.get("startedAt") or "", i)
+        if key not in latest or order >= latest[key][0]:
+            latest[key] = (order, row)
+    return [r for _, r in latest.values()]
+
+
+def names(rows):
+    return ", ".join(f"{c['name']} ({c['detail']})" for c in rows[:6]) + (f" and {len(rows) - 6} more" if len(rows) > 6 else "")
+
+
+def label_names(pr):
+    return {(l.get("name") if isinstance(l, dict) else l or "").lower() for l in pr.get("labels") or []}
+
+
+def ticket_key(pr):
+    m = TICKET.match(pr.get("title") or "")
+    return m.group(1) if m else None
+
+
+def decide(repo, pr, now, st=None, frozen=False):
+    """(action, reason, detail) for one PR, from the PR alone. The ticket gate is applied by the caller only when the action acts.
+    action: ignore | wait | rerun | update | fix | merge. detail: for rerun the run ids, for fix the note class."""
+    st = st or {}
+    base = REPOS[repo][1]
+    if pr.get("state", "OPEN") != "OPEN":
+        return "ignore", "not open", None
+    if pr.get("isDraft"):
+        return "ignore", "draft", None
+    if not ticket_key(pr):
+        return "ignore", "no ticket key in the title", None
+    if pr.get("baseRefName", base) != base:
+        return "ignore", f"base is not {base}", None
+    hold = HOLD_LABELS & label_names(pr)
+    if hold:
+        return "ignore", f"label {sorted(hold)[0]}", None
+    if frozen:
+        return "ignore", "merge freeze file exists", None
+    if pr.get("reviewDecision") == "CHANGES_REQUESTED":
+        return "fix", "change request", "change request"
+    ms = pr.get("mergeStateStatus")
+    if ms == "DIRTY" or pr.get("mergeable") == "CONFLICTING":
+        return "fix", "clash with the base branch", "clash"
+    checks = effective_checks(pr.get("statusCheckRollup"))
+    failed = [c for c in checks if c["kind"] == "failed"]
+    pending = [c for c in checks if c["kind"] == "pending"]
+    cancelled = [c for c in checks if c["kind"] == "cancelled"]
+    if failed:
+        return "fix", f"red check: {names(failed)}", "red"
+    if pending:
+        return "wait", f"checks running: {names(pending)}", None
+    if cancelled:
+        runs = {c["run"] for c in cancelled if c["run"]}
+        done = st.get("reruns", {})
+        todo = sorted(r for r in runs if len(done.get(r, [])) < RERUNS_PER_RUN)
+        if todo and len(runs) == len(cancelled):
+            return "rerun", f"only cancelled checks: {names(cancelled)}", todo
+        return "fix", f"cancelled again after its reruns: {names(cancelled)}", "cancelled"
+    updated = pr.get("updatedAt")
+    if not checks:
+        if updated and now - stamp(updated) < EMPTY_WAIT_S:
+            return "wait", "no check listed yet", None
+    if ms == "CLEAN":
+        return "merge", "every check green, GitHub says CLEAN", None
+    if ms == "BEHIND":
+        return "update", "every check green, branch is behind its base", None
+    return "wait", f"merge state {ms}: a required check or the review has not reported", None
+
+
+def ticket_gate(t):
+    """None when the ticket may have its PR merged by the script, else the reason. t: {section, status, assignees, labels} or None."""
+    if not t:
+        return "ticket unreadable"
+    if (t.get("status") or "Normal") != "Normal":
+        return f"ticket status {t.get('status')}"
+    if (t.get("section") or "").strip().lower() not in BUILDING:
+        return f"ticket is in {t.get('section')}, not a building column"
+    if not t.get("assignees"):
+        return "ticket has no assignee"
+    return None
+
+
+# ---------------------------------------------------------------- side effects
+def token_env(repo):
+    env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+    tool = {"app": "gh-app-token", "sf": "gh-app-token-sf"}[REPOS[repo][0]]
+    cmd = str(HOME / ".local/bin" / tool)
+    tok = subprocess.run([cmd if os.path.exists(cmd) else tool], capture_output=True, text=True, timeout=60).stdout.strip()
+    if not tok:
+        raise RuntimeError(f"no {tool} token")
+    env["GH_TOKEN"] = tok
+    return env
+
+
+def sh(cmd, env=None, timeout=120):
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
+    return r.returncode, (r.stdout or ""), (r.stderr or "")
+
+
+def record(row):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(json.dumps(row | {"ts": now_iso()}) + "\n")
+
+
+def pr_state_path(repo, n):
+    return STATE / "pr" / f"{slug(repo, n)}.json"
+
+
+def load_pr_state(repo, n):
+    try:
+        st = json.loads(pr_state_path(repo, n).read_text())
+    except (OSError, ValueError):
+        st = {}
+    st.setdefault("reruns", {})
+    st.setdefault("notes", {})
+    return st
+
+
+def save_pr_state(repo, n, st):
+    p = pr_state_path(repo, n)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(st, sort_keys=True))
+    tmp.replace(p)
+
+
+def ticket_of(key):
+    """The ticket's section, status, assignees. Cached TICKET_TTL_S seconds so a sweep of many PRs does not hammer the board."""
+    cache = STATE / "tickets" / f"{key}.json"
+    try:
+        c = json.loads(cache.read_text())
+        if time.time() - c["at"] < TICKET_TTL_S:
+            return c["t"]
+    except (OSError, ValueError, KeyError):
+        pass
+    rc, out, _ = sh([HT, "--json", "task", "get", key], timeout=90)
+    try:
+        t = json.loads(out)["tasks"][0]
+    except (ValueError, KeyError, IndexError):
+        return None
+    slim = {"section": t.get("section"), "status": t.get("status"), "labels": [l.get("name") for l in t.get("labels") or []],
+            "assignees": [(a.get("displayName") or a.get("name") or str(a)) if isinstance(a, dict) else str(a) for a in t.get("assignees") or []]}
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"at": time.time(), "t": slim}))
+    return slim
+
+
+def note(key, text):
+    rc, out, err = sh([VCC, "activity", "add", key, text], timeout=90)
+    if rc != 0:
+        print(f"pr-merge: note to {key} failed: {(err or out).strip()[:100]}", file=sys.stderr)
+    return rc == 0
+
+
+def note_once(repo, pr, st, cls, text, dry):
+    key = ticket_key(pr)
+    mark = f"{(pr.get('headRefOid') or '')[:12]}:{cls}"
+    if mark in st["notes"]:
+        return
+    body = (f"pr-merge: PR {pr['number']} https://github.com/{repo}/pull/{pr['number']} needs its owner: {text}. "
+            f"Head {(pr.get('headRefOid') or '')[:7]}. The picker resumes the owner for a Fix run. This note is written once per head commit.")
+    if dry:
+        print(f"pr-merge: would note {key}: {body[:140]}")
+        return
+    if note(key, body):
+        st["notes"][mark] = int(time.time())
+
+
+def run_ids_reran(run, repo, env):
+    rc, out, err = sh([GH, "run", "rerun", run, "--repo", repo, "--failed"], env)
+    if rc != 0:
+        rc, out, err = sh([GH, "run", "rerun", run, "--repo", repo], env)
+    return rc == 0, (err or out).strip()[:120]
+
+
+def clear_wasted(key, n, repo):
+    """A merged PR ends the wait that three empty runs came from (HYCI-396, HYCI-285): remove Wasted Runs so the owner is taken back for QA."""
+    t = ticket_of(key) or {}
+    if "wasted runs" not in {l.lower() for l in t.get("labels") or []}:
+        return
+    rc, out, err = sh([VCC, "task", "update", key, "--remove-label", "Wasted Runs"], timeout=60)
+    if rc == 0:
+        note(key, f"pr-merge: PR {n} merged, so Wasted Runs is removed. The owner takes the ticket back for its live check.")
+    print(f"pr-merge: {key} Wasted Runs {'removed' if rc == 0 else 'not removed: ' + (err or out).strip()[:80]}")
+
+
+def update_throttled(repo, n, now):
+    """True when another PR of this repo had its branch updated inside UPDATE_WINDOW_S (its CI is still running)."""
+    for p in (STATE / "pr").glob(f"{repo.replace('/', '-')}-*.json") if (STATE / "pr").exists() else []:
+        if p.name == pr_state_path(repo, n).name:
+            continue
+        try:
+            at = json.loads(p.read_text()).get("updated_at", 0)
+        except (OSError, ValueError):
+            continue
+        if now - at < UPDATE_WINDOW_S:
+            return True
+    return False
+
+
+def merge_commit(repo, n, env):
+    rc, out, _ = sh([GH, "pr", "view", str(n), "--repo", repo, "--json", "mergeCommit,mergedBy,state"], env)
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return "", "", ""
+    return (d.get("mergeCommit") or {}).get("oid") or "", (d.get("mergedBy") or {}).get("login") or "", d.get("state") or ""
+
+
+def enroll_deploy(repo, key, n, sha):
+    if repo not in DEPLOY_REPOS or not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
+        return
+    p = STATE / "deploy" / f"{key}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"repo": repo, "pr": n, "sha": sha, "at": time.time()}))
+
+
+# ---------------------------------------------------------------- one PR
+def one(repo, n, dry=False, now=None, hooks=None):
+    """Look after one PR. Returns the action taken as a string. hooks: the self-test swaps sh, ticket_of and the PR reader."""
+    now = now or time.time()
+    h = hooks or {}
+    lockf = None
+    if not dry and not h:
+        (STATE / "lock").mkdir(parents=True, exist_ok=True)
+        lockf = open(STATE / "lock" / f"{slug(repo, n)}.lock", "w")
+        try:
+            fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(f"pr-merge: PR {n} is being handled by another process")
+            return "locked"
+    try:
+        env = h["env"] if "env" in h else token_env(repo)
+        if "pr" in h:
+            pr = h["pr"]()
+        else:
+            rc, out, err = sh([GH, "pr", "view", str(n), "--repo", repo, "--json", PR_FIELDS], env)
+            if rc != 0:
+                print(f"pr-merge: PR {n} unreadable: {err.strip()[:100]}", file=sys.stderr)
+                return "unreadable"
+            pr = json.loads(out)
+        pr["number"] = n
+        st = load_pr_state(repo, n)
+        action, reason, detail = decide(repo, pr, now, st, FREEZE.exists())
+        key = ticket_key(pr) or ""
+        if action in ("ignore", "wait"):
+            print(f"pr-merge: PR {n} {action}: {reason}")
+            return action
+        gate = ticket_gate((h.get("ticket") or ticket_of)(key))
+        if gate:
+            print(f"pr-merge: PR {n} ignore: {gate}")
+            return "ignore"
+        if action == "fix":
+            word = {"clash": "clash, wake owner for Fix", "red": "red, owner has a Fix run", "change request": "change request, wake owner for Fix",
+                    "cancelled": "cancelled again, wake owner for Fix"}[detail]
+            print(f"pr-merge: PR {n} {word} ({key}): {reason}")
+            note_once(repo, pr, st, detail, reason, dry)
+            if not dry:
+                save_pr_state(repo, n, st)
+            return "fix"
+        if action == "rerun":
+            for run in detail:
+                if dry:
+                    print(f"pr-merge: PR {n} would rerun run {run} ({key})")
+                    continue
+                ok, err = run_ids_reran(run, repo, env) if "rerun" not in h else h["rerun"](run)
+                if ok:
+                    st["reruns"].setdefault(run, []).append(int(now))
+                print(f"pr-merge: PR {n} rerun run {run}: {'ok' if ok else 'failed ' + err}")
+                record({"repo": repo, "pr": n, "ticket": key, "rerun": run, "ok": ok, "err": "" if ok else err})
+            if not dry:
+                save_pr_state(repo, n, st)
+            return "rerun"
+        if action == "update":
+            return update_branch(repo, pr, st, env, dry, now, h)
+        # merge
+        if dry:
+            print(f"pr-merge: would merge PR {n} ({key}) {repo}")
+            return "merge"
+        rc, out, err = (h["merge"](n) if "merge" in h else sh([GH, "pr", "merge", str(n), "--repo", repo, "--squash"], env, timeout=400))
+        err = (err or out or "").strip()
+        if rc != 0 and re.search(r"commit\(s\) behind", err):
+            return update_branch(repo, pr, st, env, dry, now, h, why="ship-check: " + err[:80])
+        if rc != 0:
+            print(f"pr-merge: PR {n} merge refused: {err[:140]}")
+            record({"repo": repo, "pr": n, "ticket": key, "merged": False, "err": err[:200]})
+            note_once(repo, pr, st, "refused:" + re.sub(r"\W+", "", err)[:24], f"the merge was refused: {err[:120]}", dry)
+            save_pr_state(repo, n, st)
+            return "refused"
+        sha, by, _ = ("", "", "") if "merge" in h else merge_commit(repo, n, env)
+        record({"repo": repo, "pr": n, "ticket": key, "merged": True, "merged_by": by, "sha": sha[:12]})
+        print(f"pr-merge: merged PR {n} ({key}) {repo} by {by or '?'}")
+        if "merge" not in h:
+            clear_wasted(key, n, repo)
+            enroll_deploy(repo, key, n, sha)
+            note(key, f"pr-merge: PR {n} https://github.com/{repo}/pull/{n} merged by the script. Its owner takes the live check next"
+                      + (" once the production deploy ends." if repo in DEPLOY_REPOS else "."))
+        return "merged"
+    finally:
+        if lockf:
+            lockf.close()
+
+
+def update_branch(repo, pr, st, env, dry, now, h, why=""):
+    n, key = pr["number"], ticket_key(pr)
+    if update_throttled(repo, n, now) if "throttled" not in h else h["throttled"]():
+        print(f"pr-merge: PR {n} behind its base, waiting: another branch of {repo} was updated in the last {UPDATE_WINDOW_S // 60} minutes")
+        return "wait"
+    if dry:
+        print(f"pr-merge: PR {n} would update its branch ({key}) {why}".rstrip())
+        return "update"
+    rc, out, err = (h["update"](n) if "update" in h else
+                    sh([GH, "api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch", "-f", f"expected_head_sha={pr.get('headRefOid', '')}"], env))
+    ok = rc == 0
+    if ok:
+        st["updated_at"] = int(now)
+        save_pr_state(repo, n, st)
+    print(f"pr-merge: PR {n} update branch {'ok' if ok else 'failed: ' + (err or out).strip()[:100]}")
+    record({"repo": repo, "pr": n, "ticket": key, "updated_branch": ok, "err": "" if ok else (err or out).strip()[:200]})
+    return "update"
+
+
+# ---------------------------------------------------------------- deploy wait (hypertask-ai/hypertask only)
+def gh_api(path, env):
+    rc, out, _ = sh([GH, "api", path], env)
+    return json.loads(out) if rc == 0 and out.strip() else None
+
+
+def deploy_verdict(repo, sha, age, api):
+    """pending | done | attention for one merge commit: Vercel Ignored Build Step, then the Production deployment. Unreadable counts as
+    pending; DEPLOY_CAP_S ends the wait either way."""
+    if age > DEPLOY_CAP_S:
+        return "attention", f"the production deploy of merge {sha[:7]} had not finished after {DEPLOY_CAP_S // 60} minutes"
+    for s in (api(f"repos/{repo}/commits/{sha}/status") or {}).get("statuses") or []:
+        if s.get("context") == "Vercel" and s.get("state") == "success" and "Ignored Build Step" in (s.get("description") or ""):
+            return "done", "no app build needed"
+    deps = api(f"repos/{repo}/deployments?sha={sha}&environment=Production")
+    if deps is None:
+        return "pending", "deployment list unreadable"
+    if not deps:
+        return ("done", "no Production deployment started, build skipped") if age > DEPLOY_NO_BUILD_S else ("pending", "deploy not started")
+    sts = api(f"repos/{repo}/deployments/{deps[0]['id']}/statuses")
+    state = (sts[0].get("state") or "") if sts else ""
+    if state in ("success", "inactive"):
+        return "done", f"deploy {state}"
+    if state in ("failure", "error"):
+        return "attention", f"the production deploy of merge {sha[:7]} ended in state {state}"
+    return "pending", f"deploy {state or 'queued'}"
+
+
+def deploy_sweep(dry, now=None, api=None, notify=None):
+    """Settle every merge waiting on its deploy, then write DEPLOY_WAIT for fleet/pick: only the still pending ones, state deploy.
+    A failed or overdue deploy gets one agent-lane note, then the picker's hold ends and the owner checks the deploy before the live check."""
+    now = now or time.time()
+    d = STATE / "deploy"
+    pending, env = {}, None
+    for p in sorted(d.glob("*.json")) if d.exists() else []:
+        key = p.stem
+        try:
+            row = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if api is None and env is None:
+            env = token_env(row["repo"])
+        verdict, detail = deploy_verdict(row["repo"], row["sha"], now - row["at"], api or (lambda path: gh_api(path, env)))
+        if verdict == "pending":
+            pending[key] = {"state": "deploy", "detail": f"PR #{row['pr']} merged, production deploy not finished ({detail})",
+                            "since": now_iso(row["at"])}
+            continue
+        if dry:
+            print(f"pr-merge: {key} would settle deploy: {verdict}, {detail}")
+            continue
+        if verdict == "attention":
+            body = (f"pr-merge: PR {row['pr']} https://github.com/{row['repo']}/pull/{row['pr']} merged, but {detail}. "
+                    f"The picker no longer holds this ticket: its owner checks the deploy before the live check.")
+            if not (notify or note)(key, body):
+                continue
+        record({"deploy": key, "pr": row["pr"], "sha": row["sha"][:9], "verdict": verdict, "detail": detail})
+        p.unlink(missing_ok=True)
+        print(f"pr-merge: {key} deploy {verdict}: {detail}")
+    if not dry:
+        DEPLOY_WAIT.parent.mkdir(parents=True, exist_ok=True)
+        tmp = DEPLOY_WAIT.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"at": int(now), "tickets": pending}))
+        tmp.replace(DEPLOY_WAIT)
+    return set(pending)
+
+
+# ---------------------------------------------------------------- sweep
+def list_prs(repo):
+    rc, out, err = sh([GH, "pr", "list", "--repo", repo, "--base", REPOS[repo][1], "--state", "open", "--limit", "100", "--json", PR_FIELDS],
+                      token_env(repo))
+    if rc != 0:
+        raise RuntimeError(f"{repo}: {err.strip()[:120]}")
+    return json.loads(out)
+
+
+def sweep(dry, only_repo=None, spawn=None, lister=None, now=None):
+    """Start one `one` process per PR whose list row asks for an action, all at once, and wait for them. Nothing waits on another PR."""
+    now = now or time.time()
+    frozen = FREEZE.exists()
+    if frozen:
+        print(f"pr-merge: {FREEZE} exists, merging nothing")
+    jobs = []
+    for repo in REPOS:
+        if only_repo and repo != only_repo:
+            continue
+        try:
+            prs = (lister or list_prs)(repo)
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as e:
+            print(f"pr-merge: {repo} PR list failed: {e}", file=sys.stderr)
+            continue
+        for pr in prs:
+            action, reason, _ = decide(repo, pr, now, load_pr_state(repo, pr["number"]), frozen)
+            if action in ("ignore", "wait"):
+                if ticket_key(pr):
+                    print(f"pr-merge: {repo}#{pr['number']} {action}: {reason}")
+                continue
+            jobs.append((repo, pr["number"]))
+    procs = [(repo, n, (spawn or start)(repo, n, dry)) for repo, n in jobs]
+    started = time.time()
+    for repo, n, p in procs:
+        try:
+            p.wait(timeout=max(1, SWEEP_BUDGET_S - (time.time() - started)))
+        except subprocess.TimeoutExpired:
+            p.kill()
+            print(f"pr-merge: {repo}#{n} took over {SWEEP_BUDGET_S}s and was stopped; the next tick tries again", file=sys.stderr)
+    print(f"pr-merge: {len(jobs)} PR(s) acted on{' (dry run)' if dry else ''}")
+    try:
+        deploy_sweep(dry)
+    except Exception as e:  # the deploy file is a hold, never a reason to fail the sweep
+        print(f"pr-merge: deploy sweep failed ({type(e).__name__}: {str(e)[:80]})", file=sys.stderr)
+    if not dry:
+        prune()
+    return jobs
+
+
+def start(repo, n, dry):
+    return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "one", repo, str(n)] + (["--dry-run"] if dry else []))
+
+
+def prune():
+    cut = time.time() - STATE_KEEP_S
+    for sub in ("pr", "lock", "tickets"):
+        for p in (STATE / sub).glob("*") if (STATE / sub).exists() else []:
+            try:
+                if p.stat().st_mtime < cut:
+                    p.unlink()
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------- self test
+def self_test():
+    import tempfile
+    global STATE, LOG, DEPLOY_WAIT, FREEZE
+    tmp = Path(tempfile.mkdtemp(prefix="pr-merge-test-"))
+    STATE, LOG, DEPLOY_WAIT, FREEZE = tmp, tmp / "merges.jsonl", tmp / "deploy-wait.json", tmp / "freeze"
+    now = time.time()
+    repo = "hypertask-ai/hypertask"
+
+    def cr(name, status="COMPLETED", conclusion="SUCCESS", run="1", started="2026-11-14T10:00:00Z", wf="W"):
+        return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion, "workflowName": wf, "startedAt": started,
+                "detailsUrl": f"https://github.com/{repo}/actions/runs/{run}/job/9"}
+
+    good = [cr("ci", run="10"), cr("e2e", run="10")]
+    base = {"number": 7, "state": "OPEN", "title": "HTPR-9 fix", "isDraft": False, "labels": [], "baseRefName": "production", "headRefOid": "a" * 40,
+            "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "reviewDecision": "", "statusCheckRollup": good, "updatedAt": now_iso(now - 3600)}
+    d = lambda extra=None, st=None, frozen=False, r=repo: decide(r, base | (extra or {}), now, st, frozen)[:2]
+    assert d()[0] == "merge", d()
+    for why, extra, want in (
+            ("a draft", {"isDraft": True}, "ignore"), ("no key", {"title": "fix thing"}, "ignore"), ("wrong base", {"baseRefName": "main"}, "ignore"),
+            ("hold label", {"labels": [{"name": "hold"}]}, "ignore"), ("closed", {"state": "MERGED"}, "ignore"),
+            ("change request", {"reviewDecision": "CHANGES_REQUESTED"}, "fix"), ("clash", {"mergeStateStatus": "DIRTY"}, "fix"),
+            ("conflicting", {"mergeable": "CONFLICTING"}, "fix"), ("red check", {"statusCheckRollup": good + [cr("lint", conclusion="FAILURE")]}, "fix"),
+            ("running check", {"statusCheckRollup": good + [cr("lint", status="IN_PROGRESS", conclusion="")]}, "wait"),
+            ("behind", {"mergeStateStatus": "BEHIND"}, "update"), ("blocked", {"mergeStateStatus": "BLOCKED"}, "wait"),
+            ("unknown", {"mergeStateStatus": "UNKNOWN"}, "wait"),
+            ("only cancelled", {"statusCheckRollup": good + [cr("bugfix", conclusion="CANCELLED", run="55")]}, "rerun"),
+            ("empty and new", {"statusCheckRollup": [], "updatedAt": now_iso(now - 60)}, "wait"),
+            ("empty and old, CLEAN", {"statusCheckRollup": []}, "merge"),
+            ("a newer green attempt beats an older cancel", {"statusCheckRollup": [cr("x", conclusion="CANCELLED", started="2026-11-14T09:00:00Z"), cr("x")]}, "merge"),
+            ("a rerun running beats an older failure", {"statusCheckRollup": [cr("x", conclusion="FAILURE", started="2026-11-14T09:00:00Z"),
+                                                                              cr("x", status="IN_PROGRESS", conclusion="", started="2026-11-14T09:30:00Z")]}, "wait")):
+        assert d(extra)[0] == want, f"{why}: {d(extra)}"
+    assert d(frozen=True)[0] == "ignore", "the freeze file stops every merge"
+    assert decide(repo, base | {"statusCheckRollup": good + [cr("bugfix", conclusion="CANCELLED", run="55")]}, now, {"reruns": {"55": [1, 2]}})[0] == "fix", \
+        "cancelled after two reruns is an owner's job"
+    assert d({"title": "[HTPR-9] x"})[0] == "merge" and d({"title": "IGSH-5 x", "baseRefName": "master"}, r="valentinyeo/multiprompt")[0] == "merge"
+    ok_t = {"section": "AI Review", "status": "Normal", "assignees": ["RUNNER 3"], "labels": []}
+    assert ticket_gate(ok_t) is None and ticket_gate(ok_t | {"section": "Done"}) and ticket_gate(ok_t | {"assignees": []}) and ticket_gate(None), "ticket gate"
+
+    # one(): the merge, clash and update paths, with the outside world faked
+    said, calls = [], []
+    sh_real, note_real, clear_real = globals()["sh"], globals()["note"], globals()["clear_wasted"]
+    globals()["note"] = lambda key, text: said.append((key, text)) or True
+    globals()["clear_wasted"] = lambda *a: None
+    try:
+        def run(extra=None, hooks=None, dry=False, st=None):
+            hk = {"env": {}, "pr": lambda: dict(base | (extra or {})), "ticket": lambda k: ok_t} | (hooks or {})
+            return one(repo, 7, dry, now, hk)
+
+        calls.clear()
+        assert run(hooks={"merge": lambda n: calls.append(("merge", n)) or (0, "", "")}) == "merged" and calls == [("merge", 7)], calls
+        assert run(dry=True, hooks={"merge": lambda n: calls.append("BAD")}) == "merge" and calls == [("merge", 7)], "a dry run merges nothing"
+        assert run({"mergeStateStatus": "DIRTY"}, dry=True) == "fix" and run({"mergeStateStatus": "DIRTY"}, hooks={"ticket": lambda k: ok_t | {"section": "Done"}}) == "ignore"
+        assert run({"mergeStateStatus": "DIRTY"}) == "fix" and run({"mergeStateStatus": "DIRTY"}) == "fix", "a clash twice on one head"
+        calls.clear()
+        assert run({"mergeStateStatus": "BEHIND"}, hooks={"update": lambda n: calls.append(("update", n)) or (0, "", ""), "throttled": lambda: False}) == "update" and calls == [("update", 7)]
+        assert run({"mergeStateStatus": "BEHIND"}, hooks={"update": lambda n: calls.append("BAD") or (0, "", ""), "throttled": lambda: True}) == "wait", "update throttled"
+        assert run(hooks={"merge": lambda n: (1, "", "ship-check blocked: 3 commit(s) behind production"), "update": lambda n: calls.append(("update2", n)) or (0, "", ""),
+                          "throttled": lambda: False}) == "update" and ("update2", 7) in calls, "a ship-check refusal for being behind updates the branch"
+        assert run(hooks={"merge": lambda n: (1, "", "ship-check blocked: production ci-tests is red")}) == "refused"
+        assert run({"statusCheckRollup": good + [cr("b", conclusion="CANCELLED", run="55")]},
+                   hooks={"rerun": lambda r: calls.append(("rerun", r)) or (True, "")}) == "rerun" and ("rerun", "55") in calls
+    finally:
+        globals()["note"], globals()["clear_wasted"] = note_real, clear_real
+    assert any("merged" in t for _, t in said) is False, "the hooked merge path writes no merge note here"
+    assert any("needs its owner" in t for _, t in said), "a clash writes one owner note"
+    st = load_pr_state(repo, 7)
+    assert len([m for m in st["notes"] if m.endswith(":clash")]) == 1, "the clash note is written once per head"
+
+    # sweep: no shared queue. Two green PRs start in the same tick and both run before either finishes.
+    lister = lambda r: [base | {"number": 11}, base | {"number": 12}, base | {"number": 13, "isDraft": True}] if r == repo else []
+    barrier, seen = threading.Barrier(2, timeout=10), []
+
+    class Fake:
+        def __init__(self, n):
+            self.n = n
+            self.t = threading.Thread(target=self.go)
+            self.t.start()
+
+        def go(self):
+            seen.append(("start", self.n))
+            barrier.wait()  # passes only when both PRs are in flight at once: a queue would deadlock here
+            seen.append(("merge", self.n))
+
+        def wait(self, timeout=None):
+            self.t.join(timeout)
+
+        def kill(self):
+            pass
+
+    jobs = sweep(True, only_repo=repo, spawn=lambda r, n, dry: Fake(n), lister=lister, now=now)
+    assert sorted(jobs) == [(repo, 11), (repo, 12)] and sorted(s for s in seen if s[0] == "merge") == [("merge", 11), ("merge", 12)], (jobs, seen)
+    assert [s[0] for s in seen[:2]] == ["start", "start"], "both started before either merged"
+
+    # deploy wait: pending hold written, finished one dropped, failed one noted
+    (STATE / "deploy").mkdir(parents=True, exist_ok=True)
+    for key, at in (("HTPR-1", now - 60), ("HTPR-2", now - 60), ("HTPR-3", now - 3600)):
+        (STATE / "deploy" / f"{key}.json").write_text(json.dumps({"repo": repo, "pr": 5, "sha": "b" * 40, "at": at}))
+    api = lambda path: ([{"id": 1}] if "deployments?sha" in path else [{"state": "in_progress"}] if path.endswith("/statuses") else {})
+    pend = deploy_sweep(False, now, api, notify=lambda k, b: said.append((k, b)) or True)
+    got = json.loads(DEPLOY_WAIT.read_text())
+    assert pend == {"HTPR-1", "HTPR-2"} and set(got["tickets"]) == {"HTPR-1", "HTPR-2"} and got["tickets"]["HTPR-1"]["state"] == "deploy", got
+    assert not (STATE / "deploy" / "HTPR-3.json").exists() and any(k == "HTPR-3" and "had not finished" in b for k, b in said), "overdue deploy is noted and released"
+    api_ok = lambda path: ([{"id": 1}] if "deployments?sha" in path else [{"state": "success"}] if path.endswith("/statuses") else {})
+    assert deploy_sweep(False, now, api_ok) == set() and json.loads(DEPLOY_WAIT.read_text())["tickets"] == {}, "a finished deploy ends the hold"
+    print("fleet/pr-merge self-test ok: decision table, ticket gate, one() merge, update, rerun, refusal and clash paths, two PRs in flight at once, deploy wait")
+    return 0
+
+
+def main(argv):
+    dry = "--dry-run" in argv
+    argv = [a for a in argv if a != "--dry-run"]
+    if argv[:1] == ["--self-test"]:
+        return self_test()
+    if argv[:1] == ["one"] and len(argv) == 3:
+        return 0 if one(argv[1], int(argv[2]), dry) else 1
+    only = None
+    if argv[:1] == ["--repo"] and len(argv) == 2:
+        only = argv[1]
+    elif argv:
+        print(__doc__)
+        return 2
+    sweep(dry, only)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

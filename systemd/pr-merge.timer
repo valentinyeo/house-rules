@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the per-PR merge script every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+AccuracySec=30s
+Persistent=false
+Unit=pr-merge.service
+
+[Install]
+WantedBy=timers.target
