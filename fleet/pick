@@ -2968,6 +2968,10 @@ def choose(n, dry):
                 raise SystemExit(f"none: Runner {n} keeps {building_wait['key']}; waiting, no hand-off")
         else:
             log(f"own: Runner {n} keeps {owned[0]['key']} in {owned[0]['section']} (not a building column); new work may start")
+    if owned:
+        # 14 Nov: R2 (pinned to its own plan) held HTPR-9078 on OpenCode and took its second ticket HTPR-9278 on OpenCode too, because the
+        # owned loop above left the first ticket's engine set. New work and the second ticket run on the runner's own engine (engine-N).
+        set_engine(runner_engine(n) or ENGINE)
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
     others = {k for k, who in taken.items() if who != str(n)}
@@ -4273,6 +4277,15 @@ def second_ticket_self_test():
         assert got and got[0]["key"] == "HTPR-81", f"waiting 2h on a BlockedBy: the runner takes a second ticket, got {got}"
         assert SECOND[0]["keys"] == ["HTPR-80"] and SECOND[0]["wait"] >= SECOND_WAIT
         assert "HTPR-80" not in {got[0]["key"]}, "the waiting ticket is never handed back as an orphan, a PR or new work"
+
+        # 14 Nov: the first ticket was started on OpenCode, the runner is now pinned elsewhere: the second ticket runs on the runner's own engine
+        (RUNNER_STATE / "engine-1").write_text("vercel\n")
+        SNAP = snap({**first, "_owner": {**first["_owner"], "engine": "opencode"}}, blocker, fresh)
+        set_engine("opencode")
+        got = pick()
+        assert got and got[0]["key"] == "HTPR-81" and ENGINE == "vercel", f"second ticket runs on engine-N (vercel), not the first ticket's engine, got {ENGINE}"
+        (RUNNER_STATE / "engine-1").unlink()
+        SNAP = snap(first, blocker, fresh)
 
         # a short wait does not open it
         SNAP = snap({**first, "updated": iso(10)}, blocker, fresh)
