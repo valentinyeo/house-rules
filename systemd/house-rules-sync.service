@@ -1,0 +1,6 @@
+[Unit]
+Description=Sync Valentin house rules (valentinyeo/house-rules) into harness files
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/house-rules-sync
