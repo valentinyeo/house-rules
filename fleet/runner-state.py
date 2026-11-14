@@ -93,9 +93,9 @@ PC_WAIT = re.compile(r"\b(?:desktops?|laptops?|PC|phone|computer|Windows)\b[^.;]
 
 
 # 14 Nov (HYCI-388, HTPR-9106 run 8): a run that pushed a PR fix ended, as the brief orders, on "RUNNER IDLE checks pending on PR 3468".
-# That ending was counted as an invalid leave ("waited on checks") although the one-run hold (fleet/pick) and bin/pr-merger own that wait.
-# While the one-run hold is live (one-run.on), a wait line that names a PR is tagged "script owns:", which valid-leaves.json skips.
-ONE_RUN_FLAG = Path(os.environ.get("FLEET_ONE_RUN_FLAG", Path.home() / ".local/state/fleet/one-run.on"))
+# That ending was counted as an invalid leave ("waited on checks") although the picker's hold (fleet/pick) owns that wait.
+# Valentin 14 Nov (HYCI-352): the runner builds, pauses while review and checks run, then merges its own PR itself. The pause is a valid
+# phase, so a wait line that names a PR is always tagged "script owns:", which valid-leaves.json skips. No flag file, no merge robot.
 # 14 Nov (HYCI-451): the end line is glued to the chat-listener text with no space ("checks pending on PR 3497The runner chat listener finished"), so the
 # trailing \b never matched and four PR waits (HTPR-9274 runs 3 and 4, SOFT-2273 run 1, SOFT-2276 run 6) counted as violations. A GitHub PR link names the PR too.
 PR_WAIT = re.compile(r"\bPR\s*#?\d+|/pull/\d+", re.I)
@@ -127,9 +127,9 @@ POST_MERGE = re.compile(r"\bpost-?merge\b|\bproof run\b|\b(?:runs?|checks?|ci) o
 
 
 def _wait_detail(line, ticket=""):
-    """Detail of a WAIT_CHECK ending. A wait on a named PR while the one-run hold is live, on a ticket sf-release-watch holds, on a Fleet CI & Infra ticket (ci-unblock-waiters), or on the proof run after a merge (the QA run) is a script's wait, not a runner's leave."""
+    """Detail of a WAIT_CHECK ending. A wait on a named PR (review and checks running, the runner resumes to merge), on a ticket sf-release-watch holds, on a Fleet CI & Infra ticket (ci-unblock-waiters), or on the proof run after a merge (the QA run) is a script's wait, not a runner's leave."""
     text = line[:160]
-    if (PR_WAIT.search(line) and ONE_RUN_FLAG.exists()) or _sf_script_waits(ticket) or CI_BLOCKED.search(line) or POST_MERGE.search(line):
+    if PR_WAIT.search(line) or _sf_script_waits(ticket) or CI_BLOCKED.search(line) or POST_MERGE.search(line):
         return ("script owns: " + text)[:160]
     return text
 
@@ -218,7 +218,7 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False, progress=
         return _out("FAULT", "FAIL", detail="timeout: hit the 3h run limit")
     # 14 Nov (HYCI-388, SOFT-2276 run 2): the run pushed two commits to its PR, then its last message was only the chat-listener notice, so no
     # end line was printed and the ticket was parked on its lead as an unknown state. The work shipped and the PR checks are the script's wait
-    # (one-run hold, bin/pr-merger, sf-release-watch): a clean run that made progress and printed no end line is that wait, never a fault.
+    # (the picker's PR hold, sf-release-watch): a clean run that made progress and printed no end line is that wait, never a fault.
     if not line and int(rc) == 0 and int(elapsed) >= 120 and int(progress or 0) > 0:
         return _out("WAIT_CHECK", "WAIT_CHECK", detail="script owns: run ended without an end line after pushing progress; its PR checks are the script's wait")
     if not line and (int(rc) != 0 or int(elapsed) < 120):
@@ -528,14 +528,8 @@ def self_test():
     assert idle_review["state"] == "WAIT_CHECK" and idle_review["park"] == "", idle_review
     assert classify("RUNNER IDLE something new", 0, 400, "", 0, "HTPR-1")["state"] == "WAIT_CHECK"
     import tempfile
-    global ONE_RUN_FLAG
-    saved_flag = ONE_RUN_FLAG
     with tempfile.TemporaryDirectory() as td:
-        ONE_RUN_FLAG = Path(td) / "one-run.on"
         wline = "RUNNER IDLE checks pending on PR 3468 until 2026-11-14T00:19:00Z"
-        off = classify(wline, 0, 1200, "", 0, "HTPR-9106")
-        assert off["state"] == "WAIT_CHECK" and not off["detail"].startswith("script owns"), "one-run hold off: a plain wait"
-        ONE_RUN_FLAG.write_text("")
         on = classify(wline, 0, 1200, "", 0, "HTPR-9106")
         assert on["state"] == "WAIT_CHECK" and on["detail"].startswith("script owns: "), on
         assert leave_verdict(on["state"], on["detail"], json.loads(VALID_LEAVES.read_text()))[0] == "skip", "a script-owned wait is no leave"
@@ -549,7 +543,6 @@ def self_test():
     pm = classify("RUNNER IDLE HYCI-390 post-merge proof run on main recheck 03:01 UTC", 0, 420, "", 0, "HYCI-390")
     assert pm["state"] == "WAIT_CHECK" and pm["detail"].startswith("script owns: "), pm
     assert leave_verdict(pm["state"], pm["detail"], json.loads(VALID_LEAVES.read_text()))[0] == "skip", "the post-merge proof wait is the QA run's, no leave"
-    ONE_RUN_FLAG = saved_flag
     global SF_WAIT_FILE
     saved_sf = SF_WAIT_FILE
     with tempfile.TemporaryDirectory() as td:

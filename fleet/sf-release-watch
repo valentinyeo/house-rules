@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Software Factory release watch (HYCI-352). A script waits for the PR, the merge and the release. No model.
+"""Software Factory release watch (HYCI-352). A script waits for the PR checks and the release. No model. It never merges.
 
     fleet/sf-release-watch [--dry-run]
     fleet/sf-release-watch --self-test
@@ -9,18 +9,21 @@ waited for PR checks, the release queue and the changelog, and the last one only
 that waiting every five minutes and costs nothing when no ticket is in Doing or AI Review.
 
 For every ticket in Doing or AI Review whose app label is in APPS (apps with an auto-release workflow on merge):
-  pr       an open PR, checks pending or green, no conflict, no change request. A person or the repo's automerge merges it.
+  pr       an open PR whose checks or review still run, no conflict, no change request. The runner that owns the ticket pauses.
   release  the PR merged, no release contains the merge commit yet (and no release run failed).
   done     a release contains the merge commit and its notes name the ticket: the ticket moves to Done, one agent-lane note.
-  attention  red or conflicting PR, change request, draft, failed release run, notes without the ticket, a release that is
+  attention  red or conflicting PR, change request, draft, a green clean PR (its owner merges it), a PR whose checks finished
+           but GitHub still says BLOCKED for BLOCKED_S, failed release run, notes without the ticket, a release that is
            over STALL_S late. A model has work, so nothing holds the ticket.
+Valentin 14 Nov (HYCI-352): "no merge robot". One runner owns a ticket end to end: build, review rounds, merge its own PR, QA, Done.
+This script used to squash-merge a green PR in AI Review; it now only reads it as attention so the owner resumes and merges.
 The result is written to STATE/sf-release-wait.json. fleet/pick reads it and does not hand a ticket in state pr or release to
 a model (one_run_hold / sf_wait_rows): it makes no GitHub call of its own. A file older than 15 minutes holds nothing.
 
 HYCI-388 (14 Nov): Fleet CI & Infra (11514) tickets in In Progress or AI Review get the same hold when their PR lives in one of
 EXTRA_REPOS (house-rules, read with the default gh login: the runner App cannot see that private repo). Only an open PR counts:
 pending checks are state pr (a script waits), anything else is attention. No release, no merge by this script: a green house-rules
-PR has no script that merges it, so it reads attention and a model merges it. HYCI-404 ran again after its 30 blind minutes because
+PR reads attention and its owner merges it. HYCI-404 ran again after its 30 blind minutes because
 only hypertask-ai/hypertask PRs were visible to the picker.
 
 The ticket key on the board is SOFT-2273 while the PR title and the release note say IGSH-2273. Both prefixes are board 2060,
@@ -56,6 +59,7 @@ EXTRA_SWEEPS = [(EXTRA_BOARD, EXTRA_COLUMNS, EXTRA_REPOS + ["valentinyeo/multipr
 LOOKBACK_S = 24 * 3600  # a PR merged longer ago than this is not this ticket's release wait
 LOOKUP_CAP = 10  # tickets per repo per sweep looked up by number when no recent PR names them (HYCI-431)
 STALL_S = 3 * 3600  # a release this late is a model's job
+BLOCKED_S = 30 * 60  # checks finished, GitHub still says BLOCKED this long: a review check never reported, the owner asks again
 SF_PREFIXES = ("IGSH", "SOFT")
 SESSION = os.environ.get("SHIP_SESSION_NAME") or "Multi Bot Opus Lead"
 FAILED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR", "STARTUP_FAILURE"}
@@ -112,6 +116,15 @@ def check_word(pr):
     return "pending" if pr.get("mergeStateStatus") == "BLOCKED" else "green"
 
 
+def blocked_silent(pr, now):
+    """True when every check on the PR finished, GitHub still says BLOCKED (a required review check never reported) and the PR has been
+    quiet for BLOCKED_S. Used to be the merge robot's re-dispatch; the owner runner asks for the review again now."""
+    rows = pr.get("statusCheckRollup") or []
+    states = [(c.get("conclusion") or c.get("state") or c.get("status") or "").upper() for c in rows]
+    return bool(rows) and pr.get("mergeStateStatus") == "BLOCKED" and not any(x in RUNNING or x == "" for x in states) \
+        and now - epoch(pr["updatedAt"]) > BLOCKED_S
+
+
 def classify_extra(key, prs):
     """One Fleet CI & Infra ticket against the open PRs of its extra repos. Returns (state, detail, since): pr only while checks are
     pending (a script is waiting), attention for every other open PR, none when no open PR names the ticket."""
@@ -124,7 +137,7 @@ def classify_extra(key, prs):
     nums = ", ".join(f"#{p['number']}" for p in live)
     bad = next((w for w in words if w != "pending"), None)
     if bad:
-        return "attention", f"PR {nums} is {bad}" + (", no script merges it" if bad == "green" else ""), since
+        return "attention", f"PR {nums} is {bad}" + (", its owner merges it" if bad == "green" else ""), since
     return "pr", f"PR {nums} open, checks pending", since
 
 
@@ -132,8 +145,8 @@ def classify(number, prs, releases, contains, notes, run_failed, now, section="A
     """One ticket's state from what GitHub says. Pure: every GitHub answer comes in as an argument.
     prs: the repo's recent PRs (gh pr list rows). releases: published releases, newest first. contains(sha, tag): does the tag
     contain the commit. notes(tag): the release body. run_failed(sha): did a workflow run on that commit fail.
-    section: the ticket's column. Only AI Review gets merged or moved to Done: a ticket in Doing may be rework of an old merge.
-    Returns (state, detail, since, release_tag, merge_sha); state is pr, merge, release, done, attention or none."""
+    section: the ticket's column. Only AI Review gets moved to Done: a ticket in Doing may be rework of an old merge.
+    Returns (state, detail, since, release_tag, merge_sha); state is pr, release, done, attention or none."""
     mine = [p for p in prs if names_ticket(p.get("title"), number) or names_ticket(p.get("headRefName"), number)]
     live = [p for p in mine if p["state"] == "OPEN"]
     if live:
@@ -144,15 +157,14 @@ def classify(number, prs, releases, contains, notes, run_failed, now, section="A
         if bad:
             return "attention", f"PR {nums} is {bad}", iso(since), "", ""
         word = "pending" if "pending" in words else "green"
-        if word == "green" and len(live) == 1:
+        if word == "green":
+            if all(p.get("mergeStateStatus") == "CLEAN" and p.get("mergeable") == "MERGEABLE" for p in live):
+                return "attention", f"PR {nums} green and clean, its owner merges it", iso(since), "", ""
             status = live[0].get("mergeStateStatus")
-            if status == "CLEAN" and live[0].get("mergeable") == "MERGEABLE":
-                if now - since > STALL_S:  # green for hours and nobody merged it: something holds it, a model looks
-                    return "attention", f"PR {nums} green {int((now - since) / 3600)}h ago and not merged", iso(since), "", ""
-                if section == "AI Review":
-                    return "merge", f"PR {nums} green and clean", iso(since), "", ""
-            elif status not in ("UNKNOWN", "BLOCKED", None):
+            if status not in ("UNKNOWN", "BLOCKED", None):
                 return "attention", f"PR {nums} is green but {status}", iso(since), "", ""
+        elif any(blocked_silent(p, now) for p in live):
+            return "attention", f"PR {nums} checks finished but GitHub still says BLOCKED, its owner asks for the review again", iso(since), "", ""
         return "pr", f"PR {nums} open, checks {word}", iso(since), "", ""
     merged = sorted((p for p in mine if p["state"] == "MERGED" and p.get("mergedAt") and now - epoch(p["mergedAt"]) < LOOKBACK_S),
                     key=lambda p: p["mergedAt"])
@@ -258,16 +270,6 @@ class Hub:
         runs = self.gh("api", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=30")["workflow_runs"]
         return gating_run_failed(runs)
 
-    def merge(self, repo, number):
-        """Squash merge, the way the Software Factory models do. Dry run only says so."""
-        if self.dry:
-            print(f"would: gh pr merge {number} -R {repo} --squash")
-            return
-        r = subprocess.run(["gh", "pr", "merge", str(number), "-R", repo, "--squash"], capture_output=True, text=True,
-                           env=self.token_env(), timeout=120)
-        if r.returncode:
-            raise RuntimeError(f"merge of #{number} refused: {(r.stderr or '').strip()[:100]}")
-
     def finish(self, key, text):
         """Agent-lane note, then Done. vcc assigns the mover; the session name is the Software Factory lead."""
         if self.dry:
@@ -285,7 +287,7 @@ def sweep(hub, now):
     """The whole state file: {"at", "tickets": {key: {state, detail, since, pr?}}}. Raises when the board is unreadable, so a
     broken read leaves the last file to go stale (and hold nothing) instead of writing a false one."""
     rows = [t for t in hub.tickets() if any(l in APPS for l in t[2])]
-    out, moved, merged = {}, [], []
+    out, moved = {}, []
     by_repo = {}
     for key, n, labels, section in rows:
         repo = next(APPS[l] for l in sorted(labels) if l in APPS)
@@ -318,13 +320,6 @@ def sweep(hub, now):
                 state, detail, since, tag, sha = classify(
                     n, mine_prs, lazy_releases() if any(p["state"] == "MERGED" for p in mine_prs) else [],
                     lambda s, t: hub.contains(repo, s, t), lambda t: hub.notes(repo, t), lambda s: hub.run_failed(repo, s), now, section)
-                if state == "merge" and "wasted runs" in labels:  # three empty runs: its owner looks at it first, the script does not merge it
-                    state, detail = "attention", f"{detail}, ticket has Wasted Runs"
-                if state == "merge":
-                    pr_no = int(re.search(r"#(\d+)", detail)[1])
-                    hub.merge(repo, pr_no)
-                    merged.append(key)
-                    state, detail = "release", f"PR #{pr_no} merged by the script, release not out yet"
                 if state == "done":
                     hub.finish(key, f"sf-release-watch (script, no model): {detail}. Moved to Done. Repo {repo}, release {tag}.")
                     moved.append(key)
@@ -333,7 +328,7 @@ def sweep(hub, now):
             if state != "none":
                 out[key] = {"state": state, "detail": detail, "since": since}
     sweep_extra(hub, now, out)
-    return {"at": int(now), "tickets": {k: v for k, v in out.items() if v["state"] != "done"}}, moved, merged
+    return {"at": int(now), "tickets": {k: v for k, v in out.items() if v["state"] != "done"}}, moved
 
 
 def sweep_extra(hub, now, out):
@@ -365,13 +360,13 @@ def write(path, doc):
 def main(dry):
     now = time.time()
     hub = Hub(dry)
-    doc, moved, merged = sweep(hub, now)
+    doc, moved = sweep(hub, now)
     if dry:
         print(json.dumps(doc, indent=1))
     else:
         write(OUT, doc)
     held = [k for k, v in doc["tickets"].items() if v["state"] in ("pr", "release")]
-    print(f"sf-release-watch: {len(doc['tickets'])} tickets, {len(held)} held for a script, {len(merged)} merged {merged}, {len(moved)} moved to Done {moved}")
+    print(f"sf-release-watch: {len(doc['tickets'])} tickets, {len(held)} held for a script, {len(moved)} moved to Done {moved}")
     return 0
 
 
@@ -418,7 +413,7 @@ def self_test():
     assert at(19, 17, [dict(pr_open, reviewDecision="CHANGES_REQUESTED")], [])[0] == "attention", "change request is a model's job"
     assert at(19, 17, [dict(pr_open, isDraft=True)], [])[0] == "attention", "draft is a model's job"
     assert at(19, 17, [dict(pr_open, statusCheckRollup=[])], [])[0] == "attention", "unread checks fail open"
-    assert at(19, 17, [dict(pr_open, mergeStateStatus="CLEAN", statusCheckRollup=checks("SUCCESS"))], [])[0:2] == ("merge", "PR #961 green and clean"), "green clean PR in AI Review is merged by the script"
+    assert at(19, 17, [dict(pr_open, mergeStateStatus="CLEAN", statusCheckRollup=checks("SUCCESS"))], [])[0:2] == ("attention", "PR #961 green and clean, its owner merges it"), "a green clean PR is the owner's to merge, never the script's"
     assert at(21, 2, [pr_merged], [old], failed=lambda s: True)[0] == "attention", "a failed release run is a model's job"
     assert at(21, 43, [pr_merged], [old, new], in_new, nts=lambda tag: "- IGSH-1: other\n")[0] == "attention", "notes without the ticket"
     assert at(23, 30, [pr_merged], [old])[0] == "attention", "a release over three hours late is a model's job"
@@ -428,7 +423,7 @@ def self_test():
     class Fake(Hub):
         def __init__(self, prs, releases, tickets):
             super().__init__(False)
-            self._prs, self._rel, self._tk, self.done, self.merged = prs, releases, tickets, [], []
+            self._prs, self._rel, self._tk, self.done = prs, releases, tickets, []
 
         def tickets(self, board=BOARD, columns=COLUMNS):
             return self._tk if board == BOARD else getattr(self, "_extra", [])
@@ -451,40 +446,37 @@ def self_test():
         def run_failed(self, repo, sha):
             return False
 
-        def merge(self, repo, number):
-            self.merged.append(number)
-
         def finish(self, key, text):
             self.done.append((key, text))
 
     board = [("SOFT-2273", 2273, {"multiprompt", "bug"}, "AI Review"), ("SOFT-5", 5, {"triage"}, "Doing"), ("HTPR-1", 1, {"multiprompt"}, "Doing")]
     hub = Fake([pr_merged, other], [old, new], [board[0], board[1]])
-    doc, moved, merged = sweep(hub, t(21, 43))
+    doc, moved = sweep(hub, t(21, 43))
     assert moved == ["SOFT-2273"] and hub.done[0][0] == "SOFT-2273" and "v0.28.1689" in hub.done[0][1] and doc["tickets"] == {}, (moved, doc)
     hub = Fake([pr_merged, other], [old], [board[0]])
-    doc, moved, merged = sweep(hub, t(20, 8))
+    doc, moved = sweep(hub, t(20, 8))
     assert moved == [] and doc["tickets"]["SOFT-2273"]["state"] == "release" and not hub.done, doc
     hub = Fake([pr_open], [], [board[0]])
-    doc, moved, merged = sweep(hub, t(19, 17))
-    assert doc["tickets"]["SOFT-2273"]["state"] == "pr" and not moved and not merged, doc
-    # a green clean PR on a ticket in AI Review is merged by the script, then waits for its release
+    doc, moved = sweep(hub, t(19, 17))
+    assert doc["tickets"]["SOFT-2273"]["state"] == "pr" and not moved, doc
+    # a green clean PR: nobody merges it here. The owner resumes (state attention), in AI Review or Doing alike.
     clean = dict(pr_open, mergeStateStatus="CLEAN", statusCheckRollup=checks("SUCCESS", "SUCCESS"))
-    hub = Fake([clean], [], [board[0]])
-    doc, moved, merged = sweep(hub, t(19, 30))
-    assert at(19, 30, [clean], [])[0] == "merge" and at(23, 30, [clean], [])[0] == "attention", "green for over 3 hours: a model looks"
-    hub2 = Fake([clean], [], [("SOFT-2273", 2273, {"multiprompt", "wasted runs"}, "AI Review")])
-    doc2, _, merged2 = sweep(hub2, t(19, 30))
-    assert hub2.merged == [] and doc2["tickets"]["SOFT-2273"]["state"] == "attention", "a Wasted Runs ticket is never merged by the script"
-    assert hub.merged == [961] and merged == ["SOFT-2273"] and doc["tickets"]["SOFT-2273"]["state"] == "release", (hub.merged, doc)
-    # not in AI Review: a model may still push to it, so the script waits and never merges
-    hub = Fake([clean], [], [("SOFT-2273", 2273, {"multiprompt"}, "Doing")])
-    doc, moved, merged = sweep(hub, t(19, 30))
-    assert hub.merged == [] and doc["tickets"]["SOFT-2273"]["state"] == "pr", doc
-    # a green PR the script cannot merge (behind the base) goes back to a model
+    for section in ("AI Review", "Doing"):
+        hub = Fake([clean], [], [("SOFT-2273", 2273, {"multiprompt"}, section)])
+        doc, moved = sweep(hub, t(19, 30))
+        assert doc["tickets"]["SOFT-2273"]["state"] == "attention" and "owner merges" in doc["tickets"]["SOFT-2273"]["detail"], (section, doc)
+        assert not hasattr(hub, "merge"), "the script has no merge step"
+    assert at(23, 30, [clean], [])[0] == "attention", "green for over 3 hours: a model looks"
+    # a green PR behind the base goes back to a model
     assert at(19, 30, [dict(clean, mergeStateStatus="BEHIND")], [])[0] == "attention"
+    # checks all finished but GitHub still BLOCKED: held 30 minutes as a wait, then the owner asks for the review again
+    blocked = dict(pr_open, mergeStateStatus="BLOCKED", statusCheckRollup=checks("SUCCESS", "SUCCESS"), updatedAt="2026-11-13T19:10:00Z")
+    assert at(19, 25, [blocked], [])[0] == "pr", "BLOCKED under 30 minutes: still a wait"
+    assert at(19, 45, [blocked], [])[0] == "attention", "BLOCKED over 30 minutes with every check finished: the owner acts"
+    assert at(19, 45, [dict(blocked, statusCheckRollup=checks("SUCCESS", "RUN"))], [])[0] == "pr", "a check still running is a wait"
     # a ticket in Doing with an old released merge and no open PR may be rework: no move, no hold
     hub = Fake([pr_merged, other], [old, new], [("SOFT-2273", 2273, {"multiprompt"}, "Doing")])
-    doc, moved, merged = sweep(hub, t(21, 43))
+    doc, moved = sweep(hub, t(21, 43))
     assert moved == [] and not hub.done and doc["tickets"] == {}, (moved, doc)
     # HYCI-388 (HYCI-404): a Fleet CI & Infra ticket with a house-rules PR whose checks run is held as a script's wait; every other state is a model's
     hy = {"number": 441, "title": "HYCI-404: runner keeps its ticket", "headRefName": "hyci-404-owner", "state": "OPEN", "isDraft": False, "mergedAt": None,
@@ -494,19 +486,19 @@ def self_test():
     assert classify_extra("HYCI-40", [hy])[0] == "none" and classify_extra("HYCI-4040", [hy])[0] == "none", "a longer key is another ticket"
     assert classify_extra("HYCI-404", [dict(hy, statusCheckRollup=checks("FAILURE", "RUN"))])[0] == "attention", "red is a model's job"
     assert classify_extra("HYCI-404", [dict(hy, statusCheckRollup=checks("SUCCESS"), mergeStateStatus="CLEAN")])[0:2] == \
-        ("attention", "PR #441 is green, no script merges it"), "green: nobody merges a house-rules PR, a model does"
+        ("attention", "PR #441 is green, its owner merges it"), "green: the owner merges its house-rules PR"
     assert classify_extra("HYCI-404", [dict(hy, state="MERGED")])[0] == "none", "a merged PR is no wait"
     hub = Fake([pr_open], [], [board[0]])
     hub._extra = [("HYCI-404", 404, set(), "AI Review"), ("HYCI-9", 9, set(), "In Progress")]
     hub.prs = lambda repo: [hy] if repo in EXTRA_REPOS else [pr_open]
-    doc, moved, merged = sweep(hub, t(21, 40))
+    doc, moved = sweep(hub, t(21, 40))
     assert doc["tickets"]["HYCI-404"]["state"] == "pr" and "HYCI-9" not in doc["tickets"] and doc["tickets"]["SOFT-2273"]["state"] == "pr", doc
-    assert not hub.merged and not hub.done, "an extra repo is never merged or moved by the script"
+    assert not hub.done, "an extra repo is never moved by the script"
     # HYCI-408: a board 15 site ticket (PR in astro-rs) and a CI ticket with a PR in the multiprompt repo read the same way
     site = dict(hy, number=5, title="HTPR-9133 [IMPROVE] serve install scripts unchanged")
     hub._extra = [("HTPR-9133", 9133, set(), "In Progress"), ("HYCI-436", 436, set(), "AI Review")]
     hub.prs = lambda repo: [site, dict(hy, number=991, title="HYCI-436: Drive the chat-model verify")] if repo in EXTRA_REPOS + ["valentinyeo/multiprompt"] else [pr_open]
-    doc, _, _ = sweep(hub, t(21, 40))
+    doc, _ = sweep(hub, t(21, 40))
     assert doc["tickets"]["HTPR-9133"]["state"] == "pr" and doc["tickets"]["HYCI-436"]["state"] == "pr", doc
     assert ("15", ("In Progress", "AI Review", "QA")) == EXTRA_SWEEPS[1][:2] and all("astro-rs" in r for r in EXTRA_SWEEPS[1][2]), EXTRA_SWEEPS
     hub._extra = [("HYCI-404", 404, set(), "AI Review"), ("HYCI-9", 9, set(), "In Progress")]
@@ -516,7 +508,7 @@ def self_test():
         if repo in EXTRA_REPOS:
             raise RuntimeError("house-rules unreadable")
     hub.prs = lambda repo: unreadable(repo) or [pr_open]
-    doc, _, _ = sweep(hub, t(21, 40))
+    doc, _ = sweep(hub, t(21, 40))
     assert "HYCI-404" not in doc["tickets"] and doc["tickets"]["SOFT-2273"]["state"] == "pr", "an unreadable extra repo holds nothing and breaks nothing"
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "x" / "wait.json"
