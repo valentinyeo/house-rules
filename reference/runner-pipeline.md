@@ -31,7 +31,6 @@ The model never waits inside a run. It ends the run while review and checks run.
 - Temporarily stopped runners keep their tickets. Only permanently removed roster slots become orphans.
 - CI blocks the PR? File it per the CI snag rule in `reference/boards.md`.
 - A ticket in Not now is parked by Valentin. Runners never take it. Board 2060 has the column, before Todo. Add it to any board that needs one.
-- Three empty runs mark the ticket Wasted Runs. Runners skip it. Its owner fixes the ticket at the source, then removes the label. An empty run ends WAIT_CHECK, FAULT or PARKED.
 
 ## Leaving a ticket
 

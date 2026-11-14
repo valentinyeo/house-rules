@@ -189,8 +189,6 @@ PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYC
 RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 CI_LABELS = {"ci", "hypertask ci"}
 BASE_SKIP = set()
-WASTED = "wasted runs"  # fleet/waste-mark adds it after three empty runs in a row; every lane leaves the ticket for its owner
-WASTED_WHY = "wasted runs: examine the ticket"
 # 13 Nov, Valentin: "whatever is in there is not being touched by the runners". A ticket in the Not now column, on any board, is
 # parked by Valentin: no lane takes it, its open PR is not offered, and it does not count toward the pipeline. The pick columns
 # never list that column; these guards also cover a ticket read by key (the ticket of a PR) and any column that is renamed later.
@@ -750,7 +748,7 @@ def pc_waits():
 
 def skipped(t):
     """This runner's engine does not take t, or t waits on Valentin's PC while it is off."""
-    return bool(set(t["labels"]) & SKIP_ALL) or WASTED in t["labels"] or in_not_now(t) or timed_out_here(t) or t["key"] in pc_waits()
+    return bool(set(t["labels"]) & SKIP_ALL) or in_not_now(t) or timed_out_here(t) or t["key"] in pc_waits()
 
 
 PLAN_BUSY_HANDOFF = 30 * 60  # valid-leaves.json: a provider outage over 30 minutes, the same brain on another plan takes the ticket
@@ -1194,8 +1192,6 @@ def eligible_reason(t):
     labels = set(t["labels"])
     if in_not_now(t):
         return "not now: parked by Valentin"
-    if WASTED in labels:
-        return WASTED_WHY
     if labels & SKIP_ALL:
         return "label skip: " + ", ".join(sorted(labels & SKIP_ALL))
     if skipped(t):
@@ -2944,8 +2940,6 @@ def pipeline_reason(t, skip_brains, pr, rest=frozenset()):
         return "not now"
     if INCIDENT_LABEL in labels:
         return "incident"
-    if WASTED in labels:
-        return "wasted runs"
     if labels & skip_brains:
         return "brain"
     if t["waiting"] or t["section"] == "Valentin Review":
@@ -4686,9 +4680,6 @@ def wip_self_test():
     assert eligible_reason(tk("HYCI-9", "Backlog", "Chief Of Staff")) == "held by agent Chief Of Staff", \
         "a 11514 ticket the fleet chief holds is not new work (board 15 makes the same call)"
     assert eligible_reason(tk("HYCI-9", "Backlog")) is None, "an unheld 11514 ticket is still new work"
-    wasted = tk("HYCI-9", "Backlog", labels=["wasted runs"])
-    assert eligible_reason(wasted) == "wasted runs: examine the ticket" and skipped(wasted) \
-        and pipeline_reason(wasted, set(), False) == "wasted runs", "three empty runs mark a ticket and every lane leaves it"
 
     def need(key, text, section="Backlog", labels=(), prs=()):
         """eligible_reason for a ticket whose title/body says text, with the open PR list given (HYCI-355)."""
