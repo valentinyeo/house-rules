@@ -1619,6 +1619,27 @@ def bulk_touched(stamp):
     return sum(1 for x in SNAP["tickets"] if x["updated"][:16] == stamp[:16]) >= WAIT_GATE_BUMP
 
 
+PR_MERGES = Path(os.environ.get("FLEET_PR_MERGES", HOME / ".local/state/pr-merge/merges.jsonl"))  # one line per PR fleet/pr-merge merged
+
+
+def merged_after(key, when):
+    """True when fleet/pr-merge merged a PR for this ticket after `when` (HYCI-352). A merge ends the wait a run ended on; the fingerprint
+    cannot see it for PRs outside the shared PR list (valentinyeo/astro-rs, 14 Nov: HTPR-9133 stayed held behind a 09:10 FAULT after its
+    PR merged at 12:26). Unreadable file: False."""
+    try:
+        for line in open(PR_MERGES):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            at = stamp_time(r.get("ts", ""))
+            if r.get("ticket") == key and r.get("merged") and at and at > when:
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def gate_verdict(t, when, row, base, parts, now):
     """(held, cause) for one waiting ticket. `base` is the fingerprint kept at the first pick after the end."""
     age = (now - when).total_seconds()
@@ -1629,6 +1650,8 @@ def gate_verdict(t, when, row, base, parts, now):
     changed = stamp_time(t["updated"])
     if changed and (changed - when).total_seconds() > REST_GRACE and not bulk_touched(t["updated"]):
         return False, "ticket updated"
+    if merged_after(t["key"], when):
+        return False, "merged by pr-merge"
     if base.get("late"):
         return False, "late baseline"
     for name in ("pr", "blk"):
@@ -3534,6 +3557,16 @@ def wait_gate_self_test():
         # hold: the PR waits on a running check, nothing changed
         fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
         assert held() == {"HTPR-1"}, "a ticket that ended waiting on a running check is held"
+        global PR_MERGES
+        saved_merges = PR_MERGES
+        with tempfile.TemporaryDirectory() as td:
+            PR_MERGES = Path(td) / "merges.jsonl"
+            PR_MERGES.write_text(json.dumps({"ticket": "HTPR-1", "merged": True, "ts": ago(1)}) + "\n")
+            assert held() == set(), "a PR that fleet/pr-merge merged after the run ended lifts the hold, so the owner resumes for QA"
+            PR_MERGES.write_text(json.dumps({"ticket": "HTPR-1", "merged": True, "ts": ago(30)}) + "\n")
+            fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
+            assert held() == {"HTPR-1"}, "a merge older than the run's end lifts nothing"
+        PR_MERGES = saved_merges
         assert "HTPR-1" in resting(2, True) and "HTPR-1" in Skip(set(), resting(2, True)), "every lane reads the gate through resting()"
         assert json.loads(gate_state_path().read_text())["HTPR-1"]["parts"]["pr"][0][1] == "aaa", "the fingerprint is kept at the first pick"
         # 14 Nov (HTPR-9055): the shared PR copy predates the run's push and lists the old checks as finished. The baseline reads the list again.
