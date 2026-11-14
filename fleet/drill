@@ -305,7 +305,7 @@ def drill_cap_deadlock(ctx):
 
         wip = [tk(f"HTPR-{9101 + i}", "In Progress", holders=("runner 2",)) for i in range(12)]
         bait = tk("HTPR-9400", "Features", "Urgent")
-        tools = tk("YPER4-9300", "Backlog", "Urgent")
+        tools = tk("HYCI-9301", "Backlog", "Urgent")
         checks = tk("HYCI-9300", "Backlog", "Medium")
         blocked = tk("HTPR-9201", "Done")
         tickets = wip + [bait, tools, checks, blocked]
@@ -329,8 +329,13 @@ def drill_cap_deadlock(ctx):
         detected = time.time()
         keys = {k for _, k, _ in offers}
         kept = [o for o in offers if o[2] == "kept-slot"]
-        app = "HTPR-9400" in keys
-        ok = "YPER4-9300" in keys and "HYCI-9300" in keys and len(kept) >= 2 and not app
+        # The pool counts one unit per live runner, so 12 app tickets under one runner no longer close new work and the
+        # app bait is open to a free runner (HYCI-433). What must hold is the kept slot: both Fleet CI & Infra tickets go
+        # out before any new app work, so a heavy app pipeline can never starve CI or tools work.
+        app_at = next((i for i, o in enumerate(offers) if o[1] == "HTPR-9400"), None)
+        ci_at = [i for i, o in enumerate(offers) if o[1] in ("HYCI-9300", "HYCI-9301")]
+        ok = ({"HYCI-9300", "HYCI-9301"} <= keys and len(kept) >= 2
+              and (app_at is None or app_at > max(ci_at, default=-1)))
         detail = "" if ok else f"offers={offers[:8]}"
         return row("cap-deadlock", start, detected, detected if ok else None, ok, detail)
     except (Exception, SystemExit) as e:

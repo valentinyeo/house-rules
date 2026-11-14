@@ -420,7 +420,11 @@ green() {
 # A slot is live only while one of its own pane processes runs. Its tmux session says nothing: a pane that fell back to a
 # shell after the loop quit kept the slot counted as running and the tick never started it, so a slot the pacer turned on
 # stayed dead for minutes (HYCI-362). A drill-idle pane is one of our own too.
-loop_pid() { pgrep -f -- "$SELF $1 --" 2>/dev/null | head -1; }
+loop_pid() {
+  local pat="$SELF $1 --"
+  [ "${FLEET_RUNNER_DRILL:-}" = 1 ] && pat="$SELF $1 --drill-idle"
+  pgrep -f -- "$pat" 2>/dev/null | head -1
+}
 
 start_one() {
   local n=$1 sess
@@ -431,7 +435,9 @@ start_one() {
     log "restart: $sess had a session and no loop"
   fi
   if [ "${FLEET_RUNNER_DRILL:-}" = 1 ]; then
-    tmux new-session -d -s "$sess" -c "$HOME" "$SELF $n --drill-idle" || return 1
+    # The pane starts from the tmux server's environment, which can carry a runner's no-wait PATH, so name the
+    # drill's own environment and a plain PATH explicitly (HYCI-433).
+    tmux new-session -d -s "$sess" -c "$HOME" "env PATH=/usr/local/bin:/usr/bin:/bin FLEET_RUNNER_DRILL=1 FLEET_RUNNER_FIRST=$FIRST FLEET_RUNNER_LAST=$LAST $SELF $n --drill-idle" || return 1
     tmux select-pane -t "$sess" -T "DRILL $n"
     log "drill started $sess"; echo "started: $sess"; return 0
   fi
@@ -915,8 +921,11 @@ TM
   ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | ticket-selftest | reply-cap-selftest | no-wait-selftest | loop-selftest | fail-tail-selftest | transcript-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
   *)
     n=$1
-    [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
+    # A drill pane starts from the tmux server's environment, not the drill's, so --drill-idle must not depend on
+    # FLEET_RUNNER_FIRST/LAST being set inside it (HYCI-433).
     [ "${2:-}" = --drill-idle ] && { exec sleep 86400; }
+    [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
     [ "${2:-}" = --loop ] || { start_one "$n"; exit; }
     rlog="$STATE/runner-$n.log"
     runlog="$STATE/runner-$n.latest.log"
