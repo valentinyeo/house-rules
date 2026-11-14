@@ -1863,6 +1863,44 @@ def sf_wait_hold(on, now):
     return held
 
 
+HOUSE_PR_REPO = "valentinyeo/house-rules"
+HOUSE_PRS_CACHE = Path(STATE) / "house-prs.json"
+
+
+def house_prs():
+    """Open PRs on this repo (HYCI-435, 14 Nov: a CI-lane runner's PR here was not in open_prs(), which reads hypertask-ai/hypertask, so the
+    one-run hold never saw it, the runner ended WAIT_CHECK and was woken again to wait). Same shape as open_prs(). bin/pr-merger (poteto-2-advisor)
+    merges them when green. Read with the default gh login: the runner App cannot see this private repo. Cached ten minutes. Fails open to [].
+    Only after a real open_prs() read (SNAP has prs_at), so a test that injects SNAP makes no GitHub call."""
+    if not SNAP or not SNAP.get("prs_at"):
+        return []
+    try:
+        cached = json.loads(HOUSE_PRS_CACHE.read_text())
+        if time.time() - cached["at"] < PRS_FRESH_S:
+            return cached["prs"]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("GH_", "GITHUB_"))}
+        r = subprocess.run(["gh", "pr", "list", "--repo", HOUSE_PR_REPO, "--base", "main", "--state", "open", "--limit", "50", "--json",
+                            "number,title,isDraft,headRefName,updatedAt,statusCheckRollup,headRefOid,reviewDecision,mergeable,mergeStateStatus"],
+                           capture_output=True, text=True, env=env, timeout=120)
+        if r.returncode != 0:
+            return []
+        prs = [{"number": p["number"], "title": p["title"], "draft": p["isDraft"], "branch": p["headRefName"], "updated": p["updatedAt"],
+                "red": any(c.get("conclusion") in ("FAILURE", "TIMED_OUT") or c.get("state") in ("FAILURE", "ERROR")
+                           for c in p.get("statusCheckRollup") or []),
+                "head": p.get("headRefOid"), "review": p.get("reviewDecision") or "", "mergeable": p.get("mergeable") or "",
+                "merge_state": p.get("mergeStateStatus") or "", "checks": check_states(p.get("statusCheckRollup")), "repo": HOUSE_PR_REPO}
+               for p in json.loads(r.stdout)]
+        tmp = HOUSE_PRS_CACHE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"at": time.time(), "prs": prs}))
+        tmp.replace(HOUSE_PRS_CACHE)
+        return prs
+    except Exception:
+        return []
+
+
 def one_run_hold(dry, now=None):
     """One ticket, one run, one PR (13 Nov). Tickets whose open PR has pending or green checks, no conflict and no change
     request: no lane hands them to a model (they all read resting()). A script watches the checks, merges green and does the
@@ -1877,7 +1915,7 @@ def one_run_hold(dry, now=None):
     on, held = memo[2], set()
     try:
         by = defaultdict(list)
-        for p in open_prs():
+        for p in open_prs() + house_prs():
             key = pr_ticket(p)
             if key:
                 by[key].append(p)
@@ -3658,6 +3696,26 @@ def one_run_self_test():
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks green"], \
             "green checks hold the ticket"
         assert "HTPR-1" in resting(2, True) and "HTPR-1" in Skip(set(), resting(2, True)), "every lane reads the hold through resting()"
+        # HYCI-435: a ticket whose PR sits on the house-rules repo is held too (read from its own ten-minute cache, no GitHub call here)
+        global HOUSE_PRS_CACHE
+        saved_cache = HOUSE_PRS_CACHE
+        HOUSE_PRS_CACHE = Path(STATE) / "house-prs-selftest.json"
+        try:
+            for checks, word in ((["self-test=IN_PROGRESS"], "pending"), (["self-test=SUCCESS"], "green")):
+                HOUSE_PRS_CACHE.write_text(json.dumps({"at": time.time(), "prs": [pr(483, "HYCI-435", checks)]}))
+                SNAP = {"tickets": [tk("HYCI-435")], "rel": {}, "prs": [], "prs_at": time.time(), "incidents": []}
+                _ONE_RUN.clear()
+                lines.clear()
+                assert one_run_hold(True, now) == {"HYCI-435"} and lines == [f"one-run: HYCI-435 PR open, checks {word}"], (word, lines)
+            HOUSE_PRS_CACHE.write_text(json.dumps({"at": time.time(), "prs": [pr(483, "HYCI-435", ["self-test=FAILURE"])]}))
+            _ONE_RUN.clear()
+            lines.clear()
+            assert one_run_hold(True, now) == set(), "a red house-rules PR is a model's job"
+            SNAP = {"tickets": [tk("HYCI-435")], "rel": {}, "prs": []}
+            assert house_prs() == [], "no real open_prs() read: no house-rules read"
+        finally:
+            HOUSE_PRS_CACHE.unlink(missing_ok=True)
+            HOUSE_PRS_CACHE = saved_cache
         for why, extra in (("a failed check", {"checks": ["ci=FAILURE", "e2e=IN_PROGRESS"]}), ("a red flag", {"red": True}),
                            ("a conflict", {"mergeable": "CONFLICTING"}), ("a change request", {"review": "CHANGES_REQUESTED"}),
                            ("a draft", {"draft": True}), ("an unread check list", {"checks": []}), ("a REST-only list", {"checks": None}),
