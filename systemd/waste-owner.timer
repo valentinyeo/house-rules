@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the Wasted Runs owner every hour at 40 past
+
+[Timer]
+OnCalendar=*:40
+Persistent=false
+
+[Install]
+WantedBy=timers.target
