@@ -43,5 +43,10 @@
     "Valentin's own call": true,
     "Shipped": true,
     "Other": false
+  },
+  "phases": {
+    "rule": "Every model run on a ticket, the reviewer's too, is a run. Fine runs are the phases below. Every other run is a violation. No cap on Fix or QA runs.",
+    "fine": ["Build", "Review", "Fix", "Merge", "QA", "Outage", "Too hard", "Valentin's call"],
+    "alarm": "Violations per Product ticket. Runs per Product ticket is information only: never an alarm, an investigation or a fixer."
   }
 }
