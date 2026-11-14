@@ -239,17 +239,32 @@ newest_beat() {
 # Take the tool calls with the agent: a half-finished child left running would outlive the attempt.
 kill_tree() { local pid=$1 kid; for kid in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$kid"; done; kill -TERM "$pid" 2>/dev/null; }
 # Waits for one attempt. 0 = the agent ended by itself, 124 = no reply for REPLY_CAP seconds and it was killed.
+# The stall mark says which kind of silence it was (HYCI-396, 14 Nov): "never started" = the beat never moved once, so the
+# CLI itself hung before its first event (a hook or the sign-in, not the provider); "went silent" = events came, then stopped,
+# which is the provider. Only the second is a provider outage in the run's final line.
 wait_reply() {
-  local pid=$1 beat=$2 quiet=0 last now
+  local pid=$1 beat=$2 quiet=0 last now moved=0 kind
   last=$(newest_beat "$beat")
   while kill -0 "$pid" 2>/dev/null; do
     sleep "$CAP_TICK"
     now=$(newest_beat "$beat")
-    if [ "${now:-0}" -gt "${last:-0}" ]; then last=$now; quiet=0; continue; fi
+    if [ "${now:-0}" -gt "${last:-0}" ]; then last=$now; quiet=0; moved=1; continue; fi
     quiet=$((quiet + CAP_TICK))
-    [ "$quiet" -ge "$REPLY_CAP" ] && { printf 'no reply from the model for %ss\n' "$REPLY_CAP" > "$(stall_mark)"; kill_tree "$pid"; return 124; }
+    if [ "$quiet" -ge "$REPLY_CAP" ]; then
+      kind="went silent"; [ "$moved" = 1 ] || kind="never started"
+      printf 'no reply from the model for %ss (%s)\n' "$REPLY_CAP" "$kind" > "$(stall_mark)"; kill_tree "$pid"; return 124
+    fi
   done
   return 0
+}
+# The ending line for two silent attempts. Only a provider that went silent is a provider outage (valid leave). A CLI that
+# never wrote its first event is a local fault: it must wake the fixer, never hide as an outage (HTPR-9205, HTPR-9130).
+stall_final() {
+  if grep -q 'never started' "$(stall_mark)" 2>/dev/null; then
+    echo "RUNNER IDLE startup hang: the agent wrote nothing, no model reply for ${REPLY_CAP}s twice, run ended"
+  else
+    echo "RUNNER IDLE provider outage: no model reply for ${REPLY_CAP}s twice, run ended"
+  fi
 }
 
 # One stack-key read per runner process, kept in this shell only (house rule: keys once per job, never in a loop).
@@ -285,7 +300,7 @@ launch() {
   esac
   if [ "${LAUNCH_DRY:-}" = 1 ]; then
     printf 'cd %q &&' "$repo"
-    case $eng in codex|opencode) printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1' ;; claude) printf ' (ANTHROPIC_* unset: subscription login)' ;; esac
+    case $eng in codex|opencode) printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1' ;; claude) printf ' (ANTHROPIC_* unset: subscription login, RUNNER_EVENTS_WAIT_MAX=%s)' "${RUNNER_EVENTS_WAIT_MAX:-1}" ;; esac
     [ "$eng" = opencode ] && printf ' OPENCODE_API_KEY=<from stack-key, %s>' "$([ -n "${OC_KEY:-}" ] && echo loaded || echo 'not loaded')"
     case $eng in pi-codex|pi-opencode) printf ' PATH=%q:$PATH' "$HERE/no-wait-bin" ;; esac
     printf ' timeout 3h'; printf ' %q' "${base[@]}"
@@ -304,6 +319,10 @@ launch() {
         cd "$repo" || exit 1
         # Claude runs on the subscription login only: no API key, token or base URL may reach it.
         unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID
+        # The hypertask repo's SessionStart hook runner-inbox-stop.sh wait (asyncRewake) never ends in a session named RUNNER n, and
+        # claude -p does not reply while it runs: HTPR runs sat silent for the whole 3h (HTPR-7861, HTPR-9205, HTPR-9130, HYCI-294).
+        # This knob makes that waiter leave after a second. Board events still arrive through the stop, prompt and post modes.
+        export RUNNER_EVENTS_WAIT_MAX=${RUNNER_EVENTS_WAIT_MAX:-1}
         export HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1
         unset OPENCODE_API_KEY
         [ "$eng" = opencode ] && export OPENCODE_API_KEY="$OC_KEY"
@@ -329,7 +348,7 @@ launch() {
       echo "reply cap: nothing from the model for ${REPLY_CAP}s; retrying once (attempt 2 of 2)"
       continue
     fi
-    echo "RUNNER IDLE provider outage: no model reply for ${REPLY_CAP}s twice, run ended"
+    stall_final
     break
   done
   return "$rc"
@@ -481,6 +500,27 @@ case "${1:-}" in
     wait "$spid" 2>/dev/null
     python3 "$HERE/runner-state.py" --classify --final 'RUNNER IDLE provider outage: no model reply for 600s twice, run ended' --rc 124 --elapsed 700 --ticket HYCI-1 | grep -q '"state": "FAULT"' \
       || { echo 'reply-cap self-test FAILED: a capped run is not classified as a fault with its reason' >&2; bad=1; }
+    # Claude engine (HYCI-396, 14 Nov): the silence kind is told apart, and only a provider that went silent is a valid leave.
+    grep -q 'never started' "$(stall_mark)" || { echo 'reply-cap self-test FAILED: a Claude attempt with no first event is not marked never started' >&2; bad=1; }
+    expect 'never started ends as a startup hang' "$(stall_final | grep -c 'startup hang')" 1
+    expect 'never started is not called a provider outage' "$(stall_final | grep -c 'provider outage')" 0
+    mkdir -p "$CLAUDE_PROJECTS/-x"; echo '{}' > "$CLAUDE_PROJECTS/-x/sid3.jsonl"
+    ( sleep 1; echo '{}' >> "$CLAUDE_PROJECTS/-x/sid3.jsonl"; sleep 60 ) &
+    spid=$!
+    wait_reply "$spid" "claude-session:sid3"; expect 'a Claude attempt that goes silent is killed' "$?" 124
+    wait "$spid" 2>/dev/null
+    grep -q 'went silent' "$(stall_mark)" || { echo 'reply-cap self-test FAILED: a Claude attempt that wrote then stopped is not marked went silent' >&2; bad=1; }
+    expect 'went silent ends as a provider outage' "$(stall_final | grep -c 'provider outage')" 1
+    expect 'a startup hang is a fault' "$(python3 "$HERE/runner-state.py" --classify --final 'RUNNER IDLE startup hang: the agent wrote nothing, no model reply for 600s twice, run ended' --rc 124 --elapsed 1200 --ticket HYCI-1 | grep -c '"state": "FAULT"')" 1
+    # The Claude launch carries the knob that keeps the hypertask SessionStart waiter from holding claude -p silent; the hook honours it.
+    LAUNCH_DRY=1 launch claude sonnet high /tmp x 2>&1 | grep -q 'RUNNER_EVENTS_WAIT_MAX=1' || { echo 'reply-cap self-test FAILED: the Claude launch does not set RUNNER_EVENTS_WAIT_MAX' >&2; bad=1; }
+    hook=${RUNNER_INBOX_HOOK:-$HOME/.local/lib/hypertask/runner-pickup/runner-inbox-stop.sh}
+    if [ -x "$hook" ]; then
+      started=$(date +%s)
+      SHIP_SESSION_NAME='RUNNER 98' RUNNER_INBOX_DIR=$tmp/inbox RUNNER_EVENTS_WAIT_MAX=1 timeout 10 "$hook" wait < /dev/null; hrc=$?
+      expect 'the inbox waiter leaves with exit 0 at the knob' "$hrc" 0
+      [ $(( $(date +%s) - started )) -le 6 ] || { echo 'reply-cap self-test FAILED: the inbox waiter ignored RUNNER_EVENTS_WAIT_MAX' >&2; bad=1; }
+    fi
     [ "$bad" = 0 ] && echo 'reply-cap self-test ok'
     exit "$bad" ;;
   too-hard-selftest)
