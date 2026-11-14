@@ -2509,19 +2509,23 @@ def choose(n, dry):
     hit = incident_step(n, dry)
     if hit:
         return hit
-    owned = [t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == int(n)]
+    owned = sorted((t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == int(n)),
+                   key=lambda t: (t["created"], t["key"]))
     if owned:
-        t = sorted(owned, key=lambda t: (t["created"], t["key"]))[0]
-        record = t["_owner"]
-        if record.get("engine"):
-            set_engine(record["engine"])
         taken = {**claim_files(), **virtual_claims()}
         SKIP[0] = Skip({key for key, who in taken.items() if who != str(n)}, resting(n, dry))
-        if skipped(t) or t["waiting"] or t["key"] in SKIP[0] or held_back(t, own=True) or open_blocked_by(t):
-            raise SystemExit(f"none: Runner {n} keeps {t['key']}; waiting, no hand-off")
-        if f"runner {n}" not in names(t) and not try_claim(n, t, "board", dry):
-            raise SystemExit(f"none: Runner {n} keeps {t['key']}; assignment could not resume")
-        return t, "own"
+        # HYCI-396 (14 Nov): the oldest owned ticket used to decide alone. Runners 2, 5 and 7 each owned a second ticket that was
+        # free and sat idle behind the first one's wait. A runner keeps every ticket it owns, works the first that is not
+        # waiting, and is held only when all of them wait.
+        for t in owned:
+            record = t["_owner"]
+            set_engine(record.get("engine") or runner_engine(n))
+            if skipped(t) or t["waiting"] or t["key"] in SKIP[0] or held_back(t, own=True) or open_blocked_by(t):
+                continue
+            if f"runner {n}" not in names(t) and not try_claim(n, t, "board", dry):
+                raise SystemExit(f"none: Runner {n} keeps {t['key']}; assignment could not resume")
+            return t, "own"
+        raise SystemExit(f"none: Runner {n} keeps {owned[0]['key']}; waiting, no hand-off")
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
     others = {k for k, who in taken.items() if who != str(n)}
@@ -2627,7 +2631,9 @@ def choose(n, dry):
     def not_new(t):
         """Why this ticket in a new-work column is not offered to this runner, or None."""
         if t["key"] in skip:
-            return "claimed by runner " + taken[t["key"]] if t["key"] in skip.hard else "resting after an IDLE end"
+            # HYCI-396: a ticket another runner owns has no claim file; taken[...] raised KeyError for any runner with no ticket of its own
+            return ("claimed by runner " + str(taken.get(t["key"]) or (t.get("_owner") or {}).get("runner", "?"))
+                    if t["key"] in skip.hard else "resting after an IDLE end")
         if t["key"] in mine_claim:
             return "already claimed by this runner"
         why = eligible_reason(t)
