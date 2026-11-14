@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# No waiting inside a run (HYCI-414, HYCI-396). House rule: never wait inside a run; one check read after the push, the recheck
+# time in the agent lane, then end the run. The brief said so and nothing enforced it: on 13-14 Nov the Pi runs spent 81.6 of 205
+# run hours asleep in `sleep 300` loops on their own PR's checks (HTPR-9274 slept 9080 of 10806 seconds, then hit the 3h limit).
+# fleet/runner puts this directory first on PATH for pi-codex and pi-opencode attempts only. A sleep under NO_WAIT_LIMIT seconds
+# (default 60) runs for real, so ci-wait's 5s tick and short settles still work; a longer one is refused with the rule and exit 1.
+limit=${NO_WAIT_LIMIT:-60}
+real=/usr/bin/sleep; [ -x "$real" ] || real=/bin/sleep
+total=$(awk 'BEGIN{t=0; u["s"]=1; u["m"]=60; u["h"]=3600; u["d"]=86400}
+  { for (i=1;i<=NF;i++) { if ($i == "infinity") { t=1e12; continue }
+      if (match($i, /^[0-9]+([.][0-9]+)?[smhd]?$/)) { s=substr($i, length($i)); n=$i; if (s in u) { n=substr($i,1,length($i)-1); t+=n*u[s] } else t+=n } } }
+  END{printf "%d", t}' <<<"$*")
+if [ "${total:-0}" -lt "$limit" ]; then exec "$real" "$@"; fi
+[ -n "${NO_WAIT_LOG:-}" ] && printf '%s runner=%s sleep=%ss\n' "$(date -u +%FT%TZ)" "${NO_WAIT_RUNNER:-?}" "$total" >> "$NO_WAIT_LOG" 2>/dev/null
+cat >&2 <<M
+sleep $* refused: house rule, never wait inside a run (sleeps of ${limit}s or more are refused).
+Read the checks once. Write the recheck time in the agent lane (vcc activity add). End the run with this line and nothing after it:
+RUNNER IDLE checks pending
+fleet/pick holds a ticket whose PR checks are pending, a script merges it when they pass, and a new run starts only if a check fails.
+M
+exit 1
