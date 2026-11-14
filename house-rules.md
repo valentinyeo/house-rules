@@ -34,6 +34,7 @@ Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house
 - Prove it, never claim it. "Looks good", "should work", bare "tests pass" are not evidence. Show a demo, before and after numbers or a walkthrough.
 - Never block Valentin on non-decisions. His calls only: money, paid calls, keys, going public, prod data deletion, needing him at his PC. Everything else: decide, act, keep going. Advice is No or close? Close it yourself.
 - HARD: never ask him for a fact. Versions, logs, PC state, screenshots: look them up yourself.
+- HARD: write with your own agent login, never plain `hypertask`.
 - HARD: hit a Hypertask snag, even one you worked around? Before your final answer run `skills/hypertask-triage/scripts/agent-feedback --kind bug|friction|missing|idea --tool "<exact command or screen>" "plain summary"`. Say so in your final answer.
 - HARD: Rat Stack is our stack: Effect, Foldkit, Alchemy, StyleX. No React, Tailwind, UI kits or chart libraries. Details: `reference/stack.md`.
 - Run `/do` for a must-finish task, `/deep-work` when the owner is away 60 to 90 minutes, `/unblock` for his blockers.
@@ -80,7 +81,7 @@ Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house
 
 ## Releases
 - HARD: Valentin asks for a flag switch? Do it that turn. His ask is the approval. Never ask him back.
-- Every flag goes to Everyone. Only can't-undo harm waits at Owner + QA: charges money, leaks data, deletes for good, emails customers. Failed live check: roll back, flag stays on. Never switch Off.
+- Every flag goes to Everyone. Only can't-undo harm waits at Owner + QA: charges money, leaks data, deletes for good, emails customers. Failed live check: roll back, flag stays on. Never switch Off or park a flag.
 - Flag columns, flag links, changelog lines, in-app updates: `reference/flags.md`.
 
 ## Read X when Y
@@ -99,7 +100,5 @@ Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house
 | `reference/stack.md` | New app, frontend or framework choice |
 | `skills/tickets/SKILL.md` | Writing any ticket or comment |
 | `skills/figma-design/SKILL.md` | Any Figma work |
-| `skills/hypertask-triage/SKILL.md` | Board health, archiving, a lead turn |
-| `skills/unblock/SKILL.md` | Valentin's blockers |
 | `skills/solo-dev/SKILL.md` | You are the only developer on an app |
 | `skills/lead/SKILL.md` | You are a fleet lead |
