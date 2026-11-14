@@ -44,7 +44,6 @@ Disposition codes:
 | 57 | One runner, one ticket; pick order; WIP cap | a | `reference/runner-pipeline.md` | `fleet/pick` |
 | 58 | Missing priorities filled hourly | a (cut in A) | none | `prio-scan` |
 | 59 | Keep one runner and model until Done | a (cut in A) | none | `fleet/ticket_owner.py`, `fleet/park` |
-| 60 | Three empty runs mark Wasted Runs | a | `reference/runner-pipeline.md` | `fleet/waste-mark` |
 | 61 | Not now column | a | `reference/boards.md` | `fleet/pick` |
 | 62 | HARD: no factory stop; prevent excess runs | a | `reference/runner-pipeline.md` | `bin/excess-run-watch` |
 | 63 | HARD: a runner that takes a ticket delivers it | a | `reference/runner-pipeline.md` | `fleet/valid-leaves.json` |
@@ -124,7 +123,6 @@ These rules exist to describe, feed or police a script. If the script goes, the 
 |---|---|---|
 | 58 missing priorities | `prio-scan` | one hourly job |
 | 56 one-run-ready | `ticket-ready`, its Sonnet fixer | a gate in `fleet/pick`, a fixer |
-| 60 Wasted Runs | `fleet/waste-mark` | a label and a pick skip |
 | 62, 63 excess runs, valid leaves | `bin/excess-run-watch`, Sonnet fixer, `valid-leaves.json` | a watcher, a fixer, a state file |
 | 55 run definition, violations | `bin/kpi-watch`, Run Log page | a KPI and its alarm |
 | 83 runner end states | `fleet/runner-state.py` | a state machine |

@@ -20,7 +20,7 @@ statusCheckRollup, updatedAt. From that, decide() returns one action and a plain
   fix     red check, merge clash, change request, or a check cancelled again: an owner runner has work. This script only writes one
           agent-lane note per head commit; fleet/pick reads the same PR state and resumes the owner for a Fix run.
   merge   every check green and GitHub says CLEAN.
-After a merge: remove the Wasted Runs label if the ticket has it, write DEPLOY_WAIT (hypertask-ai/hypertask only) until the production
+After a merge: write DEPLOY_WAIT (hypertask-ai/hypertask only) until the production
 deploy of the merge commit ends, and log the row. fleet/pick then resumes the owner runner for the live check (QA). The owner is never
 resumed to merge.
 
@@ -304,17 +304,6 @@ def run_ids_reran(run, repo, env):
     return rc == 0, (err or out).strip()[:120]
 
 
-def clear_wasted(key, n, repo):
-    """A merged PR ends the wait that three empty runs came from (HYCI-396, HYCI-285): remove Wasted Runs so the owner is taken back for QA."""
-    t = ticket_of(key) or {}
-    if "wasted runs" not in {l.lower() for l in t.get("labels") or []}:
-        return
-    rc, out, err = sh([VCC, "task", "update", key, "--remove-label", "Wasted Runs"], timeout=60)
-    if rc == 0:
-        note(key, f"pr-merge: PR {n} merged, so Wasted Runs is removed. The owner takes the ticket back for its live check.")
-    print(f"pr-merge: {key} Wasted Runs {'removed' if rc == 0 else 'not removed: ' + (err or out).strip()[:80]}")
-
-
 def update_throttled(repo, n, now):
     """True when another PR of this repo had its branch updated inside UPDATE_WINDOW_S (its CI is still running)."""
     for p in (STATE / "pr").glob(f"{repo.replace('/', '-')}-*.json") if (STATE / "pr").exists() else []:
@@ -422,7 +411,6 @@ def one(repo, n, dry=False, now=None, hooks=None):
         record({"repo": repo, "pr": n, "ticket": key, "merged": True, "merged_by": by, "sha": sha[:12]})
         print(f"pr-merge: merged PR {n} ({key}) {repo} by {by or '?'}")
         if "merge" not in h:
-            clear_wasted(key, n, repo)
             enroll_deploy(repo, key, n, sha)
             note(key, f"pr-merge: PR {n} https://github.com/{repo}/pull/{n} merged by the script. Its owner takes the live check next"
                       + (" once the production deploy ends." if repo in DEPLOY_REPOS else "."))
@@ -624,9 +612,8 @@ def self_test():
 
     # one(): the merge, clash and update paths, with the outside world faked
     said, calls = [], []
-    sh_real, note_real, clear_real = globals()["sh"], globals()["note"], globals()["clear_wasted"]
+    sh_real, note_real = globals()["sh"], globals()["note"]
     globals()["note"] = lambda key, text: said.append((key, text)) or True
-    globals()["clear_wasted"] = lambda *a: None
     try:
         def run(extra=None, hooks=None, dry=False, st=None):
             hk = {"env": {}, "pr": lambda: dict(base | (extra or {})), "ticket": lambda k: ok_t, "owner": lambda k: None} | (hooks or {})
@@ -646,7 +633,7 @@ def self_test():
         assert run({"statusCheckRollup": good + [cr("b", conclusion="CANCELLED", run="55")]},
                    hooks={"rerun": lambda r: calls.append(("rerun", r)) or (True, "")}) == "rerun" and ("rerun", "55") in calls
     finally:
-        globals()["note"], globals()["clear_wasted"] = note_real, clear_real
+        globals()["note"] = note_real
     assert any("merged" in t for _, t in said) is False, "the hooked merge path writes no merge note here"
     assert any("needs its owner" in t for _, t in said), "a clash writes one owner note"
     st = load_pr_state(repo, 7)
