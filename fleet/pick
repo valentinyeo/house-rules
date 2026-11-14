@@ -613,11 +613,26 @@ def skipped(t):
     return bool(set(t["labels"]) & SKIP_ALL) or WASTED in t["labels"] or in_not_now(t) or timed_out_here(t) or t["key"] in pc_waits()
 
 
+PLAN_BUSY_HANDOFF = 30 * 60  # valid-leaves.json: a provider outage over 30 minutes, the same brain on another plan takes the ticket
+
+
+def plan_busy_long(engine):
+    """HYCI-431: engine's plan has been resting 30+ minutes (fleet/runner's provider-busy mark is still live and was written 30+
+    minutes ago). A quota stop writes its mark once with the reset time as the end, so the mark's age is the outage's age."""
+    try:
+        f = RUNNER_STATE / f"provider-busy-{engine}"
+        until = int(f.read_text().strip() or 0)
+        now = time.time()
+        return until > now and now - f.stat().st_mtime >= PLAN_BUSY_HANDOFF
+    except (OSError, ValueError):
+        return False
+
+
 def cannot_do(name, t):
-    """A live runner whose engine skips this ticket: it holds the ticket in name only."""
+    """A live runner whose engine skips this ticket, or whose plan has been down 30+ minutes: it holds the ticket in name only."""
     m = re.fullmatch(r"runner (\d+)", name)
     e = m and runner_engine(int(m[1]))
-    return bool(e) and engine_skips(e, t)
+    return bool(e) and (engine_skips(e, t) or plan_busy_long(e))
 
 
 def orphan(t):
@@ -1826,6 +1841,13 @@ def release_timed_out_owners(owners, dry):
                 owners.release(t["key"])
             t["_owner"] = None
             log(f"owner released: {t['key']} timed out on {engine} (Runner {o['runner']}); another engine may adopt it")
+        elif plan_busy_long(engine):
+            # HYCI-431: Runner 6's Codex plan was spent for 43h and its owned tickets sat held. Valid leaves: an outage over
+            # 30 minutes hands the ticket to another plan. The pin goes; a runner on a working plan adopts it.
+            if not dry:
+                owners.release(t["key"])
+            t["_owner"] = None
+            log(f"owner released: {t['key']} plan {engine} down 30+ minutes (Runner {o['runner']}); another plan may adopt it")
 
 
 PARK_MERGE = 90  # seconds: a run's PARKED result and the fleet/park action it triggers are one park
@@ -3689,6 +3711,7 @@ def self_test():
     trace_self_test()
     park_count_self_test()
     escalate_self_test()
+    plan_busy_self_test()
     fair_self_test()
     wait_self_test()
     wait_gate_self_test()
@@ -3771,6 +3794,41 @@ def escalate_self_test():
         set_engine(saved[4])
         globals()["ship_claim"] = saved[5]
         RUNNER_STATE, RUNNERS, SNAP, try_claim = saved[:4]
+
+
+def plan_busy_self_test():
+    """A plan resting 30+ minutes (live provider-busy mark written 30+ minutes ago) hands its owners' tickets to other plans."""
+    global RUNNER_STATE, RUNNERS, SNAP
+    import tempfile
+    saved = (RUNNER_STATE, RUNNERS, SNAP)
+    RUNNER_STATE = Path(tempfile.mkdtemp())
+    RUNNERS = 3
+    (RUNNER_STATE / "engine-1").write_text("codex\n")
+    (RUNNER_STATE / "engine-2").write_text("claude\n")
+    mark = RUNNER_STATE / "provider-busy-codex"
+    t = {"key": "HTPR-80", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium",
+         "holders": [["runner 1", True]], "waiting": False, "subs": False, "paid": False,
+         "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"}
+    try:
+        assert not plan_busy_long("codex"), "no mark, no outage"
+        mark.write_text(str(int(time.time()) + 150000))
+        assert not plan_busy_long("codex") and not orphan(t), "a fresh mark is a rest: the owner resumes"
+        old = time.time() - 31 * 60
+        os.utime(mark, (old, old))
+        assert plan_busy_long("codex") and not plan_busy_long("claude"), "31 minutes in: only the busy plan hands off"
+        assert orphan(t), "its ticket is held in name only: a runner on another plan adopts it"
+        mark.write_text(str(int(time.time()) - 5))
+        os.utime(mark, (old, old))
+        assert not plan_busy_long("codex") and not orphan(t), "an expired mark ends the handoff"
+        mark.write_text(str(int(time.time()) + 150000))
+        os.utime(mark, (old, old))
+        dropped = []
+        owners = type("O", (), {"release": lambda self, k: dropped.append(k) or True})()
+        SNAP = {"tickets": [{**t, "_owner": {"runner": 1, "engine": "codex"}}], "incidents": []}
+        release_timed_out_owners(owners, False)
+        assert dropped == ["HTPR-80"] and SNAP["tickets"][0]["_owner"] is None, "the durable owner pin is dropped"
+    finally:
+        RUNNER_STATE, RUNNERS, SNAP = saved
 
 
 def wip_self_test():
