@@ -2,7 +2,7 @@
 
 orchestrators run the pstack orchestrate playbook. if any other rule or skill disagrees with it, the playbook wins. only valentin's lines beat it.
 
-hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view, under its own login (board-identity sets it up). status and questions go on the ticket, not in chat.
+hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view, under its own login (board-identity sets it up). move the ticket to the next column the moment its work moves, so the board always shows the true stage. status and questions go on the ticket, not in chat.
 
 new cloudflare work starts from the joelhooks/rat-stack template.
 
