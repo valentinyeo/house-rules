@@ -169,6 +169,9 @@ URGENT_REST = 600
 # before HYCI-352 ships would leave green PRs unmerged. The file is created when HYCI-352 lands.
 ONE_RUN_FLAG = Path(os.environ.get("FLEET_ONE_RUN_FLAG", HOME / ".local/state/fleet/one-run.on"))
 SF_RELEASE_WAIT = Path(os.environ.get("FLEET_SF_RELEASE_WAIT", HOME / ".local/state/fleet/sf-release-wait.json"))  # written by fleet/sf-release-watch
+DEPLOY_WAIT = Path(os.environ.get("FLEET_DEPLOY_WAIT", HOME / ".local/state/fleet/deploy-wait.json"))  # written by bin/pr-merger (poteto-2-advisor) after a merge, until its production deploy ends (HYCI-352)
+WAIT_FILES = lambda: (SF_RELEASE_WAIT, DEPLOY_WAIT)
+WAIT_STATES = ("pr", "release", "deploy")
 SF_WAIT_FRESH_S = 900  # an older file holds nothing: a dead watcher must not freeze tickets
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
@@ -1632,19 +1635,21 @@ def gate_verdict(t, when, row, base, parts, now):
 
 
 def sf_wait_listed(t, now):
-    """The detail line when fleet/sf-release-watch lists this ticket as pr or release (a script's wait), else "". Same file, freshness and
+    """The detail line when a script lists this ticket as pr, release or deploy (a script's wait), else "". Same files, freshness and
     cap as sf_wait_hold, but no flag and no log: the wait gate asks it for one ticket at the moment its blind wait would end. Fails open."""
-    try:
-        doc = json.loads(SF_RELEASE_WAIT.read_text())
-        if now.timestamp() - float(doc["at"]) > SF_WAIT_FRESH_S or INCIDENT_LABEL in t["labels"]:
-            return ""
-        row = next((r for k, r in doc["tickets"].items() if ticket_id(k) == ticket_id(t["key"])), None)
-        since = stamp_time((row or {}).get("since", ""))
-        if not row or row.get("state") not in ("pr", "release") or since is None or (now - since).total_seconds() > gate_cap(t):
-            return ""
-        return row.get("detail") or row["state"]
-    except Exception:
-        return ""
+    for path in WAIT_FILES():
+        try:
+            doc = json.loads(path.read_text())
+            if now.timestamp() - float(doc["at"]) > SF_WAIT_FRESH_S or INCIDENT_LABEL in t["labels"]:
+                continue
+            row = next((r for k, r in doc["tickets"].items() if ticket_id(k) == ticket_id(t["key"])), None)
+            since = stamp_time((row or {}).get("since", ""))
+            if not row or row.get("state") not in WAIT_STATES or since is None or (now - since).total_seconds() > gate_cap(t):
+                continue
+            return row.get("detail") or row["state"]
+        except Exception:
+            continue
+    return ""
 
 
 def sf_attention(t, now):
@@ -1831,35 +1836,37 @@ def ticket_id(key):
 
 
 def sf_wait_hold(on, now):
-    """Software Factory tickets a script is waiting on (HYCI-352, SOFT-2273: five runs, four only waited). fleet/sf-release-watch
-    writes SF_RELEASE_WAIT every five minutes: state pr (PR open, checks pending or green) or release (merged, release not out)
-    means the next step is a script's, so no lane hands the ticket to a model. Red, conflicting, change-requested, failed-release
-    and notes-missing tickets are state attention and never held. A file older than SF_WAIT_FRESH_S holds nothing, and so does a
-    wait older than gate_cap(t). Incidents are never held. Makes no GitHub call. Fails open."""
+    """Tickets a script is waiting on (HYCI-352, SOFT-2273: five runs, four only waited). fleet/sf-release-watch writes SF_RELEASE_WAIT every
+    five minutes: state pr (PR open, checks pending or green) or release (merged, release not out). bin/pr-merger writes DEPLOY_WAIT: state
+    deploy (merged, production deploy of the merge commit not finished), so a merged ticket reaches its runner for the live check only once
+    the deploy ended. Either way the next step is a script's, so no lane hands the ticket to a model. Red, conflicting, change-requested,
+    failed-release and failed-deploy tickets are never held. A file older than SF_WAIT_FRESH_S holds nothing, and so does a wait older than
+    gate_cap(t). Incidents are never held. Makes no GitHub call. Fails open."""
     held = set()
-    try:
-        doc = json.loads(SF_RELEASE_WAIT.read_text())
-        age = now.timestamp() - float(doc["at"])
-        if age > SF_WAIT_FRESH_S:
-            log(f"sf-wait: {SF_RELEASE_WAIT.name} is {int(age / 60)} minutes old, nothing held")
-            return held
-        for key, row in sorted(doc["tickets"].items()):
-            if row.get("state") not in ("pr", "release"):
+    for path in WAIT_FILES():
+        name = "deploy-wait" if path == DEPLOY_WAIT else "sf-wait"
+        try:
+            doc = json.loads(path.read_text())
+            age = now.timestamp() - float(doc["at"])
+            if age > SF_WAIT_FRESH_S:
+                log(f"{name}: {path.name} is {int(age / 60)} minutes old, nothing held")
                 continue
-            t = next((x for x in SNAP["tickets"] if ticket_id(x["key"]) == ticket_id(key)), None)
-            since = stamp_time(row.get("since", ""))
-            if t is None or INCIDENT_LABEL in t["labels"] or since is None or (now - since).total_seconds() > gate_cap(t):
-                continue
-            msg = f"sf-wait: {t['key']} {row.get('state')}: {row.get('detail', '')}"
-            log(msg if on else f"{msg} (shadow: {ONE_RUN_FLAG} missing, not skipped)")
-            if on:
-                held.add(t["key"])
-                note(t["key"], f"sf-wait: {row.get('detail', '')}")
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        log(f"sf-wait: error, nothing held ({type(e).__name__}: {str(e)[:80]})")
-        held = set()
+            for key, row in sorted(doc["tickets"].items()):
+                if row.get("state") not in WAIT_STATES:
+                    continue
+                t = next((x for x in SNAP["tickets"] if ticket_id(x["key"]) == ticket_id(key)), None)
+                since = stamp_time(row.get("since", ""))
+                if t is None or INCIDENT_LABEL in t["labels"] or since is None or (now - since).total_seconds() > gate_cap(t):
+                    continue
+                msg = f"{name}: {t['key']} {row.get('state')}: {row.get('detail', '')}"
+                log(msg if on else f"{msg} (shadow: {ONE_RUN_FLAG} missing, not skipped)")
+                if on:
+                    held.add(t["key"])
+                    note(t["key"], f"{name}: {row.get('detail', '')}")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log(f"{name}: error, nothing held ({type(e).__name__}: {str(e)[:80]})")
     return held
 
 
@@ -3893,6 +3900,60 @@ def sf_release_self_test():
         _ONE_RUN.clear()
 
 
+def deploy_wait_self_test():
+    """HYCI-352, live check. A PR merged, the ticket went back to its runner at once, and the run only waited for the production deploy.
+    bin/pr-merger (poteto-2-advisor) writes DEPLOY_WAIT while the deploy of the merge commit runs; the picker holds the ticket until the
+    file drops it. A failed or overdue deploy is dropped from the file too (the merger writes an agent-lane note), so a model has the ticket."""
+    global SNAP, ONE_RUN_FLAG, SF_RELEASE_WAIT, DEPLOY_WAIT, log
+    import tempfile
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    ago = lambda m: (now - dt.timedelta(minutes=m)).strftime(fmt)
+    tk = lambda key, section="QA", labels=(), prio="Medium": {
+        "key": key, "idx": 1, "board": "15", "section": section, "title": "x", "labels": list(labels), "prio": prio,
+        "holders": [], "waiting": False, "subs": False, "paid": False, "updated": ago(360), "created": ago(9999)}
+    saved = (SNAP, ONE_RUN_FLAG, SF_RELEASE_WAIT, DEPLOY_WAIT, log)
+    tmp = Path(tempfile.mkdtemp())
+    wait, flag, lines = tmp / "deploy-wait.json", tmp / "one-run.on", []
+    DEPLOY_WAIT, ONE_RUN_FLAG, SF_RELEASE_WAIT, log = wait, flag, tmp / "no-sf.json", lines.append
+
+    def write(rows, at=0):
+        wait.write_text(json.dumps({"at": int(now.timestamp()) - at, "tickets": rows}))
+
+    def held(tickets):
+        global SNAP
+        SNAP = {"tickets": tickets, "rel": {}, "prs": [], "incidents": [], "open": {}}
+        _ONE_RUN.clear()
+        lines.clear()
+        return one_run_hold(True, now)
+
+    row = {"HTPR-9": {"state": "deploy", "detail": "PR #1 merged, production deploy not finished (deploy in_progress)", "since": ago(8)}}
+    try:
+        flag.write_text("")
+        write(row)
+        assert held([tk("HTPR-9")]) == {"HTPR-9"}, "merged, deploy running: the ticket waits for the script"
+        assert lines == ["deploy-wait: HTPR-9 deploy: PR #1 merged, production deploy not finished (deploy in_progress)"], lines
+        assert "HTPR-9" in resting(2, True), "every lane reads it through resting()"
+        assert sf_wait_listed(tk("HTPR-9"), now).startswith("PR #1 merged"), "the wait gate sees it too"
+        write({})
+        assert held([tk("HTPR-9")]) == set(), "deploy ended: the merger dropped the row, the ticket goes to its runner for the live check"
+        write(row, at=SF_WAIT_FRESH_S + 60)
+        assert held([tk("HTPR-9")]) == set() and lines == [f"deploy-wait: {wait.name} is 16 minutes old, nothing held"], lines
+        write({"HTPR-9": dict(row["HTPR-9"], since=ago(7 * 60))})
+        assert held([tk("HTPR-9")]) == set(), "a wait older than the cap is released"
+        write(row)
+        assert held([tk("HTPR-9", labels=("incident",))]) == set(), "an incident is never held"
+        assert held([tk("HTPR-8")]) == set(), "another ticket is not this wait"
+        wait.write_text("{not json")
+        assert held([tk("HTPR-9")]) == set() and lines and lines[0].startswith("deploy-wait: error"), lines
+        wait.unlink()
+        assert held([tk("HTPR-9")]) == set() and not lines, "no file: nothing held, no noise"
+        print("deploy-wait self-test ok: merged ticket held while its deploy runs, released when the merger drops it; stale, capped, incident, error cases not held")
+    finally:
+        SNAP, ONE_RUN_FLAG, SF_RELEASE_WAIT, DEPLOY_WAIT, log = saved
+        _ONE_RUN.clear()
+
+
 def self_test():
     """The park hand-back: due once per rest window, never for a foreign claim or a ticket outside a building column, and the
     job's brief and model. Needs no board, no network."""
@@ -3904,6 +3965,8 @@ def self_test():
     WATCH = STATE
     global ONE_RUN_FLAG
     ONE_RUN_FLAG = STATE / "no-one-run.on"  # a live flag file on this server must not change test outcomes
+    global DEPLOY_WAIT
+    DEPLOY_WAIT = STATE / "no-deploy-wait.json"  # likewise the live deploy-wait file
     global SECOND_OFF
     SECOND_OFF = STATE / "no-second-ticket.off"  # likewise the live kill switch of the second-ticket lane
     MEMBERS.update({b: None for b in BOARDS})  # membership unknown: the offline test offers every board
@@ -4042,6 +4105,7 @@ def self_test():
     wait_gate_self_test()
     one_run_self_test()
     sf_release_self_test()
+    deploy_wait_self_test()
     not_now_self_test()
     ticket_ready_self_test()
     slice_self_test()
