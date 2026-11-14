@@ -1158,13 +1158,18 @@ ESCALATE_WINDOW = 24 * 3600
 PARK_LIMIT = 3
 
 
-def decide_suppress(n_recent, lead_after_third, blocker_keys, open_keys):
+def decide_suppress(n_recent, lead_after_third, blocker_keys, open_keys, red_pr_after_park=False):
     """True when a ticket parked PARK_LIMIT times in the window stays off the offer list.
     A lead comment after the third park releases it. So does every BlockedBy link closing.
-    No BlockedBy link at all: only the lead comment releases it."""
+    No BlockedBy link at all: only the lead comment releases it.
+    A red, conflicting or change-requested PR touched after the latest park is new work for the owner: the PR fix run is a valid
+    phase (HYCI-396, 14 Nov, HTPR-9106: R7 sat idle 6 h on a red PR). It lifts the cap only up to PARK_LIMIT + 2 parks, so a fix
+    that keeps parking still stops; an open BlockedBy link still holds the ticket in held_reason."""
     if n_recent < PARK_LIMIT:
         return False
     if lead_after_third:
+        return False
+    if red_pr_after_park and n_recent < PARK_LIMIT + 2:
         return False
     if blocker_keys and not open_keys:
         return False
@@ -1828,6 +1833,19 @@ def lead_comment_at(t):
     return best
 
 
+def red_pr_after(key, when):
+    """True when the ticket has an open PR that needs a model (red, conflicting, change request) and was touched after `when`."""
+    try:
+        for p in open_prs():
+            if pr_ticket(p) == key and one_run_state(p)[0] in ("red", "conflicting", "change request"):
+                at = stamp_time(p.get("updated", ""))
+                if at and at > when:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def repark_suppressed(t):
     """Same ticket parked 3 times in 6 h is not offered until its BlockedBy closes or its lead comments."""
     if INCIDENT_LABEL in (t.get("labels") or []):
@@ -1840,7 +1858,8 @@ def repark_suppressed(t):
     lead_at = lead_comment_at(t)
     blockers = relations(t["key"])[0]
     open_keys = [b for b in blockers if is_open(b)]
-    return decide_suppress(len(recent), bool(lead_at and lead_at > third), blockers, open_keys)
+    return decide_suppress(len(recent), bool(lead_at and lead_at > third), blockers, open_keys,
+                           red_pr_after(t["key"], max(recent)))
 
 
 def open_blocked_by(t):
@@ -3594,6 +3613,9 @@ def self_test():
     assert decide_suppress(3, True, [], []) is False
     assert decide_suppress(3, False, ["HYCI-1"], []) is False, "BlockedBy closed: offered again"
     assert decide_suppress(3, False, ["HYCI-1"], ["HYCI-1"]) is True
+    assert decide_suppress(3, False, [], [], red_pr_after_park=True) is False, "red PR touched after the last park: the fix run is offered"
+    assert decide_suppress(5, False, [], [], red_pr_after_park=True) is True, "five parks: even a red PR stops"
+    assert decide_suppress(3, False, ["HYCI-1"], ["HYCI-1"], red_pr_after_park=True) is False  # held_reason still reads the open BlockedBy
     trace_self_test()
     park_count_self_test()
     escalate_self_test()
