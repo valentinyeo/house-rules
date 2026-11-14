@@ -1,3 +1,4 @@
+import datetime as dt
 import fcntl
 import json
 import os
@@ -32,7 +33,9 @@ class Owners:
             record = self.read(key)
             if record and record["runner"] != int(runner):
                 raise RuntimeError(f"{key} belongs to Runner {record['runner']} until Done")
-            record = record or {"ticket": key, "runner": int(runner)}
+            # "since" orders a runner's tickets when it owns two (HYCI-431 second-ticket lane): the first-bound one wins every pick
+            record = record or {"ticket": key, "runner": int(runner),
+                                "since": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
             if selection and not record.get("model"):
                 record.update({k: selection[k] for k in ("engine", "model", "effort")})
             path = self.directory / key
