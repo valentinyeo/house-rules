@@ -953,7 +953,9 @@ TM
           *) wip=$("$pick_bin" --wip 2>/dev/null | tr '\n' ' ' | cut -c1-500 || true) ;;
         esac
         python3 "$HERE/runner-state.py" --pick-fail --runner "$n" --note "$note" --wip "$wip" --ledger "$STATE/run-ledger.jsonl" >>"$rlog" 2>&1 || true
-        sleep 900; continue
+        # HYCI-352 (14 Nov): 900 s left R8 and R10 asleep after the wait gate released a red PR for them. A pick costs about 3 CPU
+        # seconds, and the watches that end a hold tick every 5 minutes, so the runner looks as often.
+        sleep 300; continue
       fi
       IFS=$'\t' read -r pick_ticket pick_engine pick_model pick_effort pick_source pick_repo < <(jq -r '[.ticket,(.engine // "cursor"),.model,.effort,.source,.repo] | @tsv' <<< "$pick")
       if ! ticket_key_ok "$pick_ticket"; then

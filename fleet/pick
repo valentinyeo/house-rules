@@ -1688,11 +1688,11 @@ def gate_verdict(t, when, row, base, parts, now):
     if not seen[0] and not seen[1]:
         # HYCI-431 (14 Nov): fleet/sf-release-watch listed the PR red after the run ended on "checks pending": SOFT-2279 and SOFT-1969
         # sat out their 30 blind minutes with a red PR and nobody to fix it. The watch is the script that sees the PR, so a red read
-        # newer than the end ends the hold, at most once per ticket per blind window (a run that ends waiting on the same red PR is
-        # held again instead of looping).
+        # newer than the end ends the hold, once per run end (the release stays for that end). HYCI-352 (14 Nov): a 30 minute throttle
+        # that carried across run ends kept R3, R4, R8 and R10 on red PRs with no Fix run: a Fix run pushes, and the PR turns red again
+        # minutes after that run's end.
         red = sf_attention(t, now)
-        if red and red[0] > when.timestamp() and now.timestamp() - base.get("sf_rel", 0) > WAIT_GATE_BLIND:
-            base["sf_rel"] = now.timestamp()
+        if red and red[0] > when.timestamp():
             return False, f"sf red: {red[1]}"[:60]
         m = RECHECK_HM.search(text)
         until = WAIT_GATE_BLIND
@@ -1777,8 +1777,7 @@ def wait_gate(dry, now=None):
             parts = gate_parts(key)
             if not base or base.get("end") != end:
                 late = (now - when).total_seconds() > WAIT_GATE_LATE
-                base = {"end": end, "at": int(now.timestamp()), "late": late, "parts": parts,
-                        "sf_rel": (base or {}).get("sf_rel", 0)}
+                base = {"end": end, "at": int(now.timestamp()), "late": late, "parts": parts}
                 state[key] = base
                 dirty = True
                 if late:
@@ -4082,6 +4081,16 @@ def sf_release_self_test():
         # The ticket key on the board is SOFT-2273; the PR title and the release note say IGSH-2273. Both are board 2060.
         assert ticket_id("SOFT-2273") == ticket_id("IGSH-2273") == ("2060", "2273") and ticket_id("HTPR-1") == "HTPR-1"
         assert ticket_id("SOFT-227") != ticket_id("IGSH-2273"), "compare by whole number"
+        # HYCI-352: a red PR the watch lists after a run's end releases the hold at every run end, 25 minutes apart too
+        write(row("attention", since=1, detail="PR #961 is red"))
+        SNAP = {"tickets": [tk("SOFT-2273")], "rel": {}, "prs": [], "incidents": [], "open": {}}
+        for end_min in (30, 5):
+            when = now - dt.timedelta(minutes=end_min)
+            base = {"end": when.strftime(fmt), "at": 0, "late": False, "parts": {"pr": [], "blk": []},
+                    "sf_rel": (now - dt.timedelta(minutes=25)).timestamp()}  # the old throttle's mark: it must no longer hold
+            verdict = gate_verdict(tk("SOFT-2273"), when, {"state": "WAIT_CHECK", "reason": "RUNNER IDLE checks pending on PR 961"},
+                                   base, {"pr": [], "blk": []}, now)
+            assert verdict == (False, "sf red: PR #961 is red"), f"run end {end_min} minutes ago: red must release, got {verdict}"
         # Replay 1: 19:17 park job, PR open, one check running. 2: 20:08 orphan, merged, release not out. 3: 21:02 own, same.
         for moment, state, detail in (("19:17 park", "pr", "PR #961 open, checks pending"),
                                       ("20:08 orphan", "release", "PR #961 merged, release not out yet"),
