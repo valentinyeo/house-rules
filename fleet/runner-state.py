@@ -96,7 +96,9 @@ PC_WAIT = re.compile(r"\b(?:desktops?|laptops?|PC|phone|computer|Windows)\b[^.;]
 # That ending was counted as an invalid leave ("waited on checks") although the one-run hold (fleet/pick) and bin/pr-merger own that wait.
 # While the one-run hold is live (one-run.on), a wait line that names a PR is tagged "script owns:", which valid-leaves.json skips.
 ONE_RUN_FLAG = Path(os.environ.get("FLEET_ONE_RUN_FLAG", Path.home() / ".local/state/fleet/one-run.on"))
-PR_WAIT = re.compile(r"\bPR\s*#?\d+\b", re.I)
+# 14 Nov (HYCI-451): the end line is glued to the chat-listener text with no space ("checks pending on PR 3497The runner chat listener finished"), so the
+# trailing \b never matched and four PR waits (HTPR-9274 runs 3 and 4, SOFT-2273 run 1, SOFT-2276 run 6) counted as violations. A GitHub PR link names the PR too.
+PR_WAIT = re.compile(r"\bPR\s*#?\d+|/pull/\d+", re.I)
 
 
 # 14 Nov (HYCI-388, SOFT-1974 run 3): the run opened follow-up PR 979 and ended "RUNNER IDLE checks pending" without the PR number.
@@ -537,6 +539,11 @@ def self_test():
         on = classify(wline, 0, 1200, "", 0, "HTPR-9106")
         assert on["state"] == "WAIT_CHECK" and on["detail"].startswith("script owns: "), on
         assert leave_verdict(on["state"], on["detail"], json.loads(VALID_LEAVES.read_text()))[0] == "skip", "a script-owned wait is no leave"
+        for glued in ("RUNNER IDLE checks pending on PR 3497The runner chat listener finished with no messages.",
+                      "RUNNER IDLE pr-checks-pending https://github.com/valentinyeo/multiprompt/pull/967",
+                      "RUNNER IDLE checks pending on https://github.com/valentinyeo/crolab-rs/pull/1 until 2026-11-13 19:20 UTCChat listener finished."):
+            g = classify(glued, 0, 400, "", 0, "HTPR-9274")
+            assert g["state"] == "WAIT_CHECK" and g["detail"].startswith("script owns: "), (glued, g)
         nopr = classify("RUNNER IDLE checks pending", 0, 400, "", 0, "HYCI-1")
         assert not nopr["detail"].startswith("script owns"), "no PR named: still the runner's wait"
     pm = classify("RUNNER IDLE HYCI-390 post-merge proof run on main recheck 03:01 UTC", 0, 420, "", 0, "HYCI-390")
