@@ -225,7 +225,7 @@ ENGINES = {
     "opencode": dict(plan="opencode", brains={"light": ("deepseek-v4.1-flash", "low"), "medium": ("deepseek-v4.1-flash", "high")},
                      park=("deepseek-v4.1-flash", "low"), incident=None),
     "claude": dict(plan="claude", brains={"light": ("sonnet", "medium"), "medium": ("sonnet", "medium"),
-                                          "hard": ("claude-opus-5-5", "medium"), "extra-hard": ("claude-opus-5-5", "high")},
+                                          "hard": ("sonnet", "high")},  # HYCI-396: Sonnet high for hard; extra-hard skips Claude (Opus only on Valentin's order)
                    park=("sonnet", "medium"), incident=None),
 }
 ENGINE = "cursor"
@@ -3518,9 +3518,8 @@ def self_test():
     globals()["INCIDENT_ENGINE"] = live_engine
     globals()["SNAP"] = SNAP_BACKUP
     set_engine("claude")
-    assert "brain-hard" not in SKIP_ALL and "brain-extra-hard" not in SKIP_ALL
-    assert brain(hard)[1:] == ("claude-opus-5-5", "medium") and brain(t)[1:] == ("sonnet", "medium")
-    assert brain({**t, "labels": ["brain-extra-hard"]})[1:] == ("claude-opus-5-5", "high"), "extra-hard runs on Opus high"
+    assert "brain-hard" not in SKIP_ALL and "brain-extra-hard" in SKIP_ALL, "Claude takes hard on Sonnet, skips extra-hard"
+    assert brain(hard)[1:] == ("sonnet", "high") and brain(t)[1:] == ("sonnet", "medium"), "built-in Claude map never falls back to Opus"
     globals()["SNAP"] = {"incidents": [inc_t]}
     assert incident_step(5, True)[1] == "incident", "a Claude slot takes an incident"
     globals()["SNAP"] = SNAP_BACKUP
@@ -3759,7 +3758,7 @@ def wip_self_test():
     saved_cap = LANE_CAP
     try:
         extra = tk("HTPR-41", "QA", labels=["brain-extra-hard"])
-        (STATE / "engine-1").write_text("claude\n")
+        (STATE / "engine-1").write_text("codex\n")  # only Codex takes extra-hard now (Claude skips it)
         SNAP["tickets"] = list(tickets) + [extra]
         SNAP["rel"]["HTPR-41"] = [[], []]
         units, workers, excluded = pipeline()
