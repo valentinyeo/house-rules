@@ -245,6 +245,14 @@ except (OSError, ValueError, AttributeError):
 INCIDENT_MODEL = {"cursor": ("grok-4.7-high", "high"), "codex": ("gpt-6.1-sol", "high")}
 RUN_START = re.compile(r"^\S+ (?:cursor|hax|claude): (.*)$")
 TICKET = re.compile(r"\b(HTPR|HYFA|IGSH|SOFT|HYCI)-([0-9]+)\b")
+# Rat Stack slices (HYCI-401): a slice names its parent, and the parent's plan lists the slices in order. A filing may also
+# say "Slice N of M" itself. A slice is offered only once every lower slice of its parent has shipped.
+SLICE_PARENT = re.compile(r"\bparent\s*:\s*\S*?detail/project-(\d+)/(\d+)", re.I)
+SLICE_MARK = re.compile(r"\bslice\s+(\d+)\s+of\s+(\d+)\b", re.I)
+SLICE_TTL = 6 * 3600  # a parent's plan changes in days, not minutes
+SLICE_LOOKUPS = 8  # lower slices read per pick, against plans and Valentin Review columns the snapshot does not hold
+PARENT_READS = [0]
+SLICE_READS = [0]
 RETIRED = re.compile(r"^(?:ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 PR_REPO = "hypertask-ai/hypertask"
 
@@ -381,6 +389,116 @@ def not_ready_reasons(raw):
         return []
 
 
+def slice_of(t):
+    """Which Rat Stack slice this ticket is: [project, parent index, own index, explicit slice number or None], else None.
+    Text only. A slice ticket names its parent ("Parent: https://app.hypertask.ai/detail/project-15/9127"); the plan on the
+    parent lists the slices in order, and a filing may also say "Slice N of M" (HYCI-401)."""
+    text = (t.get("title") or "") + " " + (t.get("description") or "")
+    fam = SLICE_PARENT.search(text)
+    if not fam:
+        return None
+    num = SLICE_MARK.search(text)
+    return [fam[1], fam[2], str(t.get("uniqueIndex") or ""), int(num[1]) if num else None]
+
+
+def slice_plan(proj, parent):
+    """The parent's slice indexes in plan order, read from the parent's own description (it lists the steps in order), kept
+    SLICE_TTL so a pick reads a parent at most once in six hours. [] when the parent cannot be read or lists no slice."""
+    path = STATE / "slices.json"
+    try:
+        cache = json.loads(path.read_text())
+    except (OSError, ValueError, AttributeError):
+        cache = {}
+    hit = cache.get(f"{proj}/{parent}")
+    if isinstance(hit, dict) and time.time() - hit.get("at", 0) < SLICE_TTL and isinstance(hit.get("order"), list):
+        return hit["order"]
+    PARENT_READS[0] += 1
+    d = ht("task", "get", str(parent), "--project", str(proj))
+    try:
+        desc = d["tasks"][0].get("description") or ""
+    except (TypeError, KeyError, IndexError):
+        desc = ""
+    order = []
+    for p, i in re.findall(r"detail/project-(\d+)/(\d+)", desc):
+        if str(p) == str(proj) and i not in order:
+            order.append(i)
+    if not DRY_RUN:
+        cache[f"{proj}/{parent}"] = {"at": time.time(), "order": order}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(f".{os.getpid()}")
+            tmp.write_text(json.dumps(cache))
+            os.replace(tmp, path)
+        except OSError:
+            pass
+    return order
+
+
+def slice_number(t, order):
+    """1-based position of this slice in its family: the explicit "Slice N of M" when written, else its place in the plan."""
+    fam = t.get("slice") or []
+    if len(fam) > 3 and fam[3]:
+        return fam[3]
+    if order and len(fam) > 2 and str(fam[2]) in order:
+        return order.index(str(fam[2])) + 1
+    return None
+
+
+def slice_open(proj, idx):
+    """Is this slice still open? Read at most SLICE_LOOKUPS times a pick, and unreadable counts as open: a later slice
+    waits, where before it burned a whole run to find the gap (HYCI-401)."""
+    known = SNAP.setdefault("open", {})
+    k = f"{proj}/{idx}"
+    if k in known:
+        return known[k]
+    if any(str(u.get("idx")) == str(idx) and u["board"] == str(proj) for u in SNAP["tickets"]):
+        return True
+    if CHECKED[0] >= RELATION_CAP[0] or SLICE_READS[0] >= SLICE_LOOKUPS:
+        return True
+    CHECKED[0] += 1
+    SLICE_READS[0] += 1
+    d = ht("task", "get", str(idx), "--project", str(proj))
+    try:
+        raw = d["tasks"][0]
+        known[k] = raw.get("status") != "Archive" and not raw.get("sectionIsDone") \
+            and not re.match(r"(done|flag:|no flag|not now)", raw.get("section") or "", re.I)
+    except (TypeError, KeyError, IndexError):
+        known[k] = True
+    save_cache(SNAP)
+    return known[k]
+
+
+def slice_block(t):
+    """The earlier slice of this ticket's parent that is still open, as a hold reason, or None. Slices were filed without
+    BlockedBy links, so a runner was offered slice 7 before slice 1 had shipped and parked on the gap: about 175 open
+    slices, one empty run each (HYCI-401)."""
+    fam = t.get("slice")
+    if not fam:
+        return None
+    proj, parent = fam[0], fam[1]
+    family = [u for u in SNAP["tickets"] if (u.get("slice") or [None, None])[:2] == [proj, parent]]
+    if len(family) < 2:
+        return None  # nobody else of this family sits in a pick column, so nothing of it is waiting
+    order = slice_plan(proj, parent)
+    mine = slice_number(t, order)
+    earlier = None
+    if mine is None:
+        earlier = next((u for u in family if u["key"] != t["key"]), None)
+    else:
+        lower = [(slice_number(u, order), u) for u in family if u["key"] != t["key"]]
+        lower = [(n, u) for n, u in lower if n is not None and n < mine]
+        earlier = min(lower, key=lambda p: p[0])[1] if lower else None
+        if earlier is None and str(fam[2]) in order:
+            for idx in order[:order.index(str(fam[2]))]:
+                if slice_open(proj, idx):
+                    return f"slice: needs slice {order.index(idx) + 1} ({proj}/{idx}) first"
+    if earlier is None:
+        return None
+    if not slice_open(proj, earlier["idx"]):
+        return None
+    return f"slice: needs {earlier['key']} first"
+
+
 def slim(t, board):
     holders = []
     for a in t.get("assignees") or []:
@@ -396,6 +514,7 @@ def slim(t, board):
             "holders": holders, "waiting": bool(t.get("waitingOnUserId") or t.get("waitingOnAgentId")
                                                 or t.get("blockerCommentId")),
             "subs": bool(t.get("sub_tasks")), "paid": "paid" in (t.get("description") or "").lower(),
+            "slice": slice_of(t),
             "needs": build_need((t.get("title") or "") + " " + (t.get("description") or "")),
             "ready": not_ready_reasons(t),
             "created": t.get("createdAt") or "", "updated": t.get("updatedAt") or ""}
@@ -1984,6 +2103,9 @@ def held_reason(t, own=False):
         return "in Valentin Review"
     if not own and t["waiting"]:
         return "waits on Valentin"
+    why = slice_block(t)
+    if why:
+        return why
     if t["key"] not in SNAP["rel"]:
         if CHECKED[0] >= RELATION_CAP[0]:
             return SPENT_REASON
@@ -2056,6 +2178,8 @@ def slot_candidates(n, me, skip):
         if t["waiting"] or "design-pass" in t["labels"] or skipped(t) or t["key"] in skip or repark_suppressed(t):
             continue
         if open_blocked_by(t):
+            continue
+        if slice_block(t):
             continue
         new_col = t["section"] in BOARDS[t["board"]][0]
         building_col = t["section"] in BOARDS[t["board"]][1]
@@ -3719,7 +3843,86 @@ def self_test():
     sf_release_self_test()
     not_now_self_test()
     ticket_ready_self_test()
-    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, 38 wait-gate checks, not-now skip, not-ready skip")
+    slice_self_test()
+    print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, 38 wait-gate checks, not-now skip, "
+          "not-ready skip, slice holds")
+
+
+def slice_self_test():
+    """HYCI-401: a Rat Stack slice is offered only after every lower slice of its parent shipped. Order is the "Slice N of M"
+    a filing wrote, else the parent's own plan. A family with nobody else open costs no board read."""
+    global SNAP, STATE, ht
+    import tempfile
+    saved_snap, saved_state, saved_ht = SNAP, STATE, ht
+    saved_cap, saved_checked = list(RELATION_CAP), list(CHECKED)
+    STATE = Path(tempfile.mkdtemp())
+    CHECKED[0] = 0
+    RELATION_CAP[0] = BLOCK_LOOKUPS * 2
+    plan = ("Plan. Slices, in order: "
+            "SOFT-2197 builds: https://app.hypertask.ai/detail/project-2060/2197 "
+            "SOFT-2203 rules: https://app.hypertask.ai/detail/project-2060/2203 "
+            "SOFT-2208 cloud: https://app.hypertask.ai/detail/project-2060/2208 "
+            "SOFT-2214 home: https://app.hypertask.ai/detail/project-2060/2214")
+    parent = "https://app.hypertask.ai/detail/project-2060/2019"
+    wanted = {}
+    calls = []
+
+    def fake_ht(*args):
+        calls.append(args)
+        if args[:2] == ("task", "get"):
+            idx = str(args[2])
+            if idx == "2019":
+                return {"tasks": [{"ticketNumber": "SOFT-2019", "description": plan, "section": "Not now"}]}
+            return {"tasks": [{"ticketNumber": f"SOFT-{idx}", "section": wanted.get(idx, "Done"), "status": "Normal"}]}
+        return None
+
+    def sl(idx, section="Backlog"):
+        return {"key": f"SOFT-{idx}", "idx": idx, "board": "2060", "section": section, "title": f"Chromescribe: step {idx}",
+                "labels": ["brain-medium"], "prio": "Medium", "holders": [], "waiting": False, "subs": False,
+                "paid": False, "created": "2026-11-13T17:00:00Z", "updated": "2026-11-13T17:00:00Z",
+                "slice": slice_of({"uniqueIndex": idx, "title": f"Chromescribe: step {idx}",
+                                    "description": f"<p>Build this slice. Parent: {parent}</p>"})}
+
+    globals()["ht"] = fake_ht
+    try:
+        assert slice_of({"uniqueIndex": 5, "title": "x", "description": "no parent here"}) is None, \
+            "a ticket that is not a Rat Stack slice is never held by this rule"
+        assert slice_of({"uniqueIndex": 2208, "title": "Slice 3 of 23", "description": f"<p>Parent: {parent}</p>"})[2:] == ["2208", 3], \
+            "an explicit Slice N of M is read"
+        # G1: a later slice waits on the lowest slice of its family that is open
+        SNAP = {"tickets": [sl(2197), sl(2203), sl(2208)], "rel": {}}
+        PARENT_READS[0] = 0
+        calls.clear()
+        assert slice_block(sl(2208)) == "slice: needs SOFT-2197 first", slice_block(sl(2208))
+        assert slice_block(sl(2203)) == "slice: needs SOFT-2197 first"
+        assert slice_block(sl(2197)) is None, "the first slice of a family waits on nothing"
+        assert PARENT_READS[0] == 1, f"one parent read a pick, kept in the state file: {PARENT_READS[0]}"
+        assert len([c for c in calls if c[:2] == ("task", "get")]) == 1, calls
+        assert held_reason(sl(2208)) == "slice: needs SOFT-2197 first", "the picker's hold names the earlier slice"
+        # G2: every lower slice done, only a later one open: offered, and the done ones are read once from Valentin Review too
+        wanted.update({"2197": "Done", "2203": "Done"})
+        SNAP = {"tickets": [sl(2208), sl(2214)], "rel": {}}
+        assert slice_block(sl(2208)) is None, "all lower slices shipped: slice 3 goes out"
+        assert slice_block(sl(2214)) == "slice: needs SOFT-2208 first"
+        wanted.clear()
+        # a lower slice parked outside the pick columns (Valentin Review) still holds the later one
+        wanted.update({"2197": "Valentin Review"})
+        SNAP = {"tickets": [sl(2203), sl(2208)], "rel": {}}
+        assert slice_block(sl(2203)) == "slice: needs slice 1 (2060/2197) first", slice_block(sl(2203))
+        wanted.clear()
+        # G3: an explicit Slice N of M beats the plan position
+        marked = sl(2197)
+        marked["slice"] = [*marked["slice"][:3], 4]
+        SNAP = {"tickets": [marked, sl(2203)], "rel": {}}
+        assert slice_block(marked) == "slice: needs SOFT-2203 first", slice_block(marked)
+        # G4: one slice of a family, nobody else open: no board read at all
+        SNAP = {"tickets": [sl(2208)], "rel": {}}
+        PARENT_READS[0] = 0
+        calls.clear()
+        assert slice_block(sl(2208)) is None and PARENT_READS[0] == 0 and not calls, calls
+    finally:
+        SNAP, STATE, ht = saved_snap, saved_state, saved_ht
+        RELATION_CAP[0], CHECKED[0] = saved_cap[0], saved_checked[0]
 
 
 def escalate_self_test():
