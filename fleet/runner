@@ -287,6 +287,7 @@ launch() {
     printf 'cd %q &&' "$repo"
     case $eng in codex|opencode) printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1' ;; claude) printf ' (ANTHROPIC_* unset: subscription login)' ;; esac
     [ "$eng" = opencode ] && printf ' OPENCODE_API_KEY=<from stack-key, %s>' "$([ -n "${OC_KEY:-}" ] && echo loaded || echo 'not loaded')"
+    case $eng in pi-codex|pi-opencode) printf ' PATH=%q:$PATH' "$HERE/no-wait-bin" ;; esac
     printf ' timeout 3h'; printf ' %q' "${base[@]}"
     if [ "$eng" = cursor ]; then printf ' <brief, %d chars>\n' "${#brief}"; else printf ' < <brief, %d chars on stdin>\n' "${#brief}"; fi
     return 0
@@ -311,6 +312,8 @@ launch() {
                      pi-opencode) export TE_PYTHON=python3 TE_PAID_MODEL=opencode-go/deepseek-v4.1-flash ;; esac
         # te-off-N: the A/B control runner. TokenEconomizer logs cost but acts on nothing (Valentin 8 Nov: "how good it is").
         [ -f "$STATE/te-off-${n:-0}" ] && export TE_SHADOW=1
+        # No waiting inside a run (HYCI-414): Pi attempts get a `sleep` that refuses 60s or more, so the run ends on its own check read.
+        case $eng in pi-codex|pi-opencode) export PATH="$HERE/no-wait-bin:$PATH" NO_WAIT_LOG="$STATE/no-wait.log" NO_WAIT_RUNNER="${n:-0}" ;; esac
         printf '%s' "$brief" | timeout 3h "${base[@]}"
       ) & apid=$!
     fi
@@ -424,6 +427,23 @@ case "${1:-}" in
     grep -q '"state": "IDLE_NO_TICKET"' <<< "$row" || { echo "ticket self-test FAILED: an empty pick is not IDLE_NO_TICKET: $row" >&2; bad=1; }
     grep -q '"ticket": ""' <<< "$row" || { echo "ticket self-test FAILED: the idle row names a ticket: $row" >&2; bad=1; }
     [ "$bad" = 0 ] && echo 'fleet/runner ticket self-test ok'
+    exit "$bad" ;;
+  no-wait-selftest)
+    # The no-wait sleep, proved without a model call: a short sleep runs, a long one is refused with the run-ending line and logged.
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT; bad=0
+    expect() { [ "$2" = "$3" ] || { echo "no-wait self-test FAILED: $1: got '$2', want '$3'" >&2; bad=1; }; }
+    export NO_WAIT_LOG=$tmp/no-wait.log NO_WAIT_RUNNER=9
+    PATH="$HERE/no-wait-bin:$PATH" bash -c 'sleep 0.1'; expect 'a short sleep runs' "$?" 0
+    PATH="$HERE/no-wait-bin:$PATH" bash -c 'sleep 59'  & wp=$!; sleep 0.3; kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null
+    [ -s "$NO_WAIT_LOG" ] && { echo 'no-wait self-test FAILED: sleep 59 was refused' >&2; bad=1; }
+    for a in 60 480 5m 1h '1m 30' infinity; do
+      out=$(PATH="$HERE/no-wait-bin:$PATH" bash -c "sleep $a" 2>&1); expect "sleep $a is refused" "$?" 1
+      grep -q 'RUNNER IDLE checks pending' <<< "$out" || { echo "no-wait self-test FAILED: sleep $a gave no run-ending line" >&2; bad=1; }
+    done
+    [ "$(wc -l < "$NO_WAIT_LOG")" = 6 ] || { echo "no-wait self-test FAILED: refusals not logged: $(cat "$NO_WAIT_LOG")" >&2; bad=1; }
+    grep -q 'runner=9 sleep=480s' "$NO_WAIT_LOG" || { echo 'no-wait self-test FAILED: log line wrong' >&2; bad=1; }
+    LAUNCH_DRY=1 launch pi-opencode deepseek-v4.1-flash high /tmp x 2>&1 | grep -q "no-wait-bin" || { echo 'no-wait self-test FAILED: the dry launch does not put no-wait-bin on PATH' >&2; bad=1; }
+    [ "$bad" = 0 ] && echo 'fleet/runner no-wait self-test ok'
     exit "$bad" ;;
   reply-cap-selftest)
     # The reply cap, proved without a model call: a chatty attempt is kept, a silent one is killed with its tool calls.
@@ -738,7 +758,7 @@ TM
       printf '%s\n' "$out" | tail -5
       grep -q RUNNER_LAUNCH_OK <<< "$out" && echo "launch-check ok: $eng $model $effort" || { echo "launch-check FAILED: exit $rc"; exit 1; }
     fi ;;
-  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | ticket-selftest | reply-cap-selftest | loop-selftest | fail-tail-selftest | transcript-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
+  ''|-h|--help) echo 'fleet/runner <1-N> | top-up | tick | status | stop-all | check | harness-selftest | provider-busy-selftest | ticket-selftest | reply-cap-selftest | no-wait-selftest | loop-selftest | fail-tail-selftest | transcript-selftest | launch-check <engine> <model> <effort> [--noop]' ;;
   *)
     n=$1
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -ge $FIRST ] && [ "$n" -le "$LAST" ] || { echo "runner number must be $FIRST..$LAST"; exit 2; }
