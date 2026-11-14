@@ -273,6 +273,15 @@ opencode_key() {
   [ -n "$OC_KEY" ]
 }
 
+# Claude pool runners sign in with the 1 year setup-token, not Valentin's interactive login (HYCI-396, 14 Nov: the login expires
+# 16 Nov 08:56 UTC and every run printed its sign-in warning). One stack-key read per runner process, kept in this shell only,
+# handed to the Claude subshell below and never printed. No key: the run falls back to the shared login, and says so on stderr.
+claude_token() {
+  [ -n "${CC_TOKEN:-}" ] || CC_TOKEN=$("$HOME/.local/bin/stack-key" 'Claude runner OAuth token (1y)' CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null)
+  case ${CC_TOKEN:-} in sk-ant-oat*) return 0 ;; esac
+  CC_TOKEN=""; return 1
+}
+
 # Runs one agent turn. LAUNCH_DRY=1 prints the command instead, key and brief left out. The OpenCode key goes only into
 # the hax process environment, never into argv or a cursor run.
 launch() {
@@ -300,7 +309,7 @@ launch() {
   esac
   if [ "${LAUNCH_DRY:-}" = 1 ]; then
     printf 'cd %q &&' "$repo"
-    case $eng in codex|opencode) printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1' ;; claude) printf ' (ANTHROPIC_* unset: subscription login, RUNNER_EVENTS_WAIT_MAX=%s)' "${RUNNER_EVENTS_WAIT_MAX:-1}" ;; esac
+    case $eng in codex|opencode) printf ' HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1' ;; claude) printf ' (ANTHROPIC_* unset, RUNNER_EVENTS_WAIT_MAX=%s, CLAUDE_CODE_OAUTH_TOKEN=<from stack-key, %s>)' "${RUNNER_EVENTS_WAIT_MAX:-1}" "$([ -n "${CC_TOKEN:-}" ] && echo loaded || echo 'not loaded')" ;; esac
     [ "$eng" = opencode ] && printf ' OPENCODE_API_KEY=<from stack-key, %s>' "$([ -n "${OC_KEY:-}" ] && echo loaded || echo 'not loaded')"
     case $eng in pi-codex|pi-opencode) printf ' PATH=%q:$PATH' "$HERE/no-wait-bin" ;; esac
     printf ' timeout 3h'; printf ' %q' "${base[@]}"
@@ -308,6 +317,7 @@ launch() {
     return 0
   fi
   [ "$eng" = opencode ] && [ -z "${OC_KEY:-}" ] && { echo "no OpenCode Go key loaded" >&2; return 1; }
+  [ "$eng" = claude ] && { claude_token || echo "no Claude runner token from stack-key: this run uses the shared login" >&2; }
   local attempt=0 rc=0 apid
   while :; do
     attempt=$((attempt+1))
@@ -323,6 +333,9 @@ launch() {
         # claude -p does not reply while it runs: HTPR runs sat silent for the whole 3h (HTPR-7861, HTPR-9205, HTPR-9130, HYCI-294).
         # This knob makes that waiter leave after a second. Board events still arrive through the stop, prompt and post modes.
         export RUNNER_EVENTS_WAIT_MAX=${RUNNER_EVENTS_WAIT_MAX:-1}
+        # The runner token replaces the interactive login for Claude pool runs only. Chat and lead sessions never pass here.
+        unset CLAUDE_CODE_OAUTH_TOKEN
+        [ "$eng" = claude ] && [ -n "${CC_TOKEN:-}" ] && export CLAUDE_CODE_OAUTH_TOKEN="$CC_TOKEN"
         export HAX_SUBAGENT_DEPTH=2 HAX_NO_SUBAGENTS=1
         unset OPENCODE_API_KEY
         [ "$eng" = opencode ] && export OPENCODE_API_KEY="$OC_KEY"
@@ -523,6 +536,14 @@ case "${1:-}" in
     expect 'a startup hang is a fault' "$(python3 "$HERE/runner-state.py" --classify --final 'RUNNER IDLE startup hang: the agent wrote nothing, no model reply for 600s twice, run ended' --rc 124 --elapsed 1200 --ticket HYCI-1 | grep -c '"state": "FAULT"')" 1
     # The Claude launch carries the knob that keeps the hypertask SessionStart waiter from holding claude -p silent; the hook honours it.
     LAUNCH_DRY=1 launch claude sonnet high /tmp x 2>&1 | grep -q 'RUNNER_EVENTS_WAIT_MAX=1' || { echo 'reply-cap self-test FAILED: the Claude launch does not set RUNNER_EVENTS_WAIT_MAX' >&2; bad=1; }
+    # The Claude launch takes its sign-in from the runner token, and the dry run never shows the value.
+    CC_TOKEN=sk-ant-oat01-selftest-not-real
+    dry=$(LAUNCH_DRY=1 launch claude sonnet high /tmp x 2>&1)
+    case $dry in *'CLAUDE_CODE_OAUTH_TOKEN=<from stack-key, loaded>'*) ;; *) echo 'reply-cap self-test FAILED: the Claude launch does not load the runner token' >&2; bad=1 ;; esac
+    case $dry in *selftest-not-real*) echo 'reply-cap self-test FAILED: the dry run printed the token' >&2; bad=1 ;; esac
+    CC_TOKEN=bogus; claude_token && { echo 'reply-cap self-test FAILED: a value that is not an OAuth token was accepted' >&2; bad=1; }
+    expect 'a rejected token is cleared so the run falls back to the login' "${CC_TOKEN:-}" ""
+    unset CC_TOKEN
     hook=${RUNNER_INBOX_HOOK:-$HOME/.local/lib/hypertask/runner-pickup/runner-inbox-stop.sh}
     if [ -x "$hook" ]; then
       started=$(date +%s)
