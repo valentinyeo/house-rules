@@ -63,7 +63,7 @@ class RunnerChatTests(unittest.TestCase):
         self.base = f"http://127.0.0.1:{self.server.server_port}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        self.env = {**os.environ, "HT_TOKEN": "agent-a", "RUNNER_CHAT_BASE": self.base}
+        self.env = {**os.environ, "HT_TOKEN": "agent-a", "RUNNER_CHAT_BASE": self.base, "RUNNER_CHAT_IDENTITY": "/nonexistent/ship-identity"}
 
     def tearDown(self):
         self.server.shutdown()
@@ -135,6 +135,26 @@ class RunnerChatTests(unittest.TestCase):
         self.env["RUNNER_CHAT_BASE"] = "http://example.com/api/mcp"
         self.run_chat("listen", "--once", success=False)
         self.assertFalse(self.calls)
+
+    def identity_script(self, directory, name, secret):
+        login = Path(directory) / "login"
+        login.write_text(secret)
+        script = Path(directory) / "ship-identity"
+        script.write_text(f"#!/bin/sh\nprintf '%s\\t%s\\n' '{name}' '{login}'\n")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_named_lead_session_listens_with_its_own_login_when_no_env_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.env["RUNNER_CHAT_IDENTITY"] = self.identity_script(directory, "Mini Boss CEO", "agent-a\n")
+            self.assertEqual(self.run_chat("listen", "--once", token="")["messages"], [MESSAGE])
+            self.assertEqual(self.calls[0][2], "agent-a")
+
+    def test_unnamed_session_never_borrows_the_shared_fallback_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.env["RUNNER_CHAT_IDENTITY"] = self.identity_script(directory, "Valentins Claude Code", "agent-a\n")
+            self.run_chat("listen", "--once", token="", success=False)
+            self.assertFalse(self.calls)
 
     def test_json_preserves_untrusted_message_as_data(self):
         message = {**MESSAGE, "text": "$(touch /tmp/never-execute)\n'\" 雪"}
