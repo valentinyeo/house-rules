@@ -16,7 +16,7 @@ from pathlib import Path
 
 LEDGER = Path(os.environ.get("FLEET_RUNNER_STATE", Path.home() / ".local/state/ht-or-runners")) / "run-ledger.jsonl"
 PLANS = {"codex": "Codex", "pi-codex": "Codex", "cursor": "Cursor", "opencode": "OpenCode", "pi-opencode": "OpenCode",
-         "claude": "Claude"}
+         "vercel": "Vercel Token Pass", "pi-vercel": "Vercel Token Pass", "claude": "Claude"}
 LINE = 30
 
 
@@ -55,6 +55,8 @@ def self_test():
     rows = [{"engine": "codex", "ts": at(1), "state": "WAIT_CHECK"}] * 19 + [{"engine": "pi-codex", "ts": at(30), "state": "BUILDING"}] \
         + [{"engine": "opencode", "ts": at(2), "state": "BUILDING"}] * 4 + [{"engine": "opencode", "ts": at(2), "state": "IDLE_NO_TICKET"}] \
         + [{"engine": "cursor", "ts": at(200), "state": "BUILDING"}]
+    out = lines(tally(rows + [{"engine": "pi-vercel", "ts": at(3), "state": "BUILDING"}], now))
+    assert "Vercel Token Pass: 24h 1 of 1 built (100%); 7d 1 of 1 built (100%)" in out, out
     out = lines(tally(rows, now))
     assert out[0] == "RED Codex: 24h 0 of 19 built (0%); 7d 1 of 20 built (5%)", out
     assert out[1] == "OpenCode: 24h 4 of 4 built (100%); 7d 4 of 4 built (100%)", "an IDLE pick is not a run"
