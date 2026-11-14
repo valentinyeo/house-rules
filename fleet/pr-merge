@@ -185,16 +185,18 @@ def decide(repo, pr, now, st=None, frozen=False):
     return "wait", f"merge state {ms}: a required check or the review has not reported", None
 
 
-def ticket_gate(t):
-    """None when the ticket may have its PR merged by the script, else the reason. t: {section, status, assignees, labels} or None."""
+def ticket_gate(t, owner=None):
+    """None when the ticket may have its PR merged by the script, else the reason. t: {section, status, assignees, labels} or None.
+    owner: the picker's runner record for the ticket (fleet/ticket_owner), which counts as an assignee: a runner claims a ticket there
+    before the board shows it (HTPR-9147, 14 Nov). A person's own PR on an unowned ticket is never merged by this script."""
     if not t:
         return "ticket unreadable"
     if (t.get("status") or "Normal") != "Normal":
         return f"ticket status {t.get('status')}"
     if (t.get("section") or "").strip().lower() not in BUILDING:
         return f"ticket is in {t.get('section')}, not a building column"
-    if not t.get("assignees"):
-        return "ticket has no assignee"
+    if not t.get("assignees") and not owner:
+        return "ticket has no assignee and no runner owns it"
     return None
 
 
@@ -241,6 +243,16 @@ def save_pr_state(repo, n, st):
     tmp = p.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(st, sort_keys=True))
     tmp.replace(p)
+
+
+def runner_owner(key):
+    """The runner number the picker bound to this ticket, or None. Read only: STATE of fleet/ticket_owner."""
+    base = Path(os.environ.get("FLEET_PICK_STATE") or HOME / ".local/state/fleet-pick")
+    try:
+        r = json.loads((base / "ticket-owners" / key).read_text()).get("runner")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return r if isinstance(r, int) else None
 
 
 def ticket_of(key):
@@ -365,7 +377,7 @@ def one(repo, n, dry=False, now=None, hooks=None):
         if action in ("ignore", "wait"):
             print(f"pr-merge: PR {n} {action}: {reason}")
             return action
-        gate = ticket_gate((h.get("ticket") or ticket_of)(key))
+        gate = ticket_gate((h.get("ticket") or ticket_of)(key), (h.get("owner") or runner_owner)(key))
         if gate:
             print(f"pr-merge: PR {n} ignore: {gate}")
             return "ignore"
@@ -608,6 +620,7 @@ def self_test():
     assert d({"title": "[HTPR-9] x"})[0] == "merge" and d({"title": "IGSH-5 x", "baseRefName": "master"}, r="valentinyeo/multiprompt")[0] == "merge"
     ok_t = {"section": "AI Review", "status": "Normal", "assignees": ["RUNNER 3"], "labels": []}
     assert ticket_gate(ok_t) is None and ticket_gate(ok_t | {"section": "Done"}) and ticket_gate(ok_t | {"assignees": []}) and ticket_gate(None), "ticket gate"
+    assert ticket_gate(ok_t | {"assignees": []}, 5) is None, "a runner the picker bound counts as an owner"
 
     # one(): the merge, clash and update paths, with the outside world faked
     said, calls = [], []
@@ -616,7 +629,7 @@ def self_test():
     globals()["clear_wasted"] = lambda *a: None
     try:
         def run(extra=None, hooks=None, dry=False, st=None):
-            hk = {"env": {}, "pr": lambda: dict(base | (extra or {})), "ticket": lambda k: ok_t} | (hooks or {})
+            hk = {"env": {}, "pr": lambda: dict(base | (extra or {})), "ticket": lambda k: ok_t, "owner": lambda k: None} | (hooks or {})
             return one(repo, 7, dry, now, hk)
 
         calls.clear()
