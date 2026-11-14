@@ -82,10 +82,16 @@ def _sf_script_waits(ticket):
 CI_BLOCKED = re.compile(r"\bci-blocked\b[^.;]{0,20}\bHYCI-\d+", re.I)
 
 
+# 14 Nov (HYCI-388, HYCI-390 run 2): the run merged its fix PR and ended "RUNNER IDLE checks pending" while the proof run on main was still going.
+# No PR was open any more, so the one-run hold did not own that wait and it counted as an invalid leave. The one run after the merge that reads the
+# proof is the QA run (qa_max 1), a fine run, and fleet/pick's wait gate brings it back. fleet/briefs/ci.txt now orders the line to name the proof run.
+POST_MERGE = re.compile(r"\bpost-?merge\b|\bproof run\b|\b(?:runs?|checks?|ci) on main\b|\bmain (?:runs?|checks?)\b", re.I)
+
+
 def _wait_detail(line, ticket=""):
-    """Detail of a WAIT_CHECK ending. A wait on a named PR while the one-run hold is live, on a ticket sf-release-watch holds, or on a Fleet CI & Infra ticket (ci-unblock-waiters) is a script's wait, not a runner's leave."""
+    """Detail of a WAIT_CHECK ending. A wait on a named PR while the one-run hold is live, on a ticket sf-release-watch holds, on a Fleet CI & Infra ticket (ci-unblock-waiters), or on the proof run after a merge (the QA run) is a script's wait, not a runner's leave."""
     text = line[:160]
-    if (PR_WAIT.search(line) and ONE_RUN_FLAG.exists()) or _sf_script_waits(ticket) or CI_BLOCKED.search(line):
+    if (PR_WAIT.search(line) and ONE_RUN_FLAG.exists()) or _sf_script_waits(ticket) or CI_BLOCKED.search(line) or POST_MERGE.search(line):
         return ("script owns: " + text)[:160]
     return text
 
@@ -433,6 +439,9 @@ def self_test():
         assert leave_verdict(on["state"], on["detail"], json.loads(VALID_LEAVES.read_text()))[0] == "skip", "a script-owned wait is no leave"
         nopr = classify("RUNNER IDLE checks pending", 0, 400, "", 0, "HYCI-1")
         assert not nopr["detail"].startswith("script owns"), "no PR named: still the runner's wait"
+    pm = classify("RUNNER IDLE HYCI-390 post-merge proof run on main recheck 03:01 UTC", 0, 420, "", 0, "HYCI-390")
+    assert pm["state"] == "WAIT_CHECK" and pm["detail"].startswith("script owns: "), pm
+    assert leave_verdict(pm["state"], pm["detail"], json.loads(VALID_LEAVES.read_text()))[0] == "skip", "the post-merge proof wait is the QA run's, no leave"
     ONE_RUN_FLAG = saved_flag
     global SF_WAIT_FILE
     saved_sf = SF_WAIT_FILE
