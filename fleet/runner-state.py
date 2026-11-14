@@ -48,6 +48,10 @@ HUMAN = re.compile(r"\bvalentin\b|flag approval", re.I)
 WAIT = re.compile(r"ci-blocked|checks pending|awaiting checks|\bCI pending\b|\brecheck\b", re.I)
 OWN = re.compile(r"\bOWN_PR\b|own PR", re.I)
 PARKED_LINE = re.compile(r"(?:^|\s)PARKED\s+\S+")
+# 14 Nov (HYCI-388, HTPR-7742 run 2, runner 9): fleet/park --lead succeeded ("HTPR-7742 -> Backlog, waiting on HT Product Lead"), then the brief's
+# "end with RUNNER IDLE and the reason" made the run write "RUNNER IDLE ticket needs Valentin's account ... parked on HT Product Lead". HUMAN read
+# the name and scored FAULT "waiting on a person is not a state", though the run already did what that rule asks: the ticket went to its lead.
+LEAD_PARKED = re.compile(r"\bparked (?:on|with|to) (?:the )?(?:HT )?(?:[A-Za-z&]+ ){0,3}Lead\b", re.I)
 TOO_HARD_LINE = re.compile(r"(?:^|\s)RUNNER TOO HARD\s+\S+")
 STALL = re.compile(r"no model reply|reply cap|reply stalled", re.I)
 # HYCI-396, HTPR-8737 (5 to 7 Nov, 14 runs on runner 6): "RUNNER IDLE HTPR-8737 blocked by HYCI-140" was read as a plain wait, so the ticket came
@@ -183,6 +187,8 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False, progress=
     guard = refused_guard(line)
     if guard:
         return _out("FAULT", "FAULT", park="lead", detail=f"board write refused by the {guard}: {line[:120]}")
+    if line and LEAD_PARKED.search(line) and HUMAN.search(line):
+        return _out("PARKED", "PARKED", detail=line[:160])
     if line and HUMAN.search(line):
         why = "unknown state: flag approval is not a state" if re.search(r"flag approval", line, re.I) else "unknown state: waiting on a person is not a state"
         return _out("FAULT", "FAULT", park="lead", detail=why)
@@ -431,6 +437,9 @@ def self_test():
     human = classify("RUNNER IDLE waiting on Valentin flag approval", 0, 600, "", 0, "HTPR-1")
     assert human["state"] == "FAULT" and human["park"] == "lead", human
     assert "unknown state" in human["detail"] and "flag approval" in human["detail"], human
+    lead_done = classify("RUNNER IDLE ticket needs Valentin's account, Mini Boss and independent design QA; parked on HT Product Lead", 0, 600, "", 0, "HTPR-7742")
+    assert lead_done["state"] == "PARKED" and lead_done["park"] == "", lead_done
+    assert classify("RUNNER IDLE needs Valentin to approve", 0, 600, "", 0, "HTPR-1")["state"] == "FAULT", "a bare ask for Valentin is still a fault"
     # HYCI-408: the exact endings HTPR-7766 looped on for 165 runs on 8 and 9 Nov. Each is a fault that names the guard and
     # parks on the lead, so the ticket leaves the pool on run 1 of the replay instead of coming back every minute.
     replay = [
