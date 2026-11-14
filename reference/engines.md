@@ -14,7 +14,7 @@ Read when you launch or switch an engine, review code, or touch a subscription p
 
 ## Code review
 
-Code review picks its reviewer by script: Codex while it has room, else Claude, DeepSeek once its review test passes. Every switch is logged to `goal/decisions.jsonl`. The gate reads one switch, an open issue labelled `review-switch`, written by the runner app. It never reads a date.
+Code review runs only on GitHub's free hosted runners, never on this VPS. Two reviewers: Codex while it has room, else Claude. Claude review is a GitHub Action (`.github/workflows/claude-review.yml` in hypertask-ai/hypertask): one parallel run per PR, concurrency group `review-<pr>` with cancel-in-progress, no daily cap, no queue. It runs on the Claude subscription through the `CLAUDE_CODE_OAUTH_TOKEN` repo secret, uses `pull_request` (never `pull_request_target`), skips fork and Dependabot PRs, and publishes the `ai-review` and `claude-review` statuses itself. Codex review runs in OpenAI's GitHub connector. The gate only requests it from Actions: running Codex inside an Actions job needs an OpenAI auth secret, which is Valentin's call. Every switch is logged to `goal/decisions.jsonl`. The gate reads one switch, an open issue labelled `review-switch`, written by the runner app. It never reads a date. `bin/no-vps-ci` switches off any VPS review unit or process and refuses any `standin` unit or script.
 
 ## Pacing
 
