@@ -30,7 +30,7 @@ class OwnershipTests(unittest.TestCase):
         self.roster = self.state / "roster.json"
         self.roster.write_text('{"runners": 17}')
         self.owners = Owners(self.state, self.roster)
-        self.ticket = {"key": "HYCI-404", "idx": 404, "board": "11514", "section": "Backlog",
+        self.ticket = {"key": "HYCI-404", "idx": 404, "board": "11514", "section": "In Progress",
                        "title": "Keep the owner", "holders": [["runner 6", True]], "created": "2026-11-13",
                        "waiting": False, "labels": ["brain-hard"], "prio": "Urgent"}
         self.selection = {"engine": "codex", "model": "gpt-6.1-sol", "effort": "high"}
@@ -80,7 +80,7 @@ class OwnershipTests(unittest.TestCase):
         self.owners.bind("HYCI-404", 6, self.selection)
         self.owners.prepare([self.ticket])
         pick = load("pick")
-        pick.SNAP = {"tickets": [self.ticket], "incidents": []}
+        pick.SNAP = {"tickets": [self.ticket], "incidents": [], "prs": []}
         with patch.object(pick, "resting", return_value=set()), \
                 patch.object(pick, "skipped", return_value=False), \
                 patch.object(pick, "held_back", return_value=False), \
