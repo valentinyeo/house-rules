@@ -329,7 +329,7 @@ launch() {
       echo "reply cap: nothing from the model for ${REPLY_CAP}s; retrying once (attempt 2 of 2)"
       continue
     fi
-    echo "RUNNER IDLE no model reply for ${REPLY_CAP}s twice, run ended"
+    echo "RUNNER IDLE provider outage: no model reply for ${REPLY_CAP}s twice, run ended"
     break
   done
   return "$rc"
@@ -479,7 +479,7 @@ case "${1:-}" in
     took=$(( $(date +%s) - started ))
     [ "$took" -le 6 ] || { echo "reply-cap self-test FAILED: Claude kill took ${took}s at a 3s cap" >&2; bad=1; }
     wait "$spid" 2>/dev/null
-    python3 "$HERE/runner-state.py" --classify --final 'RUNNER IDLE no model reply for 600s twice, run ended' --rc 124 --elapsed 700 --ticket HYCI-1 | grep -q '"state": "FAULT"' \
+    python3 "$HERE/runner-state.py" --classify --final 'RUNNER IDLE provider outage: no model reply for 600s twice, run ended' --rc 124 --elapsed 700 --ticket HYCI-1 | grep -q '"state": "FAULT"' \
       || { echo 'reply-cap self-test FAILED: a capped run is not classified as a fault with its reason' >&2; bad=1; }
     [ "$bad" = 0 ] && echo 'reply-cap self-test ok'
     exit "$bad" ;;
