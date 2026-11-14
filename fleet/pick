@@ -1291,13 +1291,30 @@ def wait_end(r):
 
 
 BUILT_PR_END = re.compile(r"\b(AI Review|QA)\b", re.I)
+# HYCI-396, 13 Nov (HTPR-8207, run on R2): the run left "In Progress (PR 3476 checks running; recheck after 2026-11-13T23:54Z)" on a BUILDING
+# row. That names neither AI Review nor QA, so no gate saw it, and the ticket was picked again 19 minutes before its own recheck time.
+BUILT_PR_NOTE = re.compile(r"\bPR\s*#?\d+\b[^;]{0,40}\bchecks?\s+(?:running|pending)|\brecheck(?:\s+after|\s+at)?\s+\d", re.I)
+RECHECK_ISO = re.compile(r"recheck(?:\s+after|\s+at)?\s+(\d{4}-\d\d-\d\d)[T ](\d\d):(\d\d)", re.I)
 
 
 def built_pr_end(r):
-    """A run that built and left its ticket in AI Review or QA (PR open). Its next run only merges, so it has nothing to do
-    until the PR's checks finish (canary HYCI-358, 13 Nov: DONE at 10:56, picked again at once, 135 s run, WAIT_CHECK on
-    still-running checks). Held only while the PR's checks read "running" at the first pick; see gate_verdict."""
-    return r.get("state") == "BUILDING" and bool(BUILT_PR_END.search(str(r.get("reason", ""))))
+    """A run that built and left its ticket in AI Review or QA (PR open), or whose own note says the PR's checks run or gives a
+    recheck time. Its next run only merges, so it has nothing to do until the PR's checks finish (canary HYCI-358, 13 Nov: DONE at 10:56,
+    picked again at once, 135 s run, WAIT_CHECK on still-running checks). Held only while the PR's checks read "running" at the first
+    pick, or until the stated recheck time; see gate_verdict."""
+    if r.get("state") != "BUILDING":
+        return False
+    text = str(r.get("reason", "")) + " " + str(r.get("detail", ""))
+    return bool(BUILT_PR_END.search(text) or BUILT_PR_NOTE.search(text))
+
+
+def note_recheck(r):
+    """The ISO recheck time a run's own note states ("recheck after 2026-11-13T23:54Z"), as a datetime, else None."""
+    m = RECHECK_ISO.search(str(r.get("reason", "")) + " " + str(r.get("detail", "")))
+    try:
+        return dt.datetime(int(m[1][:4]), int(m[1][5:7]), int(m[1][8:10]), int(m[2]), int(m[3]), tzinfo=dt.timezone.utc) if m else None
+    except ValueError:
+        return None
 
 
 def gate_cap(t):
@@ -1373,6 +1390,9 @@ def gate_verdict(t, when, row, base, parts, now):
             return False, f"{name} changed"
     seen = base["parts"].get("pr"), base["parts"].get("blk")
     if built_pr_end(row):  # held only while a PR's checks run at the first look; no PR or finished checks: a run has work
+        due = note_recheck(row)
+        if due and now < due and age <= gate_cap(t):  # the run named its own recheck time; a stale PR list cannot say the checks are over
+            return True, "held"
         if seen[0] and any((p[4] or [""])[0] == "running" for p in seen[0]):
             return True, "held"
         return False, "no checks running"
@@ -3015,6 +3035,19 @@ def wait_gate_self_test():
         assert held() == {"HTPR-1"}, "the run's own park note inside the grace does not lift it"
         fresh([wait("HTPR-1", 5)], [tk("HTPR-1", 2)] + [tk(f"HTPR-9{i}", 2) for i in range(5)], [pr(1, "HTPR-1")])
         assert "HTPR-1" in held(), "a script that touched six tickets in one minute is not news about this one"
+        # HYCI-396, HTPR-8207: a BUILDING note that names running checks and a recheck time holds the ticket until that time, with a stale PR list
+        due = (now + dt.timedelta(minutes=19)).strftime(fmt)
+        note = f"In Progress (PR 3476 checks running; recheck after {due[:16]}Z)"
+        fresh([wait("HTPR-8", 5, note, "BUILDING")], [tk("HTPR-8")], [])
+        assert built_pr_end(_LEDGER[0][0]) and note_recheck(_LEDGER[0][0]) is not None, "the note is read as a built PR with a recheck time"
+        assert held() == {"HTPR-8"} and held(now + dt.timedelta(minutes=10)) == {"HTPR-8"}, "no PR in the list (stale cache) does not free it before its recheck"
+        assert held(now + dt.timedelta(minutes=20)) == set(), "at the stated recheck time it is free"
+        fresh([wait("HTPR-8", 5, "In Progress (PR 3476 checks running)", "BUILDING")], [tk("HTPR-8")], [pr(8, "HTPR-8")])
+        assert held() == {"HTPR-8"}, "a note that names running checks without a time is held while the PR's checks run"
+        fresh([wait("HTPR-8", 5, "In Progress, coding the second half", "BUILDING")], [tk("HTPR-8")], [pr(8, "HTPR-8")])
+        assert held() == set(), "an ordinary BUILDING end is not a wait"
+        fresh([wait("HTPR-8", 5, note, "BUILDING")], [tk("HTPR-8", 2)], [])
+        assert held() == set(), "a ticket edit after the end still frees it"
         # a PR that appears, or goes
         fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1")])
         held()

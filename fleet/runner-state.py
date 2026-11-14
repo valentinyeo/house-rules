@@ -47,7 +47,10 @@ OWN = re.compile(r"\bOWN_PR\b|own PR", re.I)
 PARKED_LINE = re.compile(r"(?:^|\s)PARKED\s+\S+")
 TOO_HARD_LINE = re.compile(r"(?:^|\s)RUNNER TOO HARD\s+\S+")
 STALL = re.compile(r"no model reply|reply cap|reply stalled", re.I)
-TICKET_WAIT = re.compile(r"waits on|waiting on|parked on|BlockedBy", re.I)
+# HYCI-396, HTPR-8737 (5 to 7 Nov, 14 runs on runner 6): "RUNNER IDLE HTPR-8737 blocked by HYCI-140" was read as a plain wait, so the ticket came
+# back every 20 to 30 minutes while the CI repair it named was still open. A line that names another ticket as what it is blocked by,
+# awaiting or blocked on is a wait on that ticket: PARKED with waits, which fleet/park turns into a BlockedBy hold.
+TICKET_WAIT = re.compile(r"waits on|waiting on|parked on|BlockedBy|blocked by|blocked on|awaiting|awaits", re.I)
 # Live proof that needs Valentin's PC or the check phone, while it is off (IGSH-1923, IGSH-1925, HYCI-256, 11 Nov night).
 PC_WAIT = re.compile(r"\b(?:desktops?|laptops?|PC|phone|computer|Windows)\b[^.;]{0,40}\b(?:disconnected|unavailable|unreachable|offline|cannot be reached)"
                      r"|\b(?:disconnected|unavailable|unreachable|offline)\b[^.;]{0,20}\b(?:desktops?|laptops?|PC|phone)\b", re.I)
@@ -397,6 +400,11 @@ def self_test():
     assert late["state"] == "FAULT" and late["park"] == "" and "6 h" in late["detail"]
     healthy = classify("RUNNER IDLE checks pending", 0, 400, "", 40 * 60, "HYCI-1")
     assert healthy["state"] == "WAIT_CHECK", "a 40-minute check cycle is a wait, not a fault"
+    for note in ("RUNNER IDLE HTPR-8737 blocked by HYCI-140", "RUNNER IDLE HTPR-8737 awaiting HYCI-140 repair", "RUNNER IDLE HTPR-8737 blocked on HYCI-140"):
+        held = classify(note, 0, 400, "", 0, "HTPR-8737")
+        assert held["state"] == "PARKED" and held["park"] == "waits" and held["waits"] == "HYCI-140", (note, held)
+    for note in ("RUNNER IDLE HTPR-8737 awaiting CI repair", "RUNNER IDLE HTPR-8737 awaiting checks on PR 2929", "RUNNER IDLE HTPR-8737 blocked, nothing to name"):
+        assert classify(note, 0, 400, "", 0, "HTPR-8737")["state"] == "WAIT_CHECK", note
     parked = classify("RUNNER IDLE HYCI-160 BlockedBy HYCI-188", 0, 400, "", 0, "HYCI-160")
     assert parked["state"] == "PARKED" and parked["park"] == "waits" and parked["waits"] == "HYCI-188"
     assert classify("RUNNER IDLE driving own PR to live", 0, 400, "", 0, "HTPR-1")["state"] == "OWN_PR"
