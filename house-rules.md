@@ -25,7 +25,7 @@ Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on a
 - Load or refresh rules in a session with `/house-rules`. (2026-10-25, why: running sessions miss new rules)
 - Project-only rule? Put it in that project's repo rules file, not here. (2026-10-25, why: projects stay separate)
 - Test skills and rules. Run blind agents with versus without. Keep only what wins. Cut what changes nothing. (2026-10-25, why: Valentin via Thorsten Ball post)
-- HARD: write rules and skills like Lauren Tan and Anthropic: short commands, no reasons, no dates, no quotes, no history. Quotes and dates go in the PR. A rule something keeps breaking becomes a script that refuses. `rules-lint` refuses any other line; nothing merges or syncs without it. HYCI-453.
+- HARD: write rules and skills like Lauren Tan and Anthropic: short commands, no reasons, no dates, no quotes, no history. Quotes and dates go in the PR. A rule something keeps breaking becomes a script that refuses. Progressive disclosure: this file is the short core every agent reads; role rules, procedures and detail live in skills or reference files it points to with "read X when Y". `rules-lint` refuses any other line; nothing merges or syncs without it. HYCI-453.
 
 ## Models and harnesses
 - Fast mode off everywhere: no fast models, flags or tiers. (2026-10-25, why: burns quota, Valentin said HARD)
