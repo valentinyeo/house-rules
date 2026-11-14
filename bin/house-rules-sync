@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# house-rules-sync: pull valentinyeo/house-rules into the shared copy and inline the
+# rules into harness files that have no import syntax (Codex ~/.codex/AGENTS.md,
+# hax ~/.config/hax/AGENTS.md). Claude Code imports the copy directly.
+#
+# HYCI-435: one uncommitted edit in the shared copy aborted every pull for 12 hours and
+# the unit still reported success, so no house-rules fix reached the fleet. A stray edit
+# is now saved as a patch and pulled over; a pull that still fails exits non-zero so
+# job-died records it. Untracked files are never touched: a session may be writing them.
+set -euo pipefail
+
+DIR=${HOUSE_RULES_DIR:-$HOME/.local/share/house-rules}
+SRC="$DIR/house-rules.md"
+ORPHANS=${HOUSE_RULES_ORPHANS:-$HOME/.local/state/house-rules-orphans}
+
+say() { echo "house-rules-sync: $*" >&2; }
+pull() { git -C "$DIR" pull --ff-only -q; }
+
+if ! pull; then
+  if [ -n "$(git -C "$DIR" status --porcelain --untracked-files=no)" ]; then
+    mkdir -p "$ORPHANS"
+    P="$ORPHANS/$(date -u +%Y%m%dT%H%M%SZ).patch"
+    git -C "$DIR" diff HEAD > "$P"
+    git -C "$DIR" reset -q --hard HEAD
+    say "stray edit in the shared copy saved to $P"
+  fi
+  pull || { say "pull from origin failed; the shared copy is not on the newest main"; exit 1; }
+fi
+[ -s "$SRC" ] || exit 0
+
+BEGIN="<!-- house-rules:begin (auto-synced from $SRC; edit via PR to valentinyeo/house-rules, never here) -->"
+END="<!-- house-rules:end -->"
+for f in "$HOME/.codex/AGENTS.md" "$HOME/.config/hax/AGENTS.md"; do
+  mkdir -p "$(dirname "$f")"; touch "$f"
+  tmp="$(mktemp)"
+  { echo "$BEGIN"; cat "$SRC"; echo "$END"; echo;
+    awk -v b="<!-- house-rules:begin" -v e="$END" '
+      index($0,b)==1 {skip=1; next}
+      skip && $0==e {skip=0; drop_blank=1; next}
+      skip {next}
+      drop_blank && $0=="" {drop_blank=0; next}
+      {drop_blank=0; print}' "$f"; } > "$tmp"
+  if cmp -s "$tmp" "$f"; then rm -f "$tmp"; else cat "$tmp" > "$f"; rm -f "$tmp"; fi
+done
+
+if [ -d "$DIR/skills" ]; then
+  for d in "$HOME/.claude/skills" "$HOME/.agents/skills" "$HOME/.codex/skills" "$HOME/.config/hax/skills"; do
+    [ -d "$d" ] || continue
+    for s in "$DIR"/skills/*/; do
+      [ -f "$s/SKILL.md" ] || continue
+      n=$(basename "$s"); t="$d/$n"
+      if [ -L "$t" ] || [ ! -e "$t" ]; then ln -sfn "${s%/}" "$t"; fi
+    done
+  done
+fi
+
+[ -x "$DIR/bin/rules-drift" ] && "$DIR/bin/rules-drift" >/dev/null 2>&1 || true
