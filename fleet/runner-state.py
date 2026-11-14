@@ -379,8 +379,10 @@ def self_test():
     assert mid["result"] == "FAIL" and "before it started" not in mid["detail"] and "1500s" in mid["detail"], "a long run that died is not 'before it started'"
     assert classify("RUNNER IDLE checks pending", 0, 400, "", 0, "HYCI-1", overload=True)["state"] == "WAIT_CHECK", \
         "a run that got its own final line keeps that ending"
-    stall = classify("RUNNER IDLE no model reply for 600s twice, run ended", 124, 700, "", 0, "HYCI-1")
+    stall = classify("RUNNER IDLE provider outage: no model reply for 600s twice, run ended", 124, 700, "", 0, "HYCI-1")
     assert stall["state"] == "FAULT" and stall["result"] == "FAIL" and "no model reply" in stall["detail"], stall
+    # HYCI-388 (HTPR-9205, HTPR-9130, 14 Nov): two silent attempts are the provider sending nothing, a valid leave, not an invalid fault.
+    assert leave_verdict(stall["state"], stall["detail"])[0] == "valid", leave_verdict(stall["state"], stall["detail"])
     assert stall["park"] == ""
     wait = classify("RUNNER IDLE ci-blocked HYCI-117", 0, 400, "", 10, "HYCI-1")
     assert wait["state"] == "WAIT_CHECK" and wait["park"] == ""
