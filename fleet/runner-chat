@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -14,10 +15,26 @@ class ChatError(Exception):
     pass
 
 
-def request(path, body=None):
+def session_token():
     token = os.environ.get("HT_TOKEN", "")
-    if not token:
-        raise ChatError("HT_TOKEN is required; use the current runner's identity")
+    if token:
+        return token
+    identity = os.path.expanduser(os.environ.get("RUNNER_CHAT_IDENTITY", "~/.agents/skills/ship/scripts/ship-identity"))
+    name = ""
+    try:
+        out = subprocess.run([identity], capture_output=True, text=True, timeout=10).stdout.strip()
+        name, path = out.split("\t", 1)
+        with open(path) as handle:
+            token = handle.read().strip()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        token = ""
+    if not token or name == "Valentins Claude Code":
+        raise ChatError("HT_TOKEN is required, or name this session so ship-identity finds its own agent login")
+    return token
+
+
+def request(path, body=None):
+    token = session_token()
     base = os.environ.get("RUNNER_CHAT_BASE", "https://app.hypertask.ai/api/mcp").rstrip("/")
     parsed = urllib.parse.urlsplit(base)
     if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}):
