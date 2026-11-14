@@ -4839,6 +4839,8 @@ def wip_self_test():
         SNAP["rel"] = {t["key"]: [[], []] for t in SNAP["tickets"]}
         got = choose(1, True)
         assert (got[0]["key"], got[1]) == ("HYCI-389", "incident"), got
+        MEMBERS["15"] = None
+        MEMBERS["2060"] = None
         (STATE / "runner-2.log").unlink()
         RUNNING.clear()
         SNAP["tickets"] = [tk("HTPR-50", "AI Review")]
