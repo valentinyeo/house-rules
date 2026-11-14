@@ -349,7 +349,7 @@ def one(repo, n, dry=False, now=None, hooks=None):
             print(f"pr-merge: PR {n} is being handled by another process")
             return "locked"
     try:
-        env = h.get("env") or token_env(repo)
+        env = h["env"] if "env" in h else token_env(repo)
         if "pr" in h:
             pr = h["pr"]()
         else:
