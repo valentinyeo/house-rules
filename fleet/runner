@@ -104,6 +104,13 @@ pi_login_heal() {
 PROVIDER_BUSY_SECONDS=${PROVIDER_BUSY_SECONDS:-900}
 # 2026-11-13: Codex answers a spent plan with "The usage limit has been reached"; that is the same rest, not a crash (runner 6 SOFT-1970 read FAULT).
 OVERLOAD_RE='inference service is overloaded|429: .*server_error|usage limit has been reached'
+# 2026-11-14 (HYCI-396): a spent plan is not a 15 minute blip. Runner 6 walked into the Codex usage limit every 15 minutes
+# for 90 minutes, one empty ledger run each time, with the week reset 44 hours away. A usage limit now rests the plan until
+# the soonest reset of its spent window in the pacer's plans.json; no known reset falls back to the 15 minutes.
+QUOTA_RE='usage limit has been reached'
+PLANS_FILE=${FLEET_PLANS_FILE:-$HOME/.local/state/pacing/plans.json}
+PROVIDER_BUSY_MAX_SECONDS=${PROVIDER_BUSY_MAX_SECONDS:-691200}  # 8 days: a reset further out is a bad reading
+PROVIDER_BUSY_TICK=${PROVIDER_BUSY_TICK:-300}  # a rest sleeps at most this long, then the loop rechecks stop, engine and launcher
 plan_of_engine() {
   case $1 in
     opencode|pi-opencode) echo opencode ;; codex|pi-codex) echo codex ;; cursor|pi-cursor) echo cursor ;; claude) echo claude ;;
@@ -121,16 +128,44 @@ provider_busy_left() {
 mark_provider_busy() {
   local eng=${1:-0} log=$2 plan
   grep -a -qE "$OVERLOAD_RE" "$log" 2>/dev/null || return 1
+  local now until why reset
   plan=$(plan_of_engine "$eng")
-  echo $(( $(date +%s) + PROVIDER_BUSY_SECONDS )) > "$(provider_busy_path "$eng")"
-  { echo "$(date -u +%FT%TZ) provider busy: $plan for ${PROVIDER_BUSY_SECONDS}s, its runners rest; no provider switch" >> "$STATE/runner-${n:-0}.log"; } 2>/dev/null || true
+  now=$(date +%s); until=$(( now + PROVIDER_BUSY_SECONDS )); why="for ${PROVIDER_BUSY_SECONDS}s"
+  if grep -a -qE "$QUOTA_RE" "$log" 2>/dev/null; then
+    reset=$(plan_reset_at "$plan")
+    if [ -n "$reset" ] && [ "$reset" -gt "$until" ] && [ "$reset" -le $(( now + PROVIDER_BUSY_MAX_SECONDS )) ]; then
+      until=$reset; why="until its reset $(date -u -d "@$reset" +%FT%TZ) (usage limit)"
+    fi
+  fi
+  echo "$until" > "$(provider_busy_path "$eng")"
+  { echo "$(date -u +%FT%TZ) provider busy: $plan $why, its runners rest; no provider switch" >> "$STATE/runner-${n:-0}.log"; } 2>/dev/null || true
 }
+# The soonest future reset of a window at or over the plan's ceiling, from the pacer's plans.json. Empty when unknown.
+plan_reset_at() {
+  python3 - "$PLANS_FILE" "$1" <<'PYR' 2>/dev/null || true
+import json, sys, time
+try:
+    p = json.load(open(sys.argv[1])).get("plans", {}).get(sys.argv[2]) or {}
+except Exception:
+    sys.exit(0)
+ceil = p.get("ceiling") or 100
+now = time.time()
+r = [w["resets_at"] for w in p.get("windows") or []
+     if (w.get("used_pct") or 0) >= ceil and (w.get("resets_at") or 0) > now]
+if r:
+    print(int(min(r)))
+PYR
+}
+# Rests one tick at most: returns 1 while the plan is still busy, so the loop goes back to its top and rechecks stop-N,
+# the engine file and a launcher update before it rests again. Returns 0 when the plan is free.
 provider_busy_wait() {
   local eng=${1:-0} left
   left=$(provider_busy_left "$eng")
   [ "$left" -gt 0 ] || { rm -f "$(provider_busy_path "$eng")"; return 0; }
   { echo "$(date -u +%FT%TZ) provider busy: $(plan_of_engine "$eng") ${left}s left, resting" >> "$STATE/runner-${n:-0}.log"; } 2>/dev/null || true
+  [ "$left" -gt "$PROVIDER_BUSY_TICK" ] && left=$PROVIDER_BUSY_TICK
   sleep "$left"
+  return 1
 }
 
 # 2026-11-13 canary: runner 6's pane restarted mid-run. The Pi process of the first run kept working under the same RUNNER 6
@@ -580,6 +615,30 @@ case "${1:-}" in
     mark_provider_busy pi-codex "$tmp/quota.log"
     expect 'a Codex usage limit marks codex busy' "$?" 0
     expect 'the codex mark is set' "$([ "$(provider_busy_left codex)" -gt 0 ] && echo yes)" yes
+    left=$(provider_busy_left codex)
+    [ "$left" -le 900 ] || { echo "provider-busy self-test FAILED: no plans file, quota mark is ${left}s, want the 900s fallback" >&2; bad=1; }
+    rm -f "$(provider_busy_path codex)"
+    # A spent window with a known reset: the quota mark lasts until that reset, not 15 minutes (HYCI-396).
+    reset=$(( $(date +%s) + 40000 ))
+    printf '{"plans":{"codex":{"ceiling":95,"windows":[{"used_pct":100,"resets_at":%s},{"used_pct":10,"resets_at":%s}]}}}\n' "$reset" "$(( reset - 30000 ))" > "$tmp/plans.json"
+    PLANS_FILE=$tmp/plans.json
+    mark_provider_busy pi-codex "$tmp/quota.log"
+    expect 'a usage limit rests until the spent window resets' "$(provider_busy_until codex)" "$reset"
+    rm -f "$(provider_busy_path codex)"
+    printf '{"plans":{"opencode":{"ceiling":95,"windows":[{"used_pct":100,"resets_at":%s}]}}}\n' "$reset" > "$tmp/plans.json"
+    mark_provider_busy pi-opencode "$tmp/overload.log"
+    left=$(provider_busy_left opencode)
+    [ "$left" -le 900 ] || { echo "provider-busy self-test FAILED: an overload took the plan reset (${left}s), want 900s" >&2; bad=1; }
+    rm -f "$(provider_busy_path opencode)"
+    printf '{"plans":{"codex":{"ceiling":95,"windows":[{"used_pct":100,"resets_at":%s}]}}}\n' "$(( $(date +%s) + 99999999 ))" > "$tmp/plans.json"
+    mark_provider_busy pi-codex "$tmp/quota.log"
+    left=$(provider_busy_left codex)
+    [ "$left" -le 900 ] || { echo "provider-busy self-test FAILED: a reset past the 8 day cap was taken (${left}s)" >&2; bad=1; }
+    rm -f "$(provider_busy_path codex)"; PLANS_FILE=$tmp/none.json
+    # A long mark rests one tick, then hands back to the loop top (stop-N, engine, launcher update are rechecked).
+    echo $(( $(date +%s) + 40000 )) > "$(provider_busy_path codex)"
+    PROVIDER_BUSY_TICK=1 provider_busy_wait codex
+    expect 'a busy plan returns 1 after one tick' "$?" 1
     rm -f "$(provider_busy_path codex)"
     mark_provider_busy pi-opencode "$tmp/overload.log"
     expect 'an overload marks its plan busy' "$?" 0
@@ -828,7 +887,7 @@ TM
         echo "$(date -u +%FT%TZ) relaunch: launcher changed" >> "$rlog"; exec "$SELF" "$n" --loop
       fi
       if [ -f "$STATE/PAUSED" ] || [ -f "$STATE/stop-$n" ]; then sleep 300; continue; fi
-      provider_busy_wait "$(engine "$n")"
+      provider_busy_wait "$(engine "$n")" || continue
       orphan_run_wait "$n"
       pick_bin=$(python3 "$PICK_GATE" pick 2>>"$rlog") || { echo "$(date -u +%FT%TZ) pick-gate: no runnable picker" >> "$rlog"; sleep 900; continue; }
       if ! pick=$("$pick_bin" "$n" --json 2>>"$rlog"); then
