@@ -1,11 +1,11 @@
 ---
 name: runner-list
-description: "/runner-list, \"list all runners\", \"what is every runner on\": one clean list of every runner and its ticket, clustered by topic. Also the Runners section of /runner-update. Any fleet."
+description: "/runner-list, \"list all runners\", \"what is every runner on\": one clean list of every runner and its ticket, clustered by topic. Also the Runners section of /runner-update. Use when asked to list runners. Any fleet."
 ---
 
 # /runner-list
 
-Valentin's format (2026-11-05). Every runner names the model and effort it runs right now. Runners are one thread with no helpers, so no helper counts (Valentin 2026-11-05: "not ncessary in this new scenario"). Nothing else in the reply.
+Valentin's format. Every runner names the model and effort it runs right now. Nothing else in the reply.
 
 ## Get the data
 - Runner names and claims from your fleet's own source. Multiprompt: `~/.local/state/multibot/owners.json`, panes `multibot-runner-<x>`.

@@ -134,13 +134,11 @@ Every board write wrapper runs it (ceo-ht does). No bypass.
 No wrapper? Raw `hypertask` writes too: run `ticket-lint <file>` first, by hand.
 Valentin 2026-10-29: "still ignored on every ticket ... pls enforce this".
 
-## One spec, one runner
-Never split a feature spec across runners.
-One runner builds the whole spec, one session.
+## One spec, one owner
+One owner per PR builds the whole spec.
 Then a fresh reviewer (spec + diff only) checks it.
 A verifier tests the user flows end to end.
-Subtasks under a feature are that runner's checklist.
-Helpers only review, test or look up. Never build part of a feature.
+Subtasks under a feature are the owner's checklist. Independent tasks go to fresh workers.
 
 Too big for one run? Split it before it is picked, never across runners at once. Each part is its own one-run ticket with one Done when line, linked BlockedBy the part before it, so one runner takes one part at a time. `ticket-ready` marks a ticket Not Ready when it has several deliverables, and `fleet/pick` skips it until the ticket is split or shortened (house rules, 14 Nov, HYCI-396).
 Many small tickets only for independent bugs or polish.

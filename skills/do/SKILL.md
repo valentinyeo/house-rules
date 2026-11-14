@@ -105,7 +105,6 @@ Delegation:
 
 - Do a leaf yourself, or give it to a fresh helper. Claude Code: `pstack:poteto-agent`. Codex and hax: the house-rules Codex ladder helper.
 - Every brief contains: the user's goal, the ticket link, the absolute path of poteto-mode's SKILL.md with "read it in full and follow it", the playbook to run, the leaf gates file, its `OWNS:` paths, and "not done until every gate in your ledger is met".
-- Add the house-rules lines every helper prompt needs: token-ladder mode and unlazy.
 - Helpers never write to the tracker. You move the tickets.
 - Dispatch only leaves whose needs are met. Follow unlazy's wave and lease rules for parallel leaves.
 

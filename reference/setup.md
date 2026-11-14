@@ -8,6 +8,6 @@ Read when you start a new session, set up a harness or install pstack or caveman
 4. Find your project. Hypertask: work in `~/projects/hypertask`. Run `/setup-runner` as a runner, `/setup-agents` as a lead or for a new project. Department leads run `/board-identity` through its final startup check. Other projects: run that repo's own setup skill.
 5. Take your role from the roster. Open `fleet/roster.json`, find your session name, load its `role_skill`. No row: note "not in roster" in Chief Of Staff's agent lane and take no work.
 6. Log in to boards only through your setup skill. Never paste tokens. Keys come from `~/.local/bin/stack-key` on hypertask-vps and are never printed.
-7. Model rules apply: fast mode off, no model routers.
+7. Model rules apply: fast mode off.
 8. Report blockers to your own project's lead.
 9. Confirm in one line: who you are, your project, "setup ok" (or what failed).

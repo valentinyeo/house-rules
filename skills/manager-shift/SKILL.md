@@ -43,10 +43,8 @@ At 120k tokens or four hours, stop work.
 Exit `3` means handover required before more work.
 Repeated wakes never restart the four-hour clock.
 
-Check this alongside `token-ladder status`.
 Respect the existing manager lease and grant receipt.
 The shared check never changes pools or leases.
-It does not install token-ladder hooks or timers.
 No automatic clearing or process termination.
 
 ## Keep managers quiet
@@ -62,11 +60,10 @@ No automatic clearing or process termination.
 - Mention your project's lead for urgent decisions.
 - Never send status messages to Valentin.
 
-Use the current token-ladder mode without switching providers.
-Codex mode stays Codex, with fast mode off.
+Fast mode off.
 For Claude shifts, default to Sonnet medium.
-Use Opus only for short planning helpers.
-Those helpers exit; their decisions go on tickets.
+Spawn a fresh Opus worker for the hardest judgment.
+Workers exit; their decisions go on tickets.
 Follow existing rules for money, keys and X.
 
 ## End, clear and resume

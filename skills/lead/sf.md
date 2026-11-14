@@ -9,7 +9,7 @@ Board: Hypertask 2060 (IGSH), https://app.hypertask.ai/project?id=2060 .
 Board writes: `~/projects/ceo/bin/ceo-ht`. Plain `hypertask` read only.
 
 Runners: Codex `hax-runner-1..N` via `~/projects/ceo/bin/hax-runner <n>`, limit is server load only.
-Claude `ceo-runner-6..10` per token ladder. Runners self-pull with `bin/pick-next`.
+Claude `ceo-runner-6..10`. Runners self-pull with `bin/pick-next`.
 
 Focus: `~/projects/ceo/focus.txt` (Multiprompt performance). Infra blockers first.
 

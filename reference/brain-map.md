@@ -4,7 +4,7 @@ Read when you pick a model, launch a runner, set a brain tag or hand a task to a
 
 ## Brain per ticket
 
-Every runner, any harness, takes its brain from the ticket's brain tag. One thread, no helpers, no subagents. No tag: the medium brain. Skip means the runner leaves that ticket.
+Every runner, any harness, takes its brain from the ticket's brain tag. No tag: the medium brain. Skip means the runner leaves that ticket.
 
 | Harness | Light | Medium | Hard | Extra-hard |
 |---|---|---|---|---|
@@ -28,9 +28,8 @@ Every runner, any harness, takes its brain from the ticket's brain tag. One thre
 
 ## Claude workers
 
-- Claude workers run alone by default.
-- Growth and Support leads may use Codex helpers.
-- Valentin asks a Claude session for Codex helpers? Allowed: terra medium for code, luna low for lookups. Helpers are sub agents, not runners. Claude keeps plans, checks and merges.
+- Spawn a fresh worker for each independent task. Brief it with the goal, the evidence that proves it done, the paths it may write and the actions it must not take.
+- Claude workers may use Codex helpers: terra medium for code, luna low for lookups. Helpers are sub agents, not runners. Claude keeps plans, checks and merges.
 - Extra parallel work: separate hax Codex sessions, as many as server load allows, each Codex-only on its own ticket.
 
 ## Choosing a tag

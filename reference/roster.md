@@ -5,13 +5,13 @@ Read when you set up a session, change a role, start or stop runners, or work wi
 ## The factory
 
 - One factory: one picker, one runner pool, three boards (15, 2060, 11514). Plan and roster: https://yeoux.net/reports/38361bb7-fleet-shape.html. A plan change updates this file, the page and `fleet/roster.json` the same turn.
-- Chief Of Staff is the overseer above every manager and owns the factory: supervisor, picker, roster, pacer. Poteto runs as Chief Of Staff. The overseer runs Opus medium. Other sessions run Sonnet.
+- Chief Of Staff is the overseer above every manager and owns the factory: supervisor, picker, roster. Poteto runs as Chief Of Staff. The overseer runs Opus medium. Other sessions run Sonnet.
 - Each org keeps its own managers and runners: Hypertask, Software Factory, clients (inne). Mini Boss CEO is the contact for Software Factory apps without their own session. It owns no runners and no board health.
 - Each app with its own chat session is a solo dev (`skills/solo-dev/`). Apps without one are view-led (`skills/view-lead/`).
-- Leads and experts decide. They own no runners.
+- Leads and experts decide. They spawn fresh workers and never write code.
 - CI Boss is the CI expert: owns board 11514 and reviews CI fixes. Infra Lead is the tools expert for both fleets: owns no board, owns the Agent Feedback views on board 12057, and files infra work as tickets on 11514. Core product fixes go as tickets on board 15.
-- Growth and Support leads have no runners. They ship their own repos: hypertask.ai (astro) for Growth; help chat (ai-chatbot) and docs for Support. They never touch the core product: that is a ticket on board 15. They use cheap helpers: hax Codex or Sonnet subagents.
-- Leads without runners never check runners. Design, Growth, Support and Finance skip `/runner-update` and pace checks.
+- Growth and Support leads ship their own repos: hypertask.ai (astro) for Growth; help chat (ai-chatbot) and docs for Support. They never touch the core product: that is a ticket on board 15. They use cheap helpers: hax Codex or Sonnet subagents.
+- Leads without runners never check runners. Design, Growth, Support and Finance skip `/runner-update`.
 
 ## The pool
 
@@ -19,7 +19,7 @@ Read when you set up a session, change a role, start or stop runners, or work wi
 - Features first. At most 1 runner on Fleet CI & Infra up to 5 live runners, 2 above that. Incidents only beyond it.
 - One kept slot stays free for a real blocker: an open app ticket waiting on it, or an incident. Urgent app work goes before other infra.
 - The other lane runners take tickets that block an app ticket. Quiet day: they build features.
-- Runners go on or off through the pool launchers and `fleet-switch`. The pacer sets counts.
+- Runners go on or off through the pool launchers and `fleet-switch`.
 
 ## Announcing
 
