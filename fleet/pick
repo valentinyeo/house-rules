@@ -36,6 +36,13 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
   e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 11514
   f. the rest of the CI or infra lane, same cap
 One runner holds one ticket until it is live. brain-extra-hard runs on the codex engine (Sol high) or the claude engine (Opus high); every other engine skips it.
+Second ticket (HYCI-431, 14 Nov): when every ticket a runner owns in a building column has waited 30+ minutes on something outside the
+runner (a person, a BlockedBy link, a rest or script wait: the same reasons the own lane already reads; the wait runs from the end of
+its last run), the runner takes ONE more ticket, never more than 2 owned in a building column. The first-bound ticket wins every pick
+(owner records carry "since"), and the lane never hands the waiting ticket back as an orphan, a PR or new work. ship-claim's hold for
+the runner's own unfinished work is passed for that one ticket (second_claim); domain admission still runs. The WIP cap counts one
+unit per runner while the lane is on. The incident lane and the kept slot run before it, unchanged. Logged as
+"second-ticket: RN holds KEY (waits Xm), takes KEY2". Kill switch: touch ~/.local/state/fleet/second-ticket.off.
 A ticket any runner ended IDLE on rests for every runner (runner-N.idle files and finished runs) until the ticket changes
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
 a ticket with an open BlockedBy link is held by that link; a closed link does not lift a rest (the blocker's fix changes the ticket).
@@ -127,6 +134,14 @@ FREEZE = Path(os.environ.get("SHIP_FREEZE_FILE") or RUNNER_STATE / "app-freeze")
 HYPERTASK_REPO = HOME / "projects/hypertask"
 PROJECTS = HOME / "projects"
 LANE_CAP = 4
+# HYCI-431 second-ticket lane (14 Nov, Valentin: "You know the solutions, but you always need me to tell you"): all 13 runners held one
+# ticket each while every one waited on checks, a release, a review or a blocker, so none built. A runner whose owned ticket waits on
+# something outside it for SECOND_WAIT seconds may take ONE more ticket (SECOND_MAX owned in a building column). The first-bound
+# ticket wins every pick. Kill switch: touch SECOND_OFF.
+SECOND_OFF = Path(os.environ.get("FLEET_SECOND_OFF") or HOME / ".local/state/fleet/second-ticket.off")
+SECOND_WAIT = 30 * 60
+SECOND_MAX = 2
+SECOND = [None]  # this pick: {"keys": the runner's waiting tickets, "wait": seconds the youngest has waited}; set only when the lane opened
 CLAIM_TTL = 3 * 3600 + 600  # a run may last 3h (timeout in fleet/runner)
 FRESH_CLAIM = 120  # seconds: a claim younger than this has not started its run yet, so the log cannot show it
 INCIDENT_LABEL = "incident"
@@ -2121,6 +2136,50 @@ def held_back(t, own=False):
     return bool(why)
 
 
+def second_ticket_on():
+    return not SECOND_OFF.exists()
+
+
+def own_wait_reason(t):
+    """Why the runner's own ticket waits on something outside the runner, or None. Reuses the hold reasons the owned lane already
+    reads: a person, a rest or script wait (wait gate, one-run, sf-wait, IDLE and WAIT_CHECK rests: all in the Skip's rest set), an
+    open BlockedBy link, a park suppression. A spent relation read is no wait. An engine or PC hold is no wait either."""
+    if skipped(t):
+        return None
+    if t["waiting"]:
+        return "waits on a person"
+    if t["key"] in SKIP[0].rest:
+        return "wait gate or script wait"
+    why = held_reason(t, own=True)
+    return None if not why or why == SPENT_REASON else why
+
+
+def wait_age(t, now):
+    """Seconds since the owner's last run on t ended (the wait began there), else since the ticket last changed."""
+    ends = [w for r in ledger_rows() if r.get("ticket") == t["key"] and (w := stamp_time(r.get("ts", "")))]
+    since = max(ends) if ends else stamp_time(t["updated"])
+    return (now - since).total_seconds() if since else 0
+
+
+def second_ticket(n, owned, now=None):
+    """HYCI-431. {"keys", "wait"} when Runner n may take one more ticket: the lane is on, it owns fewer than SECOND_MAX tickets in a
+    building column, and every one of them has waited SECOND_WAIT seconds on something outside the runner. Else None."""
+    if not second_ticket_on():
+        return None
+    held = [t for t in owned if t["section"] in BOARDS[t["board"]][1]]
+    if not held or len(held) >= SECOND_MAX:
+        return None
+    now = now or dt.datetime.now(dt.timezone.utc)
+    waits = []
+    for t in held:
+        if own_wait_reason(t) is None:
+            return None
+        waits.append(wait_age(t, now))
+    if min(waits) < SECOND_WAIT:
+        return None
+    return {"keys": [t["key"] for t in held], "wait": min(waits)}
+
+
 def blocks_open(t):
     return any(is_open(k) for k in relations(t["key"])[1])
 
@@ -2298,6 +2357,30 @@ def record_park(n, key):
         f.write(f"{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} {key} {n}\n")
 
 
+def second_claim(n, t, dry):
+    """HYCI-431: ship-claim held Runner n only because of its own waiting ticket (open PRs or merged work not Done): the second-ticket
+    lane lets it through. Everything else ship-claim checks before that hold (brain and design-pass refusals) is checked by this pick
+    already; domain admission, which ship-claim runs after the hold, runs here for board 15 work. Then assign, say so in the agent lane,
+    and move the ticket to In Progress, as ship-claim does."""
+    if dry:
+        record_claim(n, t["key"], True)
+        return True
+    if t["board"] == "15":
+        r = subprocess.run([sys.executable, str(SHIP_CLAIM.with_name("runner-domain-admit.py")), str(n), t["key"]],
+                           capture_output=True, text=True, env=dict(os.environ, SHIP_SESSION_NAME=f"RUNNER {n}"), timeout=300)
+        if r.returncode != 0:
+            note(t["key"], "second ticket: domain admission refused")
+            remember_admission(n, t["key"])
+            return False
+    if not adopt(n, t, f"Second ticket: Runner {n}'s first ticket {', '.join(SECOND[0]['keys'])} waits on something outside the runner "
+                       "(checks, release, review or a blocker); the first ticket wins every pick when its wait ends"):
+        note(t["key"], "second ticket: adopt refused")
+        return False
+    ceo(n, "task", "move", t["key"], "--section", "In Progress")
+    record_claim(n, t["key"], False)
+    return True
+
+
 def try_claim(n, t, source, dry):
     """Claim t for Runner N. Returns True when it is ours, raises Pick for an own ticket found by a refusal."""
     if t.get("_owner") and t["_owner"]["runner"] != int(n):
@@ -2322,6 +2405,8 @@ def try_claim(n, t, source, dry):
     if rc == 0:
         record_claim(n, t["key"], dry)
         return True
+    if rc == 4 and SECOND[0] and source != "incident" and held_ticket(out) in SECOND[0]["keys"]:
+        return second_claim(n, t, dry)
     last = out.strip().splitlines()[-1] if out.strip() else "no output"
     note(t["key"], f"ship-claim refused (rc {rc}): {last}")
     if rc == 4 and "Domain admission failed" in out and not dry:
@@ -2714,6 +2799,10 @@ def pipeline():
             if found and live_runner(h):
                 holders.append(int(found[1]))
         if holders:
+            # HYCI-431: one runner builds one ticket at a time, so a runner holding two buildable tickets is one unit of work
+            if second_ticket_on() and all(h in busy for h in holders):
+                excluded.setdefault("second ticket", []).append(t["key"])
+                continue
             units.add(t["key"])
             busy.update(holders)
         else:
@@ -2735,14 +2824,20 @@ def wip_line(units, workers, excluded):
     return f"wip: {len(units)} of {len(workers)}, new work {state}" + (f" (not counted: {left})" if left else "")
 
 
+def owned_order(t):
+    """A runner's own tickets, first-bound first (HYCI-431: the first ticket wins every pick, so the second never starves it). Old owner
+    records have no "since" and sort first; ticket creation time breaks ties, as before."""
+    return ((t.get("_owner") or {}).get("since") or "", t["created"], t["key"])
+
+
 def choose(n, dry):
     PICKER[0] = n
+    SECOND[0] = None
     RELATION_CAP[0] = BLOCK_LOOKUPS * 2
     hit = incident_step(n, dry)
     if hit:
         return hit
-    owned = sorted((t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == int(n)),
-                   key=lambda t: (t["created"], t["key"]))
+    owned = sorted((t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == int(n)), key=owned_order)
     if owned:
         taken = {**claim_files(), **virtual_claims()}
         SKIP[0] = Skip({key for key, who in taken.items() if who != str(n)}, resting(n, dry))
@@ -2762,13 +2857,21 @@ def choose(n, dry):
         # (Backlog, BlockedBy open) while new work was open. Only a waiting ticket in a building column ends the pick here.
         building_wait = next((t for t in owned if t["section"] in BOARDS[t["board"]][1]), None)
         if building_wait:
-            raise SystemExit(f"none: Runner {n} keeps {building_wait['key']}; waiting, no hand-off")
-        log(f"own: Runner {n} keeps {owned[0]['key']} in {owned[0]['section']} (not a building column); new work may start")
+            # HYCI-431 (14 Nov): at 02:44 all 13 runners held one ticket each, every one waiting on checks, a release, a review or a
+            # blocker, and none built. A ticket that has waited SECOND_WAIT on something outside the runner lets its runner take one more.
+            SECOND[0] = second_ticket(n, owned)
+            if not SECOND[0]:
+                raise SystemExit(f"none: Runner {n} keeps {building_wait['key']}; waiting, no hand-off")
+        else:
+            log(f"own: Runner {n} keeps {owned[0]['key']} in {owned[0]['section']} (not a building column); new work may start")
     me = f"runner {n}"
     taken = {**claim_files(), **virtual_claims()}
     others = {k for k, who in taken.items() if who != str(n)}
     others.update(t["key"] for t in SNAP["tickets"]
                   if t.get("_owner") and t["_owner"]["runner"] != int(n))
+    # the second-ticket lane never hands the runner its own waiting ticket back as an orphan, a PR or new work: only its own lane runs it
+    second_keys = set(SECOND[0]["keys"]) if SECOND[0] else set()
+    others.update(second_keys)
     mine_claim = [k for k, who in taken.items() if who == str(n)]
     skip = Skip(others, resting(n, dry))
     SKIP[0] = skip
@@ -2805,7 +2908,7 @@ def choose(n, dry):
 
     # a. own ticket
     # a merged ticket waiting for its live check is its merging runner's; a design-pass one needs another runner's QA
-    for t in sorted((t for t in building if me in names(t) and not skipped(t)
+    for t in sorted((t for t in building if me in names(t) and not skipped(t) and t["key"] not in second_keys
                      and not (t["section"] == "QA" and "design-pass" in t["labels"])),
                     key=lambda t: (BOARD_ORDER[t["board"]], rank(t))):
         if t["key"] not in skip and not held_back(t, own=True):
@@ -2813,9 +2916,9 @@ def choose(n, dry):
     # a'. my own ticket rests or waits but still sits in a building column: park it first (one job per REST_MAX), so the
     # one-runner-one-ticket hold clears even while the WIP cap closes every lane that would have tried a claim
     for t in building:
-        if me in names(t) and t["section"] != "QA" and not skipped(t) and parkable(t):
+        if me in names(t) and t["section"] != "QA" and not skipped(t) and t["key"] not in second_keys and parkable(t):
             return t, "park"
-    qa_mine = [t for t in building if me in names(t) and t["section"] == "QA"]
+    qa_mine = [t for t in building if me in names(t) and t["section"] == "QA" and t["key"] not in second_keys]
     if qa_mine:
         theirs = sorted((t for t in building if t["section"] == "QA" and t["key"] not in skip and not skipped(t)
                          and any(live_runner(h) and h != me for h in names(t)) and "design-pass" not in t["labels"]),
@@ -3709,6 +3812,8 @@ def self_test():
     WATCH = STATE
     global ONE_RUN_FLAG
     ONE_RUN_FLAG = STATE / "no-one-run.on"  # a live flag file on this server must not change test outcomes
+    global SECOND_OFF
+    SECOND_OFF = STATE / "no-second-ticket.off"  # likewise the live kill switch of the second-ticket lane
     MEMBERS.update({b: None for b in BOARDS})  # membership unknown: the offline test offers every board
     t = {"key": "HTPR-1", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium"}
     SKIP[0] = Skip(set(), set())
@@ -3823,7 +3928,10 @@ def self_test():
     assert len(rows) == len((WATCH / "incidents.jsonl").read_text().splitlines()), \
         "one incident an hour per runner and board"
     globals()["RUNNERS"] = saved_runners
+    # HYCI-431: the WIP cases hold two tickets per runner and count each, as before the second-ticket lane; the lane's own count is in second_ticket_self_test
+    SECOND_OFF.write_text("")
     wip_self_test()
+    SECOND_OFF.unlink()
     assert decide_suppress(2, False, [], []) is False
     assert decide_suppress(3, False, [], []) is True, "three parks and no blocker: only a lead comment releases it"
     assert decide_suppress(3, True, [], []) is False
@@ -3834,6 +3942,7 @@ def self_test():
     assert decide_suppress(3, False, ["HYCI-1"], ["HYCI-1"], red_pr_after_park=True) is False  # held_reason still reads the open BlockedBy
     trace_self_test()
     park_count_self_test()
+    second_ticket_self_test()
     escalate_self_test()
     plan_busy_self_test()
     fair_self_test()
@@ -3845,7 +3954,7 @@ def self_test():
     ticket_ready_self_test()
     slice_self_test()
     print("fleet/pick self-test ok: distinct parks, 135 ticket outcomes, 22 PR outcomes, 38 wait-gate checks, not-now skip, "
-          "not-ready skip, slice holds")
+          "not-ready skip, slice holds, second-ticket lane")
 
 
 def slice_self_test():
@@ -3923,6 +4032,140 @@ def slice_self_test():
     finally:
         SNAP, STATE, ht = saved_snap, saved_state, saved_ht
         RELATION_CAP[0], CHECKED[0] = saved_cap[0], saved_checked[0]
+
+
+
+def second_ticket_self_test():
+    """HYCI-431: a runner whose only building ticket has waited 30+ minutes on something outside it takes one more ticket; the first
+    ticket wins every pick; the kill switch, a second owned ticket and a short wait each close the lane; the WIP cap counts one unit
+    per runner; ship-claim's own-ticket hold no longer blocks the second claim. Needs no board, no network."""
+    global RUNNER_STATE, RUNNERS, SNAP, SECOND_OFF, try_claim, ship_claim, adopt, ceo, record_claim, open_prs
+    import tempfile
+    saved = (RUNNER_STATE, RUNNERS, SNAP, SECOND_OFF, try_claim, ship_claim, adopt, ceo, record_claim, open_prs, subprocess.run)
+    RUNNER_STATE = Path(tempfile.mkdtemp())
+    SECOND_OFF = RUNNER_STATE / "second-ticket.off"
+    RUNNERS = 3
+    now = dt.datetime.now(dt.timezone.utc)
+    iso = lambda minutes: (now - dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def tk(key, section="In Progress", holder=1, since=None, age=120, board="15"):
+        return {"key": key, "idx": int(key.split("-")[1]), "board": board, "section": section, "title": "x", "labels": [],
+                "prio": "Medium", "holders": [[f"runner {holder}", True]] if holder else [], "waiting": False, "subs": False,
+                "paid": False, "created": "2026-01-01T00:00:00Z", "updated": iso(age),
+                "_owner": {"ticket": key, "runner": holder, "since": since} if holder else None}
+
+    first = tk("HTPR-80", since="2026-11-14T01:00:00Z")           # waits on open HTPR-99 for 2 hours
+    blocker = {**tk("HTPR-99", "Bugs", holder=0), "holders": [["postbox dev", True]]}  # open, held outside the pool: no lane takes it
+    fresh = tk("HTPR-81", "Bugs", holder=0)                          # new work
+    rel = {"HTPR-80": [["HTPR-99"], []], "HTPR-99": [[], ["HTPR-80"]], "HTPR-81": [[], []], "HTPR-82": [[], []]}
+
+    def snap(*tickets, rel_=None):
+        return {"tickets": list(tickets), "rel": dict(rel_ or rel), "prs": [], "incidents": [], "open": {}}
+
+    def pick(n=1):
+        try:
+            return choose(n, True)
+        except SystemExit as e:
+            assert str(e).startswith("none:"), e
+            return None
+
+    try_claim = lambda n, t, source, dry: True
+    open_prs = lambda fresh=False: []
+    _LEDGER.clear()
+    try:
+        # the lane opens: first ticket waits 120 minutes, the runner takes new work, the log names both
+        SNAP = snap(first, blocker, fresh)
+        got = pick()
+        assert got and got[0]["key"] == "HTPR-81", f"waiting 2h on a BlockedBy: the runner takes a second ticket, got {got}"
+        assert SECOND[0]["keys"] == ["HTPR-80"] and SECOND[0]["wait"] >= SECOND_WAIT
+        assert "HTPR-80" not in {got[0]["key"]}, "the waiting ticket is never handed back as an orphan, a PR or new work"
+
+        # a short wait does not open it
+        SNAP = snap({**first, "updated": iso(10)}, blocker, fresh)
+        assert pick() is None and SECOND[0] is None, "waiting 10 minutes: no second ticket"
+        # a ledger row (the run's end) dates the wait, not the ticket's last change
+        _LEDGER.clear()
+        (RUNNER_STATE / "run-ledger.jsonl").write_text(json.dumps({"ts": iso(5), "runner": 1, "ticket": "HTPR-80", "state": "WAIT_CHECK"}) + "\n")
+        SNAP = snap(first, blocker, fresh)
+        assert pick() is None, "the run ended 5 minutes ago: the wait is 5 minutes, whatever the ticket's age"
+        _LEDGER.clear()
+        (RUNNER_STATE / "run-ledger.jsonl").write_text(json.dumps({"ts": iso(45), "runner": 1, "ticket": "HTPR-80", "state": "WAIT_CHECK"}) + "\n")
+        SNAP = snap({**first, "updated": iso(1)}, blocker, fresh)
+        got = pick()
+        assert got and got[0]["key"] == "HTPR-81" and 44 * 60 <= SECOND[0]["wait"] < 47 * 60, "45 minutes since the run ended opens it"
+        _LEDGER.clear()
+        (RUNNER_STATE / "run-ledger.jsonl").unlink()
+
+        # not waiting on anything outside the runner: no second ticket
+        SNAP = snap(first, blocker, fresh, rel_={**rel, "HTPR-80": [[], []]})
+        assert pick() == (first, "own"), "a ticket whose blocker closed is the runner's own pick again"
+
+        # kill switch
+        SNAP = snap(first, blocker, fresh)
+        SECOND_OFF.write_text("")
+        assert pick() is None and SECOND[0] is None, "the kill switch closes the lane"
+        SECOND_OFF.unlink()
+        assert pick() and SECOND[0], "and removing it opens the lane"
+
+        # two owned tickets in a building column: the max is 2
+        other = tk("HTPR-82", "AI Review", since="2026-11-14T03:00:00Z")
+        SNAP = snap(first, other, blocker, fresh, rel_={**rel, "HTPR-82": [["HTPR-99"], []]})
+        assert pick() is None, "two building tickets owned: no third"
+        # an owned ticket that waits in Backlog is no building ticket: the lane is not used, new work flows as before
+        SNAP = snap(tk("HTPR-82", "Backlog", since="2026-11-14T03:00:00Z"), blocker, fresh, rel_={**rel, "HTPR-82": [["HTPR-99"], []]})
+        assert pick() and SECOND[0] is None, "a Backlog ticket is not a building ticket"
+
+        # first-bound first: the second ticket does not starve the first when its wait ends
+        second = tk("HTPR-83", "In Progress", since="2026-11-14T04:00:00Z", age=5)
+        rel2 = {**rel, "HTPR-83": [[], []]}
+        assert [t["key"] for t in sorted([second, first], key=owned_order)] == ["HTPR-80", "HTPR-83"]
+        SNAP = snap(first, second, blocker, rel_=rel2)
+        assert pick() == (second, "own"), "first waits, second builds"
+        SNAP = snap(first, second, blocker, rel_={**rel2, "HTPR-80": [[], []]})
+        assert pick() == (first, "own"), "the first ticket wins every pick once its wait ends"
+        assert [t["key"] for t in sorted([{**second, "_owner": {"runner": 1}}, first], key=owned_order)] == ["HTPR-83", "HTPR-80"], \
+            "an old owner record without a stamp sorts first"
+
+        # the WIP cap counts one unit per runner, not one per ticket
+        a, b = tk("HTPR-84", holder=2, since="2026-11-14T01:00:00Z", age=1), tk("HTPR-85", holder=2, since="2026-11-14T02:00:00Z", age=1)
+        SNAP = snap(a, b, rel_={"HTPR-84": [[], []], "HTPR-85": [[], []]})
+        units, workers, excluded = pipeline()
+        assert len(units) == 1 and excluded.get("second ticket") == ["HTPR-85"], (units, excluded)
+        SECOND_OFF.write_text("")
+        units, workers, excluded = pipeline()
+        assert len(units) == 2 and "second ticket" not in excluded, "with the lane off, both count as before"
+        SECOND_OFF.unlink()
+
+        # ship-claim holds the runner for its own waiting ticket: the lane gets past it, for that hold only
+        try_claim = saved[4]
+        calls = []
+        hold = "ship-claim: HOLD. RUNNER 1 has unfinished merged work: https://app.hypertask.ai/detail/project-15/80 (HTPR-80)."
+        globals()["ship_claim"] = lambda n, key, incident=False, dry=False: (4, hold)
+        adopt = lambda n, t, why: calls.append(("adopt", t["key"])) or True
+        ceo = lambda n, *args: calls.append(args) or (0, "")
+        record_claim = lambda n, key, dry: calls.append(("claim", key, dry))
+        subprocess.run = lambda cmd, **k: ("runner-domain-admit.py" in " ".join(map(str, cmd)) and calls.append(("admit",))) \
+            or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        SECOND[0] = {"keys": ["HTPR-80"], "wait": 7200}
+        assert try_claim(1, fresh, "board", False), "the hold names the runner's own waiting ticket: second claim"
+        assert calls == [("admit",), ("adopt", "HTPR-81"), ("task", "move", "HTPR-81", "--section", "In Progress"),
+                         ("claim", "HTPR-81", False)], calls
+        calls.clear()
+        assert try_claim(1, fresh, "board", True) and calls == [("claim", "HTPR-81", True)], "a dry run claims nothing"
+        calls.clear()
+        SECOND[0] = {"keys": ["HTPR-77"], "wait": 7200}
+        assert not try_claim(1, fresh, "board", False) and not calls, "a hold on some other ticket still refuses"
+        SECOND[0] = None
+        assert not try_claim(1, fresh, "board", False) and not calls, "no lane, no second claim"
+        SECOND[0] = {"keys": ["HTPR-80"], "wait": 7200}
+        assert not try_claim(1, fresh, "incident", False) and not calls, "an incident never rides the lane"
+    finally:
+        _LEDGER.clear()
+        SECOND[0] = None
+        subprocess.run = saved[10]
+        RUNNER_STATE, RUNNERS, SNAP, SECOND_OFF, try_claim = saved[:5]
+        globals()["ship_claim"] = saved[5]
+        adopt, ceo, record_claim, open_prs = saved[6:10]
 
 
 def escalate_self_test():
@@ -4403,14 +4646,15 @@ def main():
         owners = Owners(STATE, HERE / "roster.json")
         owners.prepare(SNAP["tickets"] + SNAP.get("incidents", []), write=not dry)
         release_timed_out_owners(owners, dry)
-        owned = sorted((t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == n),
-                       key=lambda t: (t["created"], t["key"]))
+        owned = sorted((t for t in SNAP["tickets"] if (t.get("_owner") or {}).get("runner") == n), key=owned_order)
         if owned and owned[0]["_owner"].get("engine"):
             set_engine(owned[0]["_owner"]["engine"])
         try:
             t, source = choose(n, dry)
         except Pick as p:
             t, source = p.t, p.source
+        if SECOND[0] and t["key"] not in SECOND[0]["keys"]:
+            log(f"second-ticket: R{n} holds {', '.join(SECOND[0]['keys'])} (waits {int(SECOND[0]['wait'] // 60)}m), takes {t['key']}")
         if source in ("own", "cross-qa", "park"):
             record_claim(n, t["key"], dry)
         if source == "park" and not dry:
