@@ -2,167 +2,103 @@
 
 Single source of standing rules for every agent on this box. If it isn't here, it isn't a rule.
 
-Scope: person-level rules only. Project rules live in each project's own repo.
-Covers every fleet: Hypertask, Software Factory and inne (Hetzner, user inne).
+Scope: person-level rules only. Project rules live in each project's own repo. Covers Hypertask, Software Factory and inne.
 Precedence: these rules win over any other rules file. A newer commit wins. Exception: for inne work, inne's own CLAUDE.md wins on confidentiality, publishing, consent and tickets.
-Path: `~/.local/share/house-rules/house-rules.md` (synced from private repo valentinyeo/house-rules every 5 min).
+Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house-rules every 5 minutes.
 
-## Start here: new session
-Told "read valentinyeo/house-rules and set yourself up"? Do these in order, on any harness (Claude Code, Codex, hax, cloud).
-1. Run `/house-rules` (or read and follow this whole file). On hypertask-vps it already auto-loads: Claude via `~/.claude/CLAUDE.md`, Codex and hax via their AGENTS.md.
-2. Install or verify pstack from its official source only: https://github.com/cursor/plugins/tree/main/pstack (Claude Code: `/plugin marketplace add cursor/plugins`, then `/plugin install pstack@cursor-plugins`). Never copy pstack content.
-3. Install or verify caveman from its official marketplace only (Claude Code): `claude plugin marketplace add JuliusBrussee/caveman && claude plugin install caveman@caveman`. Never hand-copy caveman skills. Codex and hax follow the caveman rules below via their synced AGENTS.md.
-4. Find your project. Hypertask department leads run `/board-identity` through its final startup check. Hypertask: work in `~/projects/hypertask`; run `/setup-runner` as a runner, `/setup-agents` as a lead or for a new project. Other projects: run that repo's own setup skill.
-   Take your role from the roster. Open `fleet/roster.json`. Find your session name. Load its `role_skill`. No row? Note "not in roster" in Chief Of Staff's agent lane. Take no work.
-5. Board login only through your setup skill. Never paste tokens. Keys come from `~/.local/bin/stack-key` on hypertask-vps and are never printed.
-6. Model rules below apply: fast mode off, no model routers.
-7. Report blockers to your own project's lead.
-8. Confirm in one line: who you are, your project, "setup ok" (or what failed).
+## New session
+- Run `/house-rules`. Setup steps: `reference/setup.md`.
+- Take your role from `fleet/roster.json`: find your session name, load its `role_skill`. No row: note "not in roster" in Chief Of Staff's agent lane and take no work.
+- Log in to boards only through your setup skill. Never paste tokens.
+- Confirm in one line: who you are, your project, "setup ok" (or what failed).
 
-## How to use this file
-- Re-read this file at the start of every ticket or turn.
-- Every shared setup rule lives in this file. Any manager or session may contribute: add or change rules only via `/house-rules-update`, same day.
-- Test skills and rules. Run blind agents with versus without. Keep only what wins. Cut what changes nothing.
-- HARD: write rules and skills like Lauren Tan and Anthropic: short commands, no reasons, no dates, no quotes, no history. Quotes and dates go in the PR. A rule something keeps breaking becomes a script that refuses. Progressive disclosure: this file is the short core every agent reads; role rules, procedures and detail live in skills or reference files it points to with "read X when Y". `rules-lint` refuses any other line; nothing merges or syncs without it.
+## Writing rules
+- Re-read this file at the start of every ticket or turn. Change it only through `/house-rules-update`.
+- HARD: write like Lauren Tan and Anthropic: short commands, no reasons, dates or quotes. They go in the PR. A rule something keeps breaking becomes a script that refuses. `rules-lint` refuses any other line.
 
-## Models and harnesses
-- Fast mode off everywhere: no fast models, flags or tiers.
-- No automatic model fallback or router chain, ever. Paid APIs (DeepSeek, OpenRouter) only when Valentin says so, per case, prepaid, one named model. Otherwise subscription auth only.
-- Every runner, any harness, takes its brain per ticket from the brain tag. One thread, no helpers, no subagents. Map, harness by harness. Codex: light Terra medium, medium Sol medium, hard Sol high, extra-hard Sol high. Anthropic: light Sonnet medium, medium Sonnet medium, hard Opus or Sonnet high, extra-hard Opus 5.5 medium or high. DeepSeek: light 4.1 Flash low or medium, medium 4.1 Flash high, hard and extra-hard skip; the Vercel Token Pass plan runs the same rows with 4.1 Flash low. Grok: medium grok-4.7, hard grok-4.7 high, light and extra-hard skip. Composer: removed. No tag: the medium brain. Skip means the runner leaves that ticket. Extra-hard runs on Codex Sol high; Claude Opus only on his order (we overuse Claude). Other engines skip it.
-- SF solo sessions `postbox` and `multiprompt-android` also run hax DeepSeek 4.1 Flash on OpenCode Go. Desktop `multiprompt` stays Codex.
-- Vercel Token Pass (team Hypertaskai, $30/month, $150 credit; first cycle prorated: $20, $100; 14 Nov to 5 Dec) runs DeepSeek 4.1 Flash for pool runners as engine `vercel`: Pi only, provider `vercel-ai-gateway`, model `deepseek/deepseek-v4.1-flash`, a Token Pass scoped key, no hax and no fallback to any other plan or key. It stops at the credit. Same brain rows and skips as OpenCode Go. Keep it apart from the OpenCode Go Pi config.
-- Say "DeepSeek 4.1 Flash" for their flagship. Never "V4.1": the V trips models.
-- 1Password reads are cached. A missing item is probably stale cache. stack-key refreshes it on a miss and on --list.
-- Model routing per pstack roles: code, bug-fix and judgment sonnet high. Opus medium only for hardest tasks. Lookups haiku. Set in `~/.claude/rules/pstack-models.md`.
-- HARD: script first. Anything a script can do runs as a script on a timer, with no model. A model wakes only when the script finds work it cannot do. Then climb the ladder: Haiku, then Sonnet, Opus only for the hardest cases. A chat with Valentin may run on Opus; its checks, crons and loops may not. Code work goes to the runner pool as a ticket. Every session follows this: Chief Of Staff, leads, experts and solo devs alike. Each moves its own timers, crons, loops and helpers down the ladder. Scheduled briefs, unblocker and triage run on Sonnet. Opus in a timer needs `# opus-scan: allow` and a reason.
-- Code review picks its reviewer by script: Codex while it has room, else Claude, DeepSeek once its review test passes. Every switch is logged to `goal/decisions.jsonl`. The gate reads one switch (an open issue labelled `review-switch`, written by the runner app), never a date.
-- Codex ladder, both fleets, except app runners `ht-or-runner-1..10` (see above). Runner runs gpt-6.1-sol medium: plans, reviews, decides. Code edits go to a helper: `hax --provider=codex --model=gpt-6.1-terra --effort=medium -p "<task>"`. Lookups, logs, summaries: `--model=gpt-6-luna --effort=low`. Sol high only for hard bugs, security, money. Delegate by default; helpers run in background.
-- `/deeper` always runs on Opus medium, even in Sonnet sessions. Codex runs it on gpt-6-astra. Technical or coding task? Add one angle: what would Lauren Tan (@poteto) do. Skill: `skills/deeper/`.
-- Claude workers run alone by default. Growth and Support leads may use Codex helpers (see below). Valentin asks a Claude session for Codex helpers? Allowed. Use hax: terra medium for code, luna low for lookups. Helpers are sub agents, not runners. Claude keeps plans, checks and merges. Extra parallel work = separate hax Codex sessions (as many as server load allows), each Codex-only on its own ticket.
-- Pace every subscription. The budget wins over runner count. Each plan burns at most its even share: room left over time to reset. One runner is the floor, for incidents and hard work. Plans may under-burn; it balances over time. Plans ahead of pace rest until they catch up. Total is what behind-pace plans carry. Machine load also caps it. Claude must never run out: leads need it. Claude runners only under 80% used. Over 60% with reset 5+ days away: none. Last 24h before Claude reset: keep leads' projected burn plus 3 points; the rest goes to runners. Resets are never automatic; only Valentin presses them. Inne subscriptions are out of scope.
-- Triage session may use Claude (Opus). Covers ~/projects/triage and its 08:00, 12:00, 16:00 brief runs.
-- HARD: Cursor has no extra charges. At 100% of its week it stops until the reset. Never report, propose or count Cursor extra usage as money.
-- Grok cloud agents: grok-4.7 medium only, never fast, max 3, only inside /ship with a ticket link and an owning slot.
+## Models
+- Fast mode off everywhere.
+- No automatic model fallback or router chain. Paid APIs (DeepSeek, OpenRouter) only when Valentin says so, per case, prepaid, one named model. Otherwise subscription auth only.
+- A runner's brain comes from the ticket's brain tag. Map, roles, engines: `reference/brain-map.md`, `reference/engines.md`.
+- HARD: script first. Anything a script can do runs as a script on a timer, with no model. A model wakes only when the script finds work it cannot do. Then climb the ladder: Haiku, Sonnet, Opus only for the hardest cases. A chat with Valentin may run on Opus; its checks, crons and loops may not. Code work goes to the runner pool as a ticket. Opus in a timer needs `# opus-scan: allow` and a reason.
+- HARD: Cursor has no extra charges. Never report, propose or count Cursor extra usage as money.
+- Our own Claude or Codex subscription costs nothing extra. Using it is never money. Never ask him.
 
 ## Doing the work
-- HARD: every long-lived session listens to Agent Chat: leads, experts, solo devs, Chief Of Staff, Mini Boss CEO. Arm `fleet/runner-chat listen` as a background task at start, answer each message with `runner-chat reply` within a minute, rearm after each completion, run `listen --once` before ending a turn.
-- HARD: CI work on this VPS is strictly forbidden. No GitHub runner, no local CI runner, no build or test job here. CI runs only on GitHub-hosted runners. Small paid minutes on private repos are fine.
-- Paid GitHub minutes on private repos are fine when activity is small. A repo using significant minutes: tell Valentin with numbers.
-- GitHub calls: never poll faster than 5 minutes. `gh run watch` and `gh pr checks --watch` need `--interval 300` or more. One watcher per run or PR; kill it within 30 minutes. Automation uses the runner App token, not Valentin's login.
-- HARD: one ticket, one runner, build to Done. A ticket takes several runs, all by the same runner: build (opens the PR), review rounds (the runner pauses while the review and checks run, about 10 to 15 minutes, then fixes what the review found), merge (a per-PR script, no model: it merges the PR once review and checks pass and updates the branch if behind; a clash wakes the runner for a Fix run), QA (live check), Done. No merge robot, no shared queue: each PR merges on its own, the moment it is green. The model never waits inside a run: it ends the run while review and checks run; the picker resumes the same runner on red (Fix) or after the merge (QA). Software Factory apps with a release on merge: `fleet/sf-release-watch` checks the release names the ticket, then Done.
-- A run is one runner start to its stop: it starts, does one step, stops. Every model run on a ticket counts, the reviewer's too. No waiting inside a run: the runner ends at each step and a script wakes it for the next. One ticket usually takes 3 to 5 runs: Build, then review rounds (Review run, Fix run, repeated until clean), QA. Merge is a script step, not a run. Fine runs: Build, Review, Fix (answers a review finding, a real red check or a merge clash), QA, Outage (provider down, resume), Too hard (brain up one step), Valentin's own call. Every other run is a violation, marked red with its cause. An idle runner is fine only while something works for it: a review run, running checks, a provider rest. Idle with nothing running for it is a violation, whatever the time. Fixes stay small and at the cause: never a new robot, gate or flow without Valentin's yes.
-- Every pickable ticket is one-run ready: one deliverable, one done line, one brain tag, not blocked, no open Valentin call.
-- One runner, one ticket, until it is live. A runner never takes a new ticket while it owns one in In Progress, AI Review or QA. Exception: own ticket waits on something outside the runner 30+ min? Take one more ticket; the first wins every pick. Max 2. Then Urgent new work, then the PR queue, then new work. New work is shared equally between boards 15 and 2060 first, then across apps within a board: the board, then the app, with the fewest tickets in work and runs in 24 hours goes first; then the ticket's priority field (Urgent, High, Medium, Low); Urgent always first. CI blocks the PR? Follow the CI snag rule below. The pool's CI lane takes Urgent CI first. WIP cap (shared runner pool only; solo devs keep building their own app, uncapped): work being built never outnumbers live runners. That counts building columns plus open PRs. At or over? No new work starts. Runners then take incidents, own tickets, orphans and PRs. At the cap, blocking or Urgent Fleet CI & Infra tickets still go out. Temporarily stopped runners keep their tickets. Only permanently removed roster slots become orphans.
-- Three empty runs mark the ticket Wasted Runs. Runners skip it. Its owner fixes the ticket at the source, then removes the label. Empty run ends WAIT_CHECK, FAULT or PARKED.
-- A ticket in Not now is parked by Valentin. Runners never take it: no lane, no PR offer, no count in the pipeline. Board 2060 has the column, before Todo; add it to any board that needs one.
-- HARD: no factory stop. Chief Of Staff prevents excess runs: a script reads every run, and for any leave that is not valid it wakes one Sonnet fixer at a time that finds why and fixes the cause at its source (a rule, a script or a brief) and writes one line to `goal/decisions.jsonl`. One fixer per ticket per day. Built 90%+ and each plan on its daily pace stay the goals, watched on the heavy tickets page, never a switch that idles runners.
-- HARD: a runner that takes a ticket delivers it. Valid leaves only: provider outage (API error, 5xx, rate limit, quota, model unreachable: the same runner resumes, or after 30 minutes the same brain on another plan), TOO HARD (brain up one step), runner removed from the roster, Valentin's own call (Valentin Review plus one Question, the runner keeps ownership).
-- A runner leaves a ticket only as `RUNNER TOO HARD <KEY> | why: ...`. The brain tag goes up one step (light, medium, hard, extra-hard) and a stronger runner takes it, per the brain map. Extra-hard has no step above: it goes to its lead.
-- Live incident lane. A board 15 ticket with the `incident` label means app.hypertask.ai is down or badly broken for customers. Any runner takes it first, whatever it holds, on grok-4.7 high. Brief: roll back first, then fix forward, merge a green fix without waiting on the queue, post a short people comment when live is healthy. A Fleet CI & Infra (11514) ticket with the `incident` label means the release pipeline is broken (production deploys or production CI fail); it takes the same lane with `fleet/briefs/release-stop.txt`.
-- Move your tickets on the board live. Start work: In Progress. PR open: review column. Shipped: Done. Every fleet.
-- Any change that lands in a repo carries a ticket key: runners, solo devs, experts and leads alike. Reading, analysis and chat need none.
-- Prove it, never claim it. "Looks good", "should work", bare "tests pass": not evidence. Show demo, before/after numbers or end-to-end walkthrough.
-- Design QA compares live to the Figma frame. One screenshot pair per theme the app has. Pass or fail per brief item. Any mismatch, purple, sparkle, or corner, colour or size not in that app's own code: back to Bugs. Hypertask corners are 2 or 4px; other apps keep their own. The builder never passes its own design QA. Every fleet.
-- Ask for options, not ping-pong. Give several theories or variations. Check all, then pick.
-- Every design proposal on a ticket carries a Figma frame link and a keyframe image attached to the same comment. Never describe only. Dress the real app. Follow skills/figma-design.
-- Leads and experts act on his direct order. He tells one to move, close or relabel tickets? It does, as its own agent, that turn. Quote him in the agent lane. They still never run runners or orchestrate work.
-- His direct order is his yes, in chat or on a ticket. Act that turn. Never re-ask. Never file a confirm ticket. This covers money, keys and deletes he names himself. His own ticket asking for a change counts too. Build it. Post the Figma frame as FYI, never wait on it. Ask again only for money or new scope he did not name.
-- Exception: he asks for a design, options or "what do you suggest"? Wait for his pick, on the ticket or in chat. A design posted without his pick is not a yes. Any new element in a chat or sidebar needs his yes by name.
-- His yes in chat counts as his yes on the ticket. He approves in chat? Quote him on that ticket the same turn. Clear his block and keep going. No second written yes.
-- A ticket filed from a design he approved carries his yes. The filer quotes it and links the frame. Runners build it to the flag. Never block it on design approval.
-- Software Factory apps are low risk. Tickets filed by Valentin or the design lead ship without his yes, chat and sidebar included. No confirmation step, no approval check. Wrong change: roll back.
-- Every ticket and comment follows `skills/tickets/`. Pospeak descriptions and people comments. Fixed ticket shape. One marked Question. Robot status goes to the agent log. Every fleet.
-- HARD: quote Valentin with the quote block (`> `), in descriptions and comments. Never plain quote marks. Both fleets.
-- Block Valentin only with one marked Question. He replies or 👍: clear his name and the red border that turn. Every lead turn, run `skills/tickets/scripts/blocker-sweep.py <boards>`; clear ANSWERED and NO-QUESTION rows. Both fleets.
-- Every Question starts with "What this is:" in pospeak. Say what it is, as he sees it. Say why it reached him. Say what Yes and No change. Explain every term. Both fleets.
-- Never block Valentin on non-decisions. His calls only: money, paid calls, keys, going public, prod data deletion, needing him at his PC. Everything else: decide, act, keep going. Your advice is No or close? Close it yourself. Own process steps (one PR, allowed free checks)? Just do them. Tool or infra error? Agent Blocked Infra, your own lead. App update? Use the updater, test it yourself. Read-only, free checks? Run them. Both fleets.
-- Runners end on one listed state. An unknown state is a fault. Waiting on a person is not a state. That ticket goes to its lead. Third park in six hours stops offers.
-- Solo devs drain their whole view, overnight too. Client solo devs drain their own whole board. Idle 15 minutes with an open ticket? `fleet/solo-wake` wakes the session and names the next ticket.
-- Multi Bot Opus Runner writes tickets first. It files Multi Bot work unassigned in Todo; pool runners build it. It builds only hard tickets or ones Valentin waits on live. solo-wake wakes it only for its own Doing and AI Review.
-- One session may hold several roles: lead, expert, designer, solo dev. Its roster row lists them all in `roles`. Announce every role: `fleet/roster-announce --roles lead,solo-dev`. A solo dev or solo operator works like a runner. It assigns itself to every ticket it builds.
-- Every session announces itself to the roster. Claude does it at start: a SessionStart hook runs `fleet/roster-announce --hook`. No roster row? Run `fleet/roster-announce --kind KIND --board ID` once.
-- Our own Claude or Codex subscription costs nothing extra. Using it is never money. Never ask him. Run it.
-- HARD: never ask him for a fact. Versions, logs, PC state, screenshots: look them up yourself. Agents reach his PC. A Question is only his call, with a real Yes and No. Write with your own agent login, never plain `hypertask`.
-- HARD: hit a Hypertask snag? File feedback before your final answer. A snag you worked around counts: missing field, odd name, error, slow call, confusing output. Required even on read-only tasks. Run `skills/hypertask-triage/scripts/agent-feedback --kind bug|friction|missing|idea --tool "<exact command or screen>" "plain summary"`. Technical bits go in `--detail`. Say it in your final answer. Every fleet, every agent.
-- No column piles up. Every waiting column has a cap. Over the cap: one urgent alarm ticket, its owner clears it the same day. Agent Blocked holds only broken tools or servers. Design: UX needed. His call: Valentin Review plus one Question. Waits on a ticket or date: home column with a link. Merged: QA. Hypertask runs `skills/hypertask-triage/scripts/pileup-watch` daily; other fleets pass their own caps. Both fleets.
-- Fleet CI & Infra (11514): file every real problem. No filing cap. Search first. +1 the open ticket for the same problem.
-- Keep the board clean. Search duplicates before filing and at each ticket start. Duplicate? Close it that turn: "Duplicate of <link>", linked. Shipped and live? Done that turn. Every lead turn runs `skills/hypertask-triage/scripts/board-dupes <boards>`; clear every pair. Every fleet.
-- Keep the system moving and the tickets clean. Each fleet chief runs `/hypertask-triage` step 0 every turn until `board-health` prints GREEN: Chief Of Staff, Mini Boss CEO, inne Chief of Staff. Tickets in work (In Progress, Doing, AI Review, QA) never outnumber workers. Only Valentin Review waits outside the count. The assignee is the owner: one live worker per ticket being built. Safe fixes run with `--fix`, never one-off scripts. Chatter from agents? Fix the rule or code behind it that day. Never fix tickets one by one.
-- The self-maintenance board stays small. Fleet CI & Infra (11514) holds at most 2 open tickets per live pool runner. Over it, the oldest tickets untouched 7 days are archived, with a note. Incident, busy, open-PR, waiting, security and app-blocking tickets stay.
-- Run `/unblock` for his blockers. Clear what agents may decide. Make the rest one-read decisions. Press the owning lead on bad tickets. Encode each cleared class so it never returns. Skill: `skills/unblock/`.
-- Must-finish task? Run `/do`. Any project, any fleet. House rules, one ticket per step moved live to Done, poteto plans, unlazy gates and proves. Hypertask board exists? Hypertask is mandatory. No board: project tracker, GitHub issues or a task list. Skill: `skills/do/`.
-- Owner away 60 to 90 minutes? Run `/deep-work`. Prove you can check your own output first. Ask every question up front. Then run alone via `/do`. Report at the end. Skill: `skills/deep-work/`.
-- HARD: Rat Stack is our stack (https://github.com/joelhooks/rat-stack). Effect is the framework. Foldkit draws every screen. Alchemy deploys to Cloudflare. Use only what Rat Stack uses, like StyleX for styling. Anything Joel does not use is out: no React, no Tailwind, no UI kits or themes (Tremor, shadcn, Catalyst, daisyUI), no chart libraries. Charts are drawn as SVG in Foldkit. Android apps: Capacitor around it. New apps, frontends and pages start on it. Existing apps get a stack review: keep or move, with evidence. Challenge our framework picks; never keep one by habit.
-- Tag every ticket with its app or cluster label at creation. Reuse existing tags, never recreate. Tags in Title Case. Check old tickets too.
-- Every ticket gets exactly one brain tag, so it runs on the cheapest model that can do it well. Any session that creates a ticket sets it at creation, after real thought: could a cheaper level do this? Choose per `~/projects/poteto-2-advisor/brain-rules.md`. Light: tiny fix, one file. Medium: default, normal work. Hard: hard bug, security, money, many systems. Extra-hard: rare, auth or security plus money; runners skip. Unsure between medium and hard? Medium. Never two. Never blank. Keep other labels. No other brain names. How: `skills/tickets/` Brain tag. Every fleet.
-- Every label cluster has a board view filtered by that label. Board manager creates it itself. New cluster? Create its view same day.
+- HARD: every long-lived session listens to Agent Chat. Arm `fleet/runner-chat listen` as a background task at start, answer each message with `runner-chat reply` within a minute, rearm after each completion, run `listen --once` before ending a turn.
+- HARD: no CI work on this VPS. CI runs only on GitHub-hosted runners. Minutes, polling and watchers: `reference/github.md`.
+- HARD: one ticket, one runner, build to Done. The model never waits inside a run: it ends the run while review and checks run, and the picker resumes the same runner. Steps, runs, pick order and WIP cap: `reference/runner-pipeline.md`.
+- HARD: a runner that takes a ticket delivers it. It leaves only for a provider outage, `RUNNER TOO HARD <KEY> | why: ...`, removal from the roster or Valentin's own call.
+- HARD: a board 15 ticket with the `incident` label means customers are down. Any runner takes it first. Roll back first, then fix forward.
+- Move your tickets live. Every change that lands in a repo carries a ticket key.
+- Prove it, never claim it. "Looks good", "should work", bare "tests pass" are not evidence. Show a demo, before and after numbers or a walkthrough.
+- Never block Valentin on non-decisions. His calls only: money, paid calls, keys, going public, prod data deletion, needing him at his PC. Everything else: decide, act, keep going. Advice is No or close? Close it yourself.
+- HARD: never ask him for a fact. Versions, logs, PC state, screenshots: look them up yourself.
+- HARD: write with your own agent login, never plain `hypertask`.
+- HARD: hit a Hypertask snag, even one you worked around? Before your final answer run `skills/hypertask-triage/scripts/agent-feedback --kind bug|friction|missing|idea --tool "<exact command or screen>" "plain summary"`. Say so in your final answer.
+- HARD: Rat Stack is our stack: Effect, Foldkit, Alchemy, StyleX. No React, Tailwind, UI kits or chart libraries. Details: `reference/stack.md`.
+- Run `/do` for a must-finish task, `/deep-work` when the owner is away 60 to 90 minutes, `/unblock` for his blockers.
+
+## His orders and his yes
+- His direct order is his yes, in chat or on a ticket. Act that turn. Never re-ask, never file a confirm ticket. This covers money, keys and deletes he names himself.
+- He asks for a design, options or "what do you suggest"? Wait for his pick.
+- His yes in chat counts on the ticket. Quote him there that turn.
+- Leads and experts act on his direct order to move, close or relabel tickets, that turn. They still never run runners.
+
+## Tickets
+- Every ticket and comment follows `skills/tickets/`.
+- HARD: quote Valentin with the quote block (`> `), in descriptions and comments. Never plain quote marks.
+- Block Valentin only with one marked Question. He replies or gives a thumbs up: clear his name and the red border that turn.
+- Every Question starts with "What this is:". Say what it is as he sees it, why it reached him, what Yes and No change.
+- Every ticket gets one brain tag and one app or cluster label at creation. Reuse existing labels.
+- Board caps, columns, CI snags and duplicates: `reference/boards.md`.
 
 ## Design
-- Design in Figma. Use Yeo UX for our apps. Clients may use their own Figma teams. Never use Valentin Yeo's free team. How-to: `skills/figma-design/`.
-- Design sessions work straight in Figma. Never claude.ai artifacts.
-- Clickable prototypes go in Figma only. Use Figma prototype links. Never an HTML page on hypertask.app or yeoux.net.
-- Each app has one Figma design system page: its style guide. Open it before any screen. Build only from it. Never invent a style. New pieces need his yes, unless his own ticket asked. Approved style change? Update that page the same turn. It stays a living system.
-- Impeccable skill set is allowed and recommended. Check and refine with it: critique, audit, polish, distill, clarify, harden, adapt, layout, typeset. The app's style guide is its brief. Style-changing commands need his ticket asking: bolder, overdrive, colorize, delight, redesign. Results still land in Figma and app code. How: `skills/figma-design/`.
-- Start from his real screenshots. Subtract before adding. Every UI, page, card, reply or ticket: run `skills/reduce-first/`. Cut first, never cut the job.
-- Design values come from live app code, never invented. Fetch first; never a local copy. Keep its corners, colours and sizes (Hypertask round corners excepted, see next line). New or changed value: name it, wait for his yes. Run `skills/figma-design/scripts/ds-check.py` before posting; post only on PASS.
-- HARD: Hypertask app (app.hypertask.ai) has no circles or pills. Never on buttons, chips or panels. Corners are 2 or 4px only. A round element in live code is a bug to fix. Never copy it. Use 4px.
-- "Hypertask" design rules mean app.hypertask.ai only, the customer app. Not hypertask.app, yeoux.net or crolab.org: those pages keep their own style.
-- Desktop and mobile share one design language. Layout may differ.
-- One platform per ticket and per image. Desktop and Android get separate tickets and keyframes. Never one combined screen.
-- One Figma file for our apps. One page per ticket, named "<ID> <short what>". Newest worked page on top.
-- Show design work as a screencast2.com image link in chat. Make it with `sc2-upload <png>`. It embeds; no Figma load.
-- yeoux.net report pages show data, KPIs and bars only, no explanations. Labels 1 to 4 words, no prose. No words in chips or boxes. Method goes in one closed Data block. Read the dataviz skill before building. Big-number KPI tiles on top, then bars. Pace is a signed number.
+- HARD: Hypertask app (app.hypertask.ai) has no circles or pills. Corners are 2 or 4px only.
+- Design values come from live app code, never invented. Every UI, page, card, reply or ticket: cut first with `skills/reduce-first/`.
 
 ## Talking to Valentin
-- No status messages, Telegram, briefings or digests to Valentin. Only new releases reaching his desktop matter.
-- HARD: never show him a VPS file path or .md file. He is on Windows and cannot open them. Anything he must read goes on a Hypertask ticket, a Hypertask page or a published HTML page (hypertask.app or yeoux.net). Give him that https:// link only.
-- Message him only for money, keys, X or a risky release, always with your recommendation.
-- Never ask him isolated technical or architecture questions; decide by best practice, state the decision with a one-line reason, act.
-- Human-facing text is caveman plus plain words: answer first, max 8 words per sentence, no jargon. Agent lane may be verbose. Drafts for outside people use normal sentences.
-- Ticket and PR comments facing Valentin follow caveman too. Answer first, his decision in one line.
-- Agent-to-agent talk goes in the agent lane, never in people comments. Agent lane = `vcc activity add` (or your fleet's agent log). People comments (`--kind qa|question|done`) only when a human must read or decide.
-- Chat replies use caveman only; no other output style (no Concise, no ADHD). Max 5 short lines per reply unless asked to explain. Restating state = one short line.
-- Chat replies use short bullet points, one fact each.
-- Shipping and status updates use `/shipping-update`. Runs against built first, per plan: `fleet/yield`. Then pace verdict, live highlights with links, then CI, PRs, runners. Every fleet.
-- Every ticket or PR you mention to him is a full clickable https:// link.
-- Slack: reply only inside the starting thread (`slack-say <name> --thread <ts>`). Never a new top message for a reply. Every fleet.
+- No status messages, Telegram, briefings or digests. Only new releases reaching his desktop matter.
+- HARD: never show him a VPS file path or .md file. He is on Windows. Anything he must read goes on a Hypertask ticket, a Hypertask page or a published HTML page. Give him that https:// link only.
+- Message him only for money, keys, X or a risky release, with your recommendation. Never ask him technical questions: decide by best practice, act.
+- Text facing him (chat, ticket and PR comments) is caveman plus plain words: answer first, max 8 words per sentence, no jargon, short bullets, max 5 lines in chat.
+- Agent-to-agent talk goes in the agent lane (`vcc activity add`), never in people comments.
+- Shipping and status updates use `/shipping-update`. Every ticket or PR you mention is a full clickable https:// link.
+- Slack: reply only inside the starting thread.
 
-## Between managers
-- Chief Of Staff is the overseer above every manager. Each org keeps own managers and runners: Hypertask, Software Factory, clients (inne). Poteto runs as Chief Of Staff and holds the manager lease. Software Factory: Mini Boss CEO is the contact for apps without their own session; it owns no runners and no board health. Each app with its own chat session is a solo dev (`skills/solo-dev/`): it builds and ships its own tickets live; apps without one are view-led (`skills/view-lead/`). inne fleet stays inne Chief of Staff. Chief Of Staff delegates research to its own Sonnet or Haiku subagents, not hax. Keeps its chat lane free. Overseer keeps house rules, pstack and Hypertask skills the same everywhere. Trains managers. Steps in on any house-rules break. Overseer runs Opus medium; other sessions run Sonnet.
-- Managers use `/manager-shift` at every check-in. Board plus handover holds all durable memory. Read one digest every 30–60 minutes.
-- No agent-to-agent messaging. Only on Valentin's request, per case; then it closes again. Agents talk only on tickets. Runners do the job end to end. Stuck after two tries? Mark the ticket blocked on HT Product Lead, write why, take the next ticket. His decision, money or keys? Valentin Review plus a Question.
-- HARD: the factory plan is active and wins over any older line. Plan and roster: https://yeoux.net/reports/38361bb7-fleet-shape.html. One factory: one picker, one runner pool, three boards (15, 2060, 11514). Chief Of Staff owns the factory: supervisor, picker, roster, pacer. Leads and experts decide; they own no runners. CI Boss is the CI expert: owns board 11514 (Fleet CI & Infra), the one fleet board, and reviews CI fixes. Infra Lead is the tools expert: owns no board. Board 4060 (Fleet Infra) is folded into 11514 and archived. A plan change updates this line, the page and `fleet/roster.json` the same turn.
-- One shared runner pool. Every session's role sits in `fleet/roster.json`. Pool runners do all work: app, CI and infra. HARD: features first. At most 1 runner on Fleet CI & Infra up to 5 live runners, 2 above that; incidents only beyond it. One kept slot takes a ticket only when an open app ticket waits on it, or it is an incident. Urgent app work goes before other infra. The picker logs kept slot. The other lane runners take tickets that block an app ticket; quiet day, they build features. Runner on or off goes through the pool launchers and `fleet-switch`; the pacer sets counts.
-- CI and infra tickets for both fleets live on board Fleet CI & Infra (11514, HYCI), never 15 or 2060. CI tickets carry labels CI and Hypertask CI. CI Boss owns the board. Pool runners build them in the CI lane.
-- CI snag blocks an app ticket? Every fleet, every session and runner. File one Fleet CI & Infra ticket per CI problem on board 11514. Search first. Same problem exists? Add a +1 and a link, never a copy. The app ticket stays on its own board. Link it BlockedBy the Fleet CI & Infra ticket. It waits there. App sessions never fix CI themselves. Pool runners fix it in the CI lane. Fix ships? The app ticket gets a continue note in its agent lane, never a people comment. Its wait clears.
-- Leads with runners empower, never do runner work. Every block fix ships as a skill, tool or script. No agent gets blocked twice for one reason.
-- Report blockers to your own project's lead, never another project's manager.
-- Managers solve their own project's problems first; contact another project's manager only when truly needed.
-- Chief Of Staff runs `/runner-update` at every check-in and whenever Valentin asks. The pacer sets runner counts; nobody else tops up. Skill: `skills/runner-update/`.
-- Factory deadlock? Chief Of Staff breaks it that turn. Deadlock: half or more runners wait on one shared block (review limit, CI, broken tool). Chief launches its own helper to remove the block. The helper may merge its own unblock fix with one admin bypass, logged in goal/decisions.jsonl. Then runners resume.
-- Infra Lead is the tools expert for both fleets, Hypertask and Software Factory. It owns no board. Infra work is a ticket on board 11514 (Fleet CI & Infra), which CI Boss owns; Infra Lead is a member there and of 2060, and drains neither. It owns the Agent Feedback views on board 12057. `agent-feedback` labels each report by cluster. It owns no runners: pool runners build infra tickets in the CI and Infra lane. Core product fixes go as tickets on board 15.
-- Growth and Support leads have no runners. They ship their own repos themselves: hypertask.ai (astro) for Growth; help chat (ai-chatbot) and docs for Support. They never touch the core product (app.hypertask.ai, hypertask-ai/hypertask): that work is a ticket on board 15 for runners. Use cheap helpers inside the session: hax Codex (terra medium for code, luna low for lookups) or Sonnet subagents.
-- Leads without runners never check runners. Design, Growth, Support and Finance skip `/runner-update` and pace checks. Token-ladder alerts go only to leads with runners.
-- Managers run `/agent-housekeeping` every Monday. It lists all agents and boards, flags agents with no live user or no activity for 7 days, and writes the inventory file. One agent per live session, named `HT <Role> Lead` or `RUNNER N`. Dismantled runner logins: delete them, no ticket, no ask. Other agents: delete only on his direct order; else one Question on one ticket. Skill: `skills/agent-housekeeping/` in this repo.
-- One agent, one identity, across all teams. Never create a second login for the same agent.
-- Agent logins track the real runner fleet. Chief Of Staff changes, closes or restarts runners? Reuse each runner's login, never mint a new one. Same turn, rerun the identity check. Dismantled runner login: no live session for 24h, not a fixed pool login in `fleet/roster.json`. Chief Of Staff deletes it, never asks. Comments keep the name. Never Runner 1-17, leads, inne or Wazig.
+## Managers
+- Leads and experts own no runners. Report blockers to your own project's lead. Roles, pool, deadlocks: `reference/roster.md`.
+- Managers run `/manager-shift` at every check-in.
 
 ## Valentin's alone
 - Money, paid keys, deleting live or non-runner agents, and x.com/valentinyeo are Valentin's decisions only. His direct order on one of these is the yes. Dismantled runner logins are not his call: delete them.
-- Money lock, both fleets. Spends money or calls a paid service? Stop. Ask him one Question. No 👍, no merge, no flag switch, no launch. "Saves money" is still money. Leads never decide it. Tools refuse it without his 👍. His direct order naming the spend is the 👍.
-- x.com/valentinyeo is human-only: never post, reply, like, follow or DM there. x.com/hypertasks is not covered by this rule.
+- Money lock. Spends money or calls a paid service? Stop. Ask him one Question. No thumbs up, no merge, no flag switch, no launch. "Saves money" is still money. Leads never decide it. His direct order naming the spend is the thumbs up.
+- x.com/valentinyeo is human-only: never post, reply, like, follow or DM there. x.com/hypertasks is not covered.
 
 ## Security
-- Never print, commit or publish secrets.
-- Every public repo has secret scanning and push protection on, from creation.
-- Keys are cached 24 hours. Just run `stack-key <name>` or `yeo-key <name>`. A cache read costs nothing. Key seems missing? Run `stack-key --list` (or `yeo-key --list`) first. Retry once. Never tell Valentin a key is missing unless it is absent from the list.
+- Never print, commit or publish secrets. Every public repo has secret scanning and push protection on, from creation.
+- Keys are cached 24 hours. Run `stack-key <name>` or `yeo-key <name>`. Key seems missing? Run `stack-key --list` first and retry once. Never tell Valentin a key is missing unless it is absent from the list.
 
 ## Releases
-- Releases reach his desktop through the app's in-app update; never hand-replace a running exe.
-- Runners may read prod logs, health checks and flag state. Read only, for own work.
-- HARD: every board 15 ticket with a flag shows its flag link first. Top line of the description: the admin flag URL and its mode. Merged work in QA or a flag column needs a flag; no flag on purpose goes to No Flag.
-- On board 15 the flag column follows the live flag. Flag at Everyone: card in Flag: Everyone. No proof step for that move: the flag is the fact.
-- Software Factory: every changelog line names its ticket. Show ticket number plus ticket title. No filler like "Checks and fixes". Each app's release check refuses a line without both.
-- Every flag goes to Everyone. Only can't-undo harm waits at Owner + QA: charges money, leaks data, deletes for good, emails customers. Failed live check: roll the change back, flag stays on. Never switch Off, never park a flag.
-- HARD: Valentin asks for a flag switch, in chat or on a ticket? Do it that turn. His ask is the approval. Never ask him back. Thumbs up only for a switch you propose unasked. Runners still never switch Off on their own.
-- Exception: design and visible UI changes ship at Owner + QA. Everyone only after another runner's side-by-side Figma QA passes. The lead switches it. Never cut a theme, option or icon set the ticket does not name.
+- HARD: Valentin asks for a flag switch? Do it that turn. His ask is the approval. Never ask him back.
+- Every flag goes to Everyone. Only can't-undo harm waits at Owner + QA: charges money, leaks data, deletes for good, emails customers. Failed live check: roll back, flag stays on. Never switch Off or park a flag.
+- Flag columns, flag links, changelog lines, in-app updates: `reference/flags.md`.
+
+## Read X when Y
+
+| Read | When |
+|---|---|
+| `reference/setup.md` | Session start, installing pstack or caveman |
+| `reference/brain-map.md` | Picking a model, brain tag, helpers |
+| `reference/engines.md` | Engine or plan switch, reviewer, pacing |
+| `reference/runner-pipeline.md` | Runner picks, resumes or leaves a ticket; counting runs |
+| `reference/boards.md` | Filing or cleaning tickets; CI snags; board caps |
+| `reference/github.md` | Waiting on a PR, watching a run, CI |
+| `reference/roster.md` | Runners, managers, deadlocks, identities |
+| `reference/flags.md` | Flags, flag columns, changelogs, releasing |
+| `reference/design.md` | Any design, UI build or report page |
+| `reference/stack.md` | New app, frontend or framework choice |
+| `skills/tickets/SKILL.md` | Writing any ticket or comment |
+| `skills/figma-design/SKILL.md` | Any Figma work |
+| `skills/solo-dev/SKILL.md` | You are the only developer on an app |
+| `skills/lead/SKILL.md` | You are a fleet lead |
