@@ -44,9 +44,15 @@ COLUMNS = ("Doing", "AI Review")
 # ticket label -> (GitHub repository, release tag prefix). Only apps whose release workflow runs on merge belong here.
 APPS = {"multiprompt": "valentinyeo/multiprompt", "wazig": "valentinyeo/postbox", "postbox": "valentinyeo/postbox"}
 # Fleet CI & Infra tickets whose PR is not in a Software Factory app repo (HYCI-388). SF_EXTRA_REPOS overrides, comma separated.
-EXTRA_REPOS = [r for r in (os.environ.get("SF_EXTRA_REPOS") or "valentinyeo/house-rules").split(",") if r]
+# HYCI-408 (14 Nov): HTPR-9133/9134/9136 (PRs in astro-rs) and HYCI-436 (PR in the multiprompt repo) were woken again and again to wait on
+# checks, because the picker saw no PR for them. astro-rs holds the hypertask.ai site PRs of board 15; multiprompt holds a CI ticket's PR.
+EXTRA_REPOS = [r for r in (os.environ.get("SF_EXTRA_REPOS") or "valentinyeo/house-rules,valentinyeo/astro-rs,hypertask-ai/astro-rs").split(",") if r]
 EXTRA_BOARD = "11514"
 EXTRA_COLUMNS = ("In Progress", "AI Review")
+# (board, columns, repos read for that board). A board 15 ticket is matched only against the PRs of its site repos here; the main repo
+# PRs of board 15 are the picker's own read (one_run_hold).
+EXTRA_SWEEPS = [(EXTRA_BOARD, EXTRA_COLUMNS, EXTRA_REPOS + ["valentinyeo/multiprompt"]),
+                ("15", ("In Progress", "AI Review", "QA"), [r for r in EXTRA_REPOS if "astro-rs" in r])]
 LOOKBACK_S = 24 * 3600  # a PR merged longer ago than this is not this ticket's release wait
 LOOKUP_CAP = 10  # tickets per repo per sweep looked up by number when no recent PR names them (HYCI-431)
 STALL_S = 3 * 3600  # a release this late is a model's job
@@ -331,19 +337,21 @@ def sweep(hub, now):
 
 
 def sweep_extra(hub, now, out):
-    """Fleet CI & Infra tickets with a PR in EXTRA_REPOS (HYCI-388). A failed read adds nothing: the Software Factory rows stand and
-    these tickets are simply not held (fails open, never a stuck ticket)."""
-    try:
-        rows = hub.tickets(EXTRA_BOARD, EXTRA_COLUMNS)
-        prs = []
-        for repo in EXTRA_REPOS:
-            prs += hub.prs(repo)
-    except RuntimeError:
-        return
-    for key, _, _, section in rows:
-        state, detail, since = classify_extra(key, prs)
-        if state != "none":
-            out[key] = {"state": state, "detail": detail, "since": since}
+    """Tickets whose PR lives outside the Software Factory app repos and outside hypertask-ai/hypertask (HYCI-388, HYCI-408): see
+    EXTRA_SWEEPS. A failed read adds nothing for that sweep: the Software Factory rows stand and these tickets are simply not held
+    (fails open, never a stuck ticket)."""
+    for board, columns, repos in EXTRA_SWEEPS:
+        try:
+            rows = hub.tickets(board, columns)
+            prs = []
+            for repo in repos:
+                prs += hub.prs(repo)
+        except RuntimeError:
+            continue
+        for key, _, _, section in rows:
+            state, detail, since = classify_extra(key, prs)
+            if state != "none" and key not in out:
+                out[key] = {"state": state, "detail": detail, "since": since}
 
 
 def write(path, doc):
@@ -494,6 +502,15 @@ def self_test():
     doc, moved, merged = sweep(hub, t(21, 40))
     assert doc["tickets"]["HYCI-404"]["state"] == "pr" and "HYCI-9" not in doc["tickets"] and doc["tickets"]["SOFT-2273"]["state"] == "pr", doc
     assert not hub.merged and not hub.done, "an extra repo is never merged or moved by the script"
+    # HYCI-408: a board 15 site ticket (PR in astro-rs) and a CI ticket with a PR in the multiprompt repo read the same way
+    site = dict(hy, number=5, title="HTPR-9133 [IMPROVE] serve install scripts unchanged")
+    hub._extra = [("HTPR-9133", 9133, set(), "In Progress"), ("HYCI-436", 436, set(), "AI Review")]
+    hub.prs = lambda repo: [site, dict(hy, number=991, title="HYCI-436: Drive the chat-model verify")] if repo in EXTRA_REPOS + ["valentinyeo/multiprompt"] else [pr_open]
+    doc, _, _ = sweep(hub, t(21, 40))
+    assert doc["tickets"]["HTPR-9133"]["state"] == "pr" and doc["tickets"]["HYCI-436"]["state"] == "pr", doc
+    assert ("15", ("In Progress", "AI Review", "QA")) == EXTRA_SWEEPS[1][:2] and all("astro-rs" in r for r in EXTRA_SWEEPS[1][2]), EXTRA_SWEEPS
+    hub._extra = [("HYCI-404", 404, set(), "AI Review"), ("HYCI-9", 9, set(), "In Progress")]
+    hub.prs = lambda repo: [hy] if repo in EXTRA_REPOS else [pr_open]
 
     def unreadable(repo):
         if repo in EXTRA_REPOS:
