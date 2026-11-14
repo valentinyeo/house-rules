@@ -58,6 +58,13 @@ STALL = re.compile(r"no model reply|reply cap|reply stalled", re.I)
 # back every 20 to 30 minutes while the CI repair it named was still open. A line that names another ticket as what it is blocked by,
 # awaiting or blocked on is a wait on that ticket: PARKED with waits, which fleet/park turns into a BlockedBy hold.
 TICKET_WAIT = re.compile(r"waits on|waiting on|parked on|BlockedBy|blocked by|blocked on|awaiting|awaits", re.I)
+# 14 Nov (HYCI-451, SOFT-2325 runs 1 to 3 on runner 3): "RUNNER IDLE SOFT-2325 waits on Chief Of Staff for Zoho access" matched no rule above (HUMAN reads
+# only Valentin, TICKET_WAIT needs another ticket key), so it fell to the plain RUNNER IDLE wait. The picker brought the ticket back 90 minutes later, the run idled
+# again, and the third run ended FAULT "waiting on a person is not a state". A wait on a lead is not pool work: the run ends PARKED on its lead, the launcher runs
+# fleet/park --lead, and no run follows. A line that also names checks, a recheck, a PR or CI stays a wait (WAIT and PR_WAIT are read first).
+LEAD_WAIT = re.compile(r"\b(?:waits?|waiting|blocked|awaits?|awaiting|needs?)\b[^.;]{0,30}\b(?:Chief Of Staff|(?:HT )?(?:[A-Za-z&]+ ){0,2}Lead|the lead)\b", re.I)
+
+
 # HYCI-408 (HTPR-7766, 8 and 9 Nov: 165 runs in nine hours, median 0.6 minutes apart): a runner whose board write was
 # refused (`vcc: ... has no board login; refusing to write`, a write guard, an identity or permission guard) ended as
 # `RUNNER IDLE board-write-blocked`. That read as a plain wait, the picker brought the same ticket back, and nothing
@@ -204,6 +211,8 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False, progress=
         keys = [k for k in TICKET.findall(line) if k != ticket]
         if keys:
             return _out("PARKED", "PARKED", park="waits", waits=",".join(dict.fromkeys(keys)), detail=line[:160])
+    if line and LEAD_WAIT.search(line) and not PR_WAIT.search(line):
+        return _out("PARKED", "PARKED", park="lead", detail=line[:160])
     if line and re.search(r"IDLE_NO_TICKET|no eligible ticket|no free ticket", line, re.I):
         return _out("IDLE_NO_TICKET", "IDLE_NO_TICKET", detail=line[:300])
     if line and re.search(r"\bIDLE_CAP\b|wip:.*closed", line, re.I):
@@ -565,6 +574,12 @@ def self_test():
     assert nl["state"] == "WAIT_CHECK" and nl["detail"].startswith("script owns") and nl["park"] == "", nl
     assert classify("", 0, 409, "", 0, "SOFT-1", progress=0)["state"] == "FAULT"
     assert classify("", 1, 409, "", 0, "SOFT-1", progress=3)["state"] == "FAULT" and classify("", 0, 60, "", 0, "SOFT-1", progress=3)["state"] == "FAULT"
+    # HYCI-451, SOFT-2325: a wait on a lead is parked on that lead (fleet/park --lead), never brought back as a plain wait. Checks, a recheck or a PR stay waits.
+    for lw in ("RUNNER IDLE SOFT-2325 waits on Chief Of Staff for Zoho access", "RUNNER IDLE awaiting lead approval handling", "RUNNER IDLE waits on HT Product Lead for the yes"):
+        lp = classify(lw, 0, 400, "", 0, "SOFT-2325")
+        assert lp["state"] == "PARKED" and lp["park"] == "lead", (lw, lp)
+    for cw in ("RUNNER IDLE checks pending on PR 3502, waiting on the lead reviewer", "RUNNER IDLE waiting on fresh checks, recheck 10:51Z", "RUNNER IDLE checks pending"):
+        assert classify(cw, 0, 400, "", 0, "SOFT-2325")["state"] == "WAIT_CHECK", cw
     assert classify("", 0, 400, "pacer", 0, "")["state"] == "IDLE_PACER"
     cap = classify_pick("none: wip: 4 of 4, new work closed (not counted: waiting 2)", "")
     assert cap["state"] == "IDLE_CAP" and "not counted: waiting 2" in cap["detail"]
