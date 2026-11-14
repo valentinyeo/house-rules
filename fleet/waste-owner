@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""Owner of the "Wasted Runs" pile (HYCI-430). fleet/waste-mark adds the label after three empty runs; this script judges every
+labelled ticket and removes the label when its cause is gone. No model: a script reads, decides and writes.
+
+Valentin asleep, 14 Nov 02:35 audit: about 50 tickets carried the label and nobody owned the removal, so a ticket like HTPR-7861
+sat out for good. fleet/pick skips every ticket with the label, so a stale label is a ticket the factory never builds.
+
+Per ticket it reads the last three run endings from the run ledger (state, reason, source), the ticket (column, status, PRs,
+description) and its BlockedBy links. Verdicts, first match wins:
+  REMOVE  ticket closed       archived, or in a Done / Flag / No Flag column: nothing left to wake it for
+  REMOVE  PR merged           one of its PRs merged and none is open
+  REMOVE  progress            a run built or finished something after the empty ones (state BUILDING or DONE, or ledger progress)
+  REMOVE  block closed        at least two of the three endings name a blocker (BlockedBy, ci-blocked, waits-on) and none is open now
+  REMOVE  provider back       all three endings name a provider outage (5xx, rate limit, quota, overloaded) and the plan is no
+                              longer resting (no live provider-busy mark for the engines that ended)
+  REMOVE  rewritten           title, description or brain tag differs from the copy kept when the ticket was first seen here
+  KEEP    <cause>             waiting on checks or PR, blocker open, needs a person, provider down, or no end line: the cause class
+                              is printed and kept in the state file; nothing is written to the board
+A removal is one `vcc task update --remove-labels` and one agent-lane note (`vcc activity add`, no people comment). fleet/waste-mark
+re-marks the ticket only after three new empty runs, so a removal that was wrong costs three runs, never a loop.
+
+    fleet/waste-owner              judge and remove; prints one line per ticket, then the counts
+    fleet/waste-owner --dry-run    same lines ("would remove:"), writes nothing to the board or the state file
+    fleet/waste-owner --self-test  synthetic ledger and stub board, no network
+Timer: systemd/waste-owner.timer, hourly at :40.
+"""
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from collections import Counter
+from pathlib import Path
+
+HOME = Path.home()
+os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
+LEDGER = Path(os.environ.get("WASTE_OWNER_LEDGER", HOME / ".local/state/ht-or-runners/run-ledger.jsonl"))
+RUNNER_STATE = Path(os.environ.get("WASTE_OWNER_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
+STATE = Path(os.environ.get("WASTE_OWNER_STATE", HOME / ".local/state/waste-owner/seen.json"))
+LABEL = "Wasted Runs"
+PR_FIX_RUNS = 2  # house rules pr_fix_max: a red PR frees its ticket for at most this many fix runs
+BOARDS = (15, 2060, 11514)
+RUN_STATES = {"WAIT_CHECK", "FAULT", "PARKED", "BUILDING", "DONE"}  # a run that ended; idle and no-ticket rows are not runs
+DONE_COLUMN = re.compile(r"^(done|flag:|no flag)", re.I)
+BLOCKED = re.compile(r"BlockedBy|blocked (?:on|by)|ci-blocked|waits?[- ]on|waiting on", re.I)
+PROVIDER = re.compile(r"\b5\d\d\b|rate.?limit|quota|overloaded|usage limit|api error|unreachable|provider (?:down|outage|busy)|credit", re.I)
+PERSON = re.compile(r"valentin|needs? (?:a )?(?:key|access|his|him|you)|\bPC\b|permission|login|credential|decision|approval|sign-?off", re.I)
+CHECKS = re.compile(r"\bchecks?\b|\bCI\b|\bPR\b|pending|in flight|deploy|merge|conflict|red\b|review", re.I)
+IDLE_PREFIX = re.compile(r"^(?:(?:CI|INFRA|MP) )?RUNNER IDLE\s*")
+TICKET_KEY = re.compile(r"\b(?:HTPR|HYCI|HTFE|SOFT|IGSH|HEFE)-\d+\b")
+SF_KEY = re.compile(r"^(?:IGSH|SOFT)-(\d+)$")
+
+
+def same(a, b):
+    """IGSH-1274 and SOFT-1274 are one ticket (the board renamed the prefix; the ledger keeps the old one)."""
+    ma, mb = SF_KEY.match(a or ""), SF_KEY.match(b or "")
+    return a == b or bool(ma and mb and ma[1] == mb[1])
+
+
+def read_ledger(path):
+    rows = []
+    try:
+        for line in open(path):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and r.get("ticket") and r.get("ts") and (r.get("state") or r.get("result")) in RUN_STATES:
+                r["state"] = r.get("state") or r.get("result")
+                rows.append(r)
+    except OSError:
+        pass
+    return sorted(rows, key=lambda r: r["ts"])
+
+
+def last_three(rows, key):
+    return [r for r in rows if same(r["ticket"], key)][-3:]
+
+
+def reason_of(r):
+    text = " ".join(str(r.get("reason") or r.get("detail") or "").split())
+    return IDLE_PREFIX.sub("", text)
+
+
+def fingerprint(t):
+    brain = sorted(l for l in t["labels"] if l.startswith("brain-"))
+    return hashlib.sha1(json.dumps([t["title"], t["description"], brain]).encode()).hexdigest()[:16]
+
+
+def plan_resting(engine):
+    """A live provider-busy mark for this engine: its plan is still down or spent."""
+    try:
+        return int((RUNNER_STATE / f"provider-busy-{engine}").read_text().strip() or 0) > time.time()
+    except (OSError, ValueError):
+        return False
+
+
+def judge(t, runs, blockers_open, seen, pr_states=None, fixes=0):
+    """(verdict, tag, why). verdict is "remove" or "keep". `seen` is this ticket's kept fingerprint, or None. `pr_states` is the live
+    state word of each open PR of the ticket (fleet/pick one_run_state), [] when it has none, None when GitHub could not be read.
+    `fixes` is how many times this script already freed the ticket for a red PR (cap PR_FIX_RUNS, the house pr_fix_max)."""
+    if t["status"] != "Normal" or DONE_COLUMN.match(t["section"] or ""):
+        return "remove", "ticket closed", f"status {t['status']}, column {t['section']}"
+    if t["merged_pr"] and not t["open_pr"]:
+        return "remove", "PR merged", "a PR of this ticket merged and none is open"
+    if runs and runs[-1]["state"] in ("BUILDING", "DONE"):
+        return "remove", "progress", f"the latest run ended {runs[-1]['state']}"
+    reasons = [reason_of(r) for r in runs]
+    if runs and sum(1 for x in reasons if BLOCKED.search(x)) >= 2 and not blockers_open:
+        return "remove", "block closed", "the runs waited on a blocker and none is open"
+    engines = {str(r.get("engine") or "") for r in runs}
+    if runs and all(PROVIDER.search(x) for x in reasons) and not any(plan_resting(e) for e in engines if e):
+        return "remove", "provider back", f"provider outage reasons, no live rest on {', '.join(sorted(engines)) or 'any engine'}"
+    if seen and seen != fingerprint(t):
+        return "remove", "rewritten", "title, description or brain tag changed since the label was first seen"
+    if blockers_open:
+        return "keep", "blocker open", f"BlockedBy {', '.join(blockers_open)}"
+    joined = " | ".join(reasons)
+    # The endings say "waiting on checks or a PR". Read the live PR: the wait is over when no PR is open, the checks finished, or the
+    # PR went red, conflicting or got a change request (a PR fix run is work for the owner). Only a PR still running keeps the label.
+    if pr_states is not None and sum(1 for x in reasons if CHECKS.search(x)) >= 2:
+        if not pr_states:
+            return "remove", "PR gone", "the runs waited on a PR and none is open"
+        if any(w == "pending" for w in pr_states):
+            return "keep", "PR checks running", f"{len(pr_states)} open PR, checks still running: a script owns the wait"
+        if any(w in ("red", "conflicting", "change request") for w in pr_states):
+            if fixes >= PR_FIX_RUNS:
+                return "keep", "PR fix cap", f"freed {fixes} times for a red PR already; the owner reads it"
+            return "remove", "PR needs a fix run", f"the runs waited on checks; the PR is now {', '.join(sorted(set(pr_states)))}"
+        return "remove", "checks finished", f"the runs waited on checks; the PR is now {', '.join(sorted(set(pr_states)))}"
+    if not any(reasons):
+        return "keep", "no end line", "the runs gave no reason"
+    if PERSON.search(joined):
+        return "keep", "needs a person", joined[:100]
+    if PROVIDER.search(joined):
+        return "keep", "provider down", joined[:100]
+    if t["open_pr"] and CHECKS.search(joined):
+        return "keep", "waiting on PR", joined[:100]
+    if CHECKS.search(joined):
+        return "keep", "waiting on checks", joined[:100]
+    return "keep", "unclear", joined[:100]
+
+
+def vcc(*args):
+    r = subprocess.run(["vcc", "--json", *args], capture_output=True, text=True, timeout=300)
+    try:
+        out = json.loads(r.stdout[r.stdout.index("{"):])
+    except ValueError:
+        out = None
+    if r.returncode != 0 or out is None or out.get("success") is False:
+        raise RuntimeError(f"vcc {' '.join(args[:3])} failed: {(r.stderr or r.stdout).strip()[-200:]}")
+    return out
+
+
+def names(labels):
+    return [(x.get("name") if isinstance(x, dict) else str(x)) for x in labels or []]
+
+
+class Board:
+    """The real board through vcc. The self-test swaps in a stub with the same four methods."""
+
+    def pile(self):
+        out = []
+        for b in BOARDS:
+            for t in vcc("task", "list", "--project", str(b), "--labels", LABEL, "--limit", "300").get("tasks", []):
+                out.append(t["ticketNumber"])
+        return out
+
+    def get(self, key):
+        t = vcc("task", "get", key)["tasks"][0]
+        prs = t.get("pullRequests") or []
+        return {"key": t.get("ticketNumber") or key, "title": t.get("title") or "", "description": t.get("description") or "",
+                "labels": names(t.get("labels")), "section": t.get("section") or "", "status": t.get("status"),
+                "open_pr": any(p.get("lifecycle") == "open" for p in prs), "merged_pr": any(p.get("lifecycle") == "merged" for p in prs)}
+
+    def blockers_open(self, key, named=()):
+        """Open tickets this one waits on: its BlockedBy links plus the tickets the runners named in their reasons."""
+        nums = []
+        for r in vcc("task", "relations", key).get("relations", []):
+            other = r.get("otherTask") or {}
+            if r.get("relationType") == "BlockedBy" and r.get("direction") == "outgoing" and other.get("status") != "Archive":
+                nums.append(other.get("ticketNumber"))
+        open_ = []
+        for num in dict.fromkeys(nums + [n for n in named if n not in nums]):
+            try:
+                raw = vcc("task", "get", num)["tasks"][0]
+                closed = raw.get("status") == "Archive" or raw.get("sectionIsDone") or DONE_COLUMN.match(raw.get("section") or "")
+            except Exception:
+                closed = False  # unreadable: assume open, never remove on a lost read
+            if not closed:
+                open_.append(num)
+        return open_
+
+    def pr_states(self, key, labels):
+        """State words of the ticket's open PRs from GitHub (App token only), [] when none is open, None when unreadable."""
+        try:
+            pick = self._pick()
+            if not pick:
+                return None
+            if SF_KEY.match(key):
+                prs = pick.sf_open_prs({"board": "2060", "labels": labels, "key": key})
+                prs = [p for p in prs if pr_number_matches(pick, p, key)]
+            else:
+                prs = [p for p in pick.open_prs() if pick.pr_ticket(p) == key]
+            return [pick.one_run_state(p)[0] for p in prs]
+        except Exception:
+            return None
+
+    def _pick(self):
+        """fleet/pick loaded as a module (its PR readers and one_run_state are the picker's own view of a PR). None without a GitHub
+        App token: the default gh login must never be used from here."""
+        if not hasattr(self, "_mod"):
+            self._mod = None
+            if subprocess.run(["gh-app-token"], capture_output=True, text=True).stdout.strip():
+                from importlib.machinery import SourceFileLoader
+                from importlib.util import module_from_spec, spec_from_loader
+                loader = SourceFileLoader("pickmod", str(Path(__file__).resolve().parent / "pick"))
+                mod = module_from_spec(spec_from_loader("pickmod", loader))
+                loader.exec_module(mod)
+                mod.SNAP = {"prs": None, "tickets": [], "rel": {}}
+                self._mod = mod
+        return self._mod
+
+    def remove_label(self, key):
+        vcc("task", "update", key, "--remove-labels", LABEL)
+
+    def note(self, key, text):
+        vcc("activity", "add", key, "--text", text)
+
+
+def pr_number_matches(pick, p, key):
+    """A Software Factory PR names its ticket as IGSH-n or SOFT-n; compare by number."""
+    named = pick.pr_ticket(p)
+    return bool(named) and same(named, key)
+
+
+def removal_note(tag, why, runs):
+    ends = "; ".join(f"{r['state']} {reason_of(r)[:70]}" for r in runs) or "no run endings on file"
+    return (f"Wasted Runs removed by fleet/waste-owner: {tag} ({why}). Last endings: {ends}. "
+            "Runners may take this ticket again; three new empty runs mark it again.")
+
+
+def sweep(keys, rows, board, seen, dry=False):
+    """Returns (lines, counts, seen map, errors)."""
+    lines, errors, counts, seen = [], [], Counter(), dict(seen)
+    for key in sorted(keys):
+        try:
+            t = board.get(key)
+            if LABEL not in t["labels"]:
+                continue
+            runs = last_three(rows, key)
+            looks_blocked = sum(1 for r in runs if BLOCKED.search(reason_of(r))) >= 2
+            named = [k for r in runs if BLOCKED.search(reason_of(r)) for k in TICKET_KEY.findall(reason_of(r)) if not same(k, key)]
+            blockers = board.blockers_open(key, named) if looks_blocked or not runs else []
+            wants_pr = sum(1 for r in runs if CHECKS.search(reason_of(r))) >= 2 and not t["merged_pr"]
+            pr_states = board.pr_states(key, t["labels"]) if wants_pr else None
+            verdict, tag, why = judge(t, runs, blockers, seen.get(key), pr_states, seen.get(f"fix:{key}", 0))
+            seen.setdefault(key, fingerprint(t))
+            if verdict == "remove":
+                if tag == "PR needs a fix run":
+                    seen[f"fix:{key}"] = seen.get(f"fix:{key}", 0) + 1
+                lines.append(f"{'would remove' if dry else 'removed'}: {t['key']}  {tag}: {why}")
+                counts[f"removed: {tag}"] += 1
+                if not dry:
+                    board.remove_label(t["key"])
+                    seen.pop(key, None)
+                    try:
+                        board.note(t["key"], removal_note(tag, why, runs))
+                    except Exception as e:
+                        errors.append(f"{key}: label removed, note failed: {e}")
+            else:
+                lines.append(f"kept: {t['key']}  {tag}: {why}")
+                counts[f"kept: {tag}"] += 1
+        except Exception as e:
+            errors.append(f"{key}: {e}")
+    return lines, counts, seen, errors
+
+
+def load_seen():
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_seen(seen):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=STATE.parent)
+    with os.fdopen(fd, "w") as f:
+        json.dump(seen, f, sort_keys=True)
+    os.replace(tmp, STATE)
+
+
+class Stub:
+    def __init__(self, tickets, blockers=None, prs=None):
+        self.tickets, self.blockers, self.removed, self.notes, self.prs = tickets, blockers or {}, [], [], prs or {}
+
+    def pr_states(self, key, labels):
+        return self.prs.get(key)
+
+    def pile(self):
+        return list(self.tickets)
+
+    def get(self, key):
+        return self.tickets[key]
+
+    def blockers_open(self, key, named=()):
+        return self.blockers.get(key, [])
+
+    def remove_label(self, key):
+        self.removed.append(key)
+        self.tickets[key]["labels"].remove(LABEL)
+
+    def note(self, key, text):
+        self.notes.append((key, text))
+
+
+def self_test():
+    global RUNNER_STATE
+    RUNNER_STATE = Path(tempfile.mkdtemp())  # no live provider-busy marks
+
+    def tk(**kw):
+        return {"key": kw.pop("key"), "title": "t", "description": "d", "labels": [LABEL, "brain-medium"], "section": "Backlog",
+                "status": "Normal", "open_pr": False, "merged_pr": False, **kw}
+
+    def runs(key, reason, n=3, state="WAIT_CHECK", engine="codex", **extra):
+        return [{"ts": f"2026-11-14T01:{i:02d}:00Z", "ticket": key, "state": state, "engine": engine, "reason": f"RUNNER IDLE {reason}", **extra}
+                for i in range(n)]
+
+    tickets = {"A-1": tk(key="A-1", section="Done"), "B-2": tk(key="B-2", merged_pr=True), "C-3": tk(key="C-3"),
+               "D-4": tk(key="D-4"), "E-5": tk(key="E-5"), "F-6": tk(key="F-6"), "G-7": tk(key="G-7", open_pr=True),
+               "H-8": tk(key="H-8"), "I-9": tk(key="I-9"), "J-10": tk(key="J-10"), "IGSH-77": tk(key="SOFT-77")}
+    rows = (runs("A-1", "x") + runs("B-2", "x") + runs("C-3", "blocked on HYCI-1 waiting") + runs("D-4", "blocked on HYCI-2")
+            + runs("E-5", "API error 529 overloaded") + runs("F-6", "needs Valentin key")
+            + runs("G-7", "checks pending on PR 9") + runs("H-8", "") + runs("I-9", "something odd")
+            + runs("J-10", "x", 2) + [{"ts": "2026-11-14T02:00:00Z", "ticket": "J-10", "state": "BUILDING", "engine": "codex", "reason": ""}]
+            + runs("IGSH-77", "x"))
+    board = Stub(tickets, {"D-4": ["HYCI-2"]})
+    lines, counts, seen, errors = sweep(board.pile(), rows, board, {})
+    assert not errors, errors
+    got = {l.split(":")[1].split()[0]: l for l in lines}
+    for key, word in (("A-1", "ticket closed"), ("B-2", "PR merged"), ("C-3", "block closed"), ("E-5", "provider back"), ("J-10", "progress")):
+        assert word in got[key] and got[key].startswith("removed"), (key, got[key])
+    for key, word in (("D-4", "blocker open"), ("F-6", "needs a person"), ("G-7", "waiting on PR"), ("H-8", "no end line"), ("I-9", "unclear")):
+        assert word in got[key] and got[key].startswith("kept"), (key, got[key])
+    assert sorted(board.removed) == ["A-1", "B-2", "C-3", "E-5", "J-10"], board.removed
+    assert len(board.notes) == 5 and all("agent lane" not in n[1] and n[1].startswith("Wasted Runs removed") for n in board.notes)
+    assert "IGSH-77" not in got and any("SOFT-77" in l for l in lines), "the ledger's old prefix matches the board's new one"
+    # a rewritten ticket: the fingerprint kept at first sight no longer matches
+    board2 = Stub({"R-1": tk(key="R-1")})
+    rows2 = runs("R-1", "something odd")
+    _, _, seen2, _ = sweep(board2.pile(), rows2, board2, {})
+    assert board2.removed == [] and "R-1" in seen2
+    board2.tickets["R-1"]["description"] = "rewritten"
+    lines2, _, _, _ = sweep(board2.pile(), rows2, board2, seen2)
+    assert board2.removed == ["R-1"] and "rewritten" in lines2[0], lines2
+    # live PR layer: the runs waited on checks; the PR state decides
+    pt = {k: tk(key=k) for k in ("P-1", "P-2", "P-3", "P-4", "P-5")}
+    prows = sum((runs(k, "checks pending on PR 9") for k in pt), [])
+    pb = Stub(pt, prs={"P-1": [], "P-2": ["pending"], "P-3": ["red"], "P-4": ["green"]})
+    pl, _, pseen, _ = sweep(pb.pile(), prows, pb, {})
+    pg = {l.split(":")[1].split()[0]: l for l in pl}
+    for k, verdict, word in (("P-1", "removed", "PR gone"), ("P-2", "kept", "checks running"), ("P-3", "removed", "needs a fix run"),
+                             ("P-4", "removed", "checks finished"), ("P-5", "kept", "waiting on checks")):
+        assert pg[k].startswith(verdict) and word in pg[k], (k, pg[k])
+    assert pseen.get("fix:P-3") == 1
+    # the fix cap: a third red read keeps the label
+    pb2 = Stub({"P-3": tk(key="P-3")}, prs={"P-3": ["red"]})
+    cl, _, _, _ = sweep(pb2.pile(), prows, pb2, {"fix:P-3": PR_FIX_RUNS})
+    assert cl[0].startswith("kept") and "PR fix cap" in cl[0], cl
+    # dry run writes nothing
+    board3 = Stub({"A-1": tk(key="A-1", section="Done")})
+    l3, _, _, _ = sweep(board3.pile(), runs("A-1", "x"), board3, {}, dry=True)
+    assert board3.removed == [] and l3[0].startswith("would remove")
+    print("waste-owner self-test: ok")
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["--self-test"]:
+        return self_test()
+    dry = "--dry-run" in args
+    board = Board()
+    rows = read_ledger(LEDGER)
+    keys = board.pile()
+    lines, counts, seen, errors = sweep(keys, rows, board, load_seen(), dry=dry)
+    if not dry:
+        save_seen(seen)
+    print("\n".join(lines))
+    removed = sum(v for k, v in counts.items() if k.startswith("removed"))
+    kept = sum(v for k, v in counts.items() if k.startswith("kept"))
+    print(f"waste-owner: {len(keys)} on the pile, {removed} {'would be ' if dry else ''}removed, {kept} kept, {len(errors)} errors")
+    for k, v in sorted(counts.items()):
+        print(f"  {k}: {v}")
+    for e in errors:
+        print(f"error: {e}", file=sys.stderr)
+    return 1 if errors and not lines else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

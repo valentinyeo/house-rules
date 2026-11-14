@@ -1,0 +1,9 @@
+[Unit]
+Description=Wasted Runs owner: remove the label from every ticket whose cause is gone (HYCI-430)
+
+[Service]
+Type=oneshot
+Nice=10
+TimeoutStartSec=600
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 %h/.local/share/house-rules/fleet/waste-owner
