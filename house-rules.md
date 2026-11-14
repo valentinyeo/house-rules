@@ -2,6 +2,8 @@
 
 orchestrators run the pstack orchestrate playbook. it wins.
 
+hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view. status and questions go on the ticket, not in chat.
+
 valentin decides money, keys, going public and deleting live data.
 ask him once, with your pick.
 
