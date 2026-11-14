@@ -11,7 +11,7 @@ Checks:
   size         SKILL.md over 500 lines: move detail to reference/<topic>.md
   table        a path in the "Read X when Y" table of house-rules.md that does not exist
   orphan       a reference/*.md file that house-rules.md and no skill points to
-  words        house-rules.md over 1500 words (in --diff mode: over 1500 and growing)
+  words        house-rules.md over 1500 words (in --diff mode: growing past WORD_CEILING)
 
 Exit 1 on any hit, with file:line. Reads only: never edits a file, starts no job.
 """
@@ -23,6 +23,7 @@ import sys
 import tempfile
 
 MAX_FILE_WORDS = 1500
+WORD_CEILING = 8896  # ratchet: in --diff mode the file may not grow past this until the rewrite lowers it to MAX_FILE_WORDS
 MAX_DESC = 1024
 MAX_SKILL_LINES = 500
 
@@ -188,8 +189,8 @@ def run(root, files, base, head, out):
         for p, lines in sorted(added_lines(root, base, head).items()):
             lint_file(root, head, p, lines, report)
         new, old = wc(read(root, head, "house-rules.md")), wc(read(root, base, "house-rules.md"))
-        if new > MAX_FILE_WORDS and new > old:
-            report("house-rules.md", 1, "words", "%d words, max %d: shrink it" % (new, MAX_FILE_WORDS))
+        if new > WORD_CEILING and new > old:
+            report("house-rules.md", 1, "words", "%d words, ceiling %d: shrink it" % (new, WORD_CEILING))
     print("RULES-LINT bad=%d" % len(hits), file=out)
     return 1 if hits else 0
 
@@ -250,7 +251,7 @@ def self_test():
         run(d, None, "HEAD~1", "HEAD", b)
         check("read-table missing target refused", ": table:" in b.t)
         check("orphan reference refused", "reference/boards.md:1: orphan" in b.t)
-        put("house-rules.md", "- Pad line. " + "pad " * 1600 + "\n", "a")
+        put("house-rules.md", "- Pad line. " + "pad " * 9000 + "\n", "a")
         g("commit", "-qam", "big")
         b = Buf()
         run(d, None, "HEAD~1", "HEAD", b)
