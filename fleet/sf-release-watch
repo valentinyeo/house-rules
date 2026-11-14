@@ -57,6 +57,17 @@ RUNNING = {"IN_PROGRESS", "PENDING", "QUEUED", "EXPECTED", "WAITING", "REQUESTED
 KEY = re.compile(r"\b(?:IGSH|SOFT)-(\d+)\b", re.I)
 
 
+GATING_RUN = re.compile(r"release|tests?\b|build", re.I)
+
+
+def gating_run_failed(runs):
+    """A failed run on the merge sha only wakes a model when it can stop the release: auto-release, Tests, a build. A red bench,
+    proof or screenshot workflow does not (SOFT-2013, 14 Nov: 'Retained chat history' and 'robot avatars master' failed, the
+    release was only queued, two runs came and found nothing to do)."""
+    return any(r.get("conclusion") in ("failure", "timed_out", "startup_failure") and GATING_RUN.search(r.get("name") or "")
+               for r in runs)
+
+
 def epoch(iso):
     return calendar.timegm(time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S")) if iso else 0
 
@@ -239,7 +250,7 @@ class Hub:
 
     def run_failed(self, repo, sha):
         runs = self.gh("api", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=30")["workflow_runs"]
-        return any(r.get("conclusion") in ("failure", "timed_out", "startup_failure") for r in runs)
+        return gating_run_failed(runs)
 
     def merge(self, repo, number):
         """Squash merge, the way the Software Factory models do. Dry run only says so."""

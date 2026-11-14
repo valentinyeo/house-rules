@@ -32,7 +32,7 @@ class OwnershipTests(unittest.TestCase):
         self.owners = Owners(self.state, self.roster)
         self.ticket = {"key": "HYCI-404", "idx": 404, "board": "11514", "section": "In Progress",
                        "title": "Keep the owner", "holders": [["runner 6", True]], "created": "2026-11-13",
-                       "waiting": False, "labels": ["brain-hard"], "prio": "Urgent"}
+                       "waiting": False, "labels": ["brain-hard"], "prio": "Urgent", "updated": "2026-11-13T10:00:00Z"}
         self.selection = {"engine": "codex", "model": "gpt-6.1-sol", "effort": "high"}
 
     def test_wait_and_assignment_loss_do_not_release_ownership(self):
@@ -86,6 +86,7 @@ class OwnershipTests(unittest.TestCase):
                 patch.object(pick, "held_back", return_value=False), \
                 patch.object(pick, "open_blocked_by", return_value=False), \
                 patch.object(pick, "incident_step", return_value=None), \
+                patch.object(pick, "second_ticket", return_value=None), \
                 patch.object(pick, "open_prs", return_value=[]):
             self.assertEqual(pick.choose(6, True), (self.ticket, "own"))
             self.ticket["waiting"] = True
