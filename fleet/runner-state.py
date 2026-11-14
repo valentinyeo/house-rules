@@ -39,6 +39,9 @@ STATES = (
 # required checks on this repo take 20 to 60 minutes, so the 30-minute line turned every healthy wait into a FAULT and made the
 # run counts and the factory breaker read waits as waste. The picker's wait gate caps a hold at the same 6 hours.
 WAIT_LIMIT = 6 * 3600
+# 14 Nov (HYCI-388, SOFT-1969 run 6): the 6 h cap counts from the first wait on a ticket and never reset. Run 6 pushed a new PR and ended on a correct
+# "RUNNER IDLE checks pending on PR 988", yet read FAULT "exceeded 6 h" and counted as an excess leave. A run that pushed progress restarts the wait: the cap
+# is for a ticket that waits with no progress.
 TICKET = re.compile(r"\b((?:HTPR|HYFA|IGSH|SOFT|HYCI)-\d+)\b")
 DONE = re.compile(r"\b(?:INFRA |CI )?RUNNER DONE\b")
 HUMAN = re.compile(r"\bvalentin\b|flag approval", re.I)
@@ -152,7 +155,7 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False, progress=
         why = "unknown state: flag approval is not a state" if re.search(r"flag approval", line, re.I) else "unknown state: waiting on a person is not a state"
         return _out("FAULT", "FAULT", park="lead", detail=why)
     if line and WAIT.search(line):
-        if waited is not None and int(waited) >= WAIT_LIMIT:
+        if waited is not None and int(waited) >= WAIT_LIMIT and not int(progress or 0):
             return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 6 h")
         return _out("WAIT_CHECK", "WAIT_CHECK", detail=_wait_detail(line, ticket))
     if line and OWN.search(line):
@@ -168,7 +171,7 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False, progress=
     if line and re.search(r"\bIDLE_LOAD\b|not green", line, re.I):
         return _out("IDLE_LOAD", "IDLE_LOAD", detail=line[:160])
     if line and re.search(r"\bRUNNER IDLE\b", line):
-        if waited is not None and int(waited) >= WAIT_LIMIT:
+        if waited is not None and int(waited) >= WAIT_LIMIT and not int(progress or 0):
             return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 6 h")
         return _out("WAIT_CHECK", "WAIT_CHECK", detail=_wait_detail(line, ticket))
     if int(rc) == 124 or int(elapsed) >= 3 * 3600 - 10:
@@ -409,6 +412,8 @@ def self_test():
     assert leave_verdict(wait["state"], wait["detail"])[0] == "skip", leave_verdict(wait["state"], wait["detail"])
     late = classify("RUNNER IDLE checks pending", 0, 400, "", WAIT_LIMIT, "HYCI-1")
     assert late["state"] == "FAULT" and late["park"] == "" and "6 h" in late["detail"]
+    pushed = classify("RUNNER IDLE checks pending on PR 9", 0, 1352, "", WAIT_LIMIT + 60, "SOFT-1", progress=1)
+    assert pushed["state"] == "WAIT_CHECK" and "6 h" not in pushed["detail"], "a run that pushed restarts the 6 h wait (SOFT-1969 run 6)"
     healthy = classify("RUNNER IDLE checks pending", 0, 400, "", 40 * 60, "HYCI-1")
     assert healthy["state"] == "WAIT_CHECK", "a 40-minute check cycle is a wait, not a fault"
     for note in ("RUNNER IDLE HTPR-8737 blocked by HYCI-140", "RUNNER IDLE HTPR-8737 awaiting HYCI-140 repair", "RUNNER IDLE HTPR-8737 blocked on HYCI-140"):
