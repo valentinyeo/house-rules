@@ -1450,7 +1450,20 @@ def waits_until(now=None):
             hold[key] = max(hold.get(key, until), until)
     # HYCI-431 (14 Nov, 02:35 audit): a held ticket whose PR went red or conflicting got no PR fix run. SOFT-2279 (PR 981 red) ended
     # WAIT_CHECK three times in 2 hours, so the streak rested it until 03:48 although the fix run is a valid phase and its owner keeps it.
-    return {k: v for k, v in hold.items() if v > now and not pr_fix_due(k, all_ends[k])}
+    # HYCI-352 (14 Nov, R8 HTPR-9134, astro-rs PR #11 red): pr_fix_due reads only hypertask-ai/hypertask and a Software Factory ticket's own
+    # app repo, so a board 15 ticket whose PR lives in astro-rs never counted as red here and its streak hold kept the owner out for the
+    # whole streak window. fleet/sf-release-watch reads every repo: a red it lists after the last end releases the hold.
+    return {k: v for k, v in hold.items() if v > now and not pr_fix_due(k, all_ends[k]) and not sf_red_since_end(k, all_ends[k], now)}
+
+
+def sf_red_since_end(key, ends, now):
+    """True when fleet/sf-release-watch lists the ticket as attention (red PR) in a read newer than the ticket's last waiting end."""
+    try:
+        t = by_key(key)
+        red = sf_attention(t, now) if t and ends else None
+        return bool(red and red[0] > max(ends).timestamp())
+    except Exception:
+        return False
 
 
 PR_FIX_RUNS = 2  # house rules: a red PR is a PR fix run, at most 2 (pr_fix_max) per PR state
@@ -3515,17 +3528,23 @@ def wait_self_test():
                    {"ticket": "HTPR-2", "ts": at(10), "state": "WAIT_CHECK", "reason": "ci-pending"},
                    {"ticket": "HTPR-3", "ts": at(10), "state": "WAIT_CHECK", "reason": "ci-pending"},
                    {"ticket": "HTPR-4", "ts": at(10), "state": "WAIT_CHECK", "reason": "until 2026-11-11T11:00Z"}]]
-    saved_fix = globals()["pr_fix_due"]
+    saved_fix, saved_red = globals()["pr_fix_due"], globals()["sf_red_since_end"]
     try:
         globals()["pr_fix_due"] = lambda key, ends: False
         h = waits_until(now)
         # HYCI-431: a streak or recheck hold gives way to the PR fix run when the PR is red or conflicting
         globals()["pr_fix_due"] = lambda key, ends: key == "HTPR-2"
         lifted = waits_until(now)
+        # HYCI-352: a red PR in a repo pr_fix_due cannot read (astro-rs) is seen by the release watch, which lifts the hold the same way
+        globals()["pr_fix_due"] = lambda key, ends: False
+        globals()["sf_red_since_end"] = lambda key, ends, when: key == "HTPR-1"
+        watch_lifted = waits_until(now)
     finally:
         globals()["pr_fix_due"] = saved_fix
+        globals()["sf_red_since_end"] = saved_red
         _LEDGER[:] = saved
     assert "HTPR-2" not in lifted and "HTPR-1" in lifted, "a red or conflicting PR lifts the streak hold, not the other holds"
+    assert "HTPR-1" not in watch_lifted and "HTPR-2" in watch_lifted, "a red PR the release watch lists lifts that ticket's hold only"
     assert h.get("HTPR-1") == dt.datetime(2026, 11, 12, 2, 30, tzinfo=dt.timezone.utc), "a stated recheck time holds the ticket"
     assert "HTPR-2" in h, "three waits in two hours rest the ticket two hours"
     assert "HTPR-3" not in h, "one wait alone keeps the old rest rules"
