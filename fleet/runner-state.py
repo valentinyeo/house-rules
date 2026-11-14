@@ -116,7 +116,7 @@ def redact(text):
     return "\n".join(out) + ("\n" if out else "")
 
 
-def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
+def classify(final, rc, elapsed, stop, waited, ticket, overload=False, progress=0):
     """One ending. `park` is lead, waits, or empty. `waits` is comma-separated ticket keys.
 
     `overload` is the launcher's read of the run log: the provider refused the work (HYCI-255). That is a rest, not a crash.
@@ -167,6 +167,11 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
         return _out("WAIT_CHECK", "WAIT_CHECK", detail=_wait_detail(line, ticket))
     if int(rc) == 124 or int(elapsed) >= 3 * 3600 - 10:
         return _out("FAULT", "FAIL", detail="timeout: hit the 3h run limit")
+    # 14 Nov (HYCI-388, SOFT-2276 run 2): the run pushed two commits to its PR, then its last message was only the chat-listener notice, so no
+    # end line was printed and the ticket was parked on its lead as an unknown state. The work shipped and the PR checks are the script's wait
+    # (one-run hold, bin/pr-merger, sf-release-watch): a clean run that made progress and printed no end line is that wait, never a fault.
+    if not line and int(rc) == 0 and int(elapsed) >= 120 and int(progress or 0) > 0:
+        return _out("WAIT_CHECK", "WAIT_CHECK", detail="script owns: run ended without an end line after pushing progress; its PR checks are the script's wait")
     if not line and (int(rc) != 0 or int(elapsed) < 120):
         if int(elapsed) < 120:
             return _out("FAULT", "FAIL", detail="crash or run ended before it started")
@@ -446,6 +451,11 @@ def self_test():
     assert classify("RUNNER IDLE HYCI-256 PC connection unavailable", 0, 400, "", 0, "HYCI-256")["park"] == "pc"
     assert classify("RUNNER IDLE Windows offline; live verification pending", 0, 400, "", 0, "IGSH-1")["park"] == "pc"
     assert classify("RUNNER IDLE something new", 0, 400, "", WAIT_LIMIT, "HTPR-1")["state"] == "FAULT"
+    # SOFT-2276 run 2: clean exit, pushed commits, no end line: the PR checks are the script's wait. No progress, a crash or a short run stays a fault.
+    nl = classify("", 0, 409, "", 0, "SOFT-1", progress=11)
+    assert nl["state"] == "WAIT_CHECK" and nl["detail"].startswith("script owns") and nl["park"] == "", nl
+    assert classify("", 0, 409, "", 0, "SOFT-1", progress=0)["state"] == "FAULT"
+    assert classify("", 1, 409, "", 0, "SOFT-1", progress=3)["state"] == "FAULT" and classify("", 0, 60, "", 0, "SOFT-1", progress=3)["state"] == "FAULT"
     assert classify("", 0, 400, "pacer", 0, "")["state"] == "IDLE_PACER"
     cap = classify_pick("none: wip: 4 of 4, new work closed (not counted: waiting 2)", "")
     assert cap["state"] == "IDLE_CAP" and "not counted: waiting 2" in cap["detail"]
@@ -598,7 +608,7 @@ def main():
     if "--classify" in sys.argv:
         row = classify(_arg("--final"), int(_arg("--rc", "0")), int(_arg("--elapsed", "0")),
                        _arg("--stop"), int(_arg("--waited", "0")), _arg("--ticket"),
-                       overload=_arg("--overload", "0") == "1")
+                       overload=_arg("--overload", "0") == "1", progress=int(_arg("--progress", "0") or 0))
         print(json.dumps(row))
         return
     sys.exit("usage: fleet/runner-state.py --classify | --pick-fail | --refs | --progress | --park-reason | --redact | --self-test")

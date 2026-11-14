@@ -973,7 +973,7 @@ TM
       stop=""; [ -f "$STATE/stop-$n" ] && stop=$(head -1 "$STATE/stop-$n" || true)
       waitf="$STATE/wait-check-$pick_ticket"
       waited=0; [ -f "$waitf" ] && waited=$(( $(date +%s) - $(stat -c %Y "$waitf") ))
-      final=$(grep -a -E 'INFRA RUNNER DONE|CI RUNNER DONE|RUNNER DONE|RUNNER TOO HARD|^(RUNNER )?PARKED |RUNNER IDLE' "$runlog" | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300 || true)
+      final=$(sed 's/\xc2\xb7/ /g; s/\xc2\xa0/ /g' "$runlog" | grep -a -E 'INFRA RUNNER DONE|CI RUNNER DONE|RUNNER DONE|RUNNER TOO HARD|^(RUNNER )?PARKED |RUNNER IDLE' | tail -1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | cut -c1-300 || true)
       # A run with no ending of its own that the provider refused is provider busy, never a crash. The mark rests every
       # runner on that plan, and it changes no engine: the same provider is tried again when the mark expires.
       overload=0
@@ -987,6 +987,13 @@ TM
       reason=$(printf '%s' "$final" | cut -c1-300)
       progress=$(ticket_progress "$pick_repo" "$pick_ticket" "$refs_before"); rm -f "$refs_before"
       # Built in another repo than the picker named (HYCI-361: a PR on yeoux-site)? A PR the run links, opened since it started, is progress.
+      # 14 Nov (HYCI-388, SOFT-2276 run 2): a clean run that pushed work but printed no end line is the script's PR wait, never an unknown-state fault.
+      if [ "$state" = FAULT ] && [ -z "$final" ] && [ "$progress" -gt 0 ] && [ "$rc" -eq 0 ]; then
+        meta=$(python3 "$HERE/runner-state.py" --classify --final "" --rc "$rc" --elapsed "$elapsed" --stop "$stop" --waited "$waited" --ticket "$pick_ticket" --overload 0 --progress "$progress") || meta=""
+        if [ -n "$meta" ] && [ "$(jq -r '.state // ""' <<<"$meta")" = WAIT_CHECK ]; then
+          state=WAIT_CHECK; res=WAIT_CHECK; park_mode=""; waits=""; detail=$(jq -r '.detail // ""' <<<"$meta"); touch "$waitf"
+        fi
+      fi
       if [ "$progress" -eq 0 ] && [ "$state" != BUILDING ]; then
         pr_made=$(python3 "$HERE/runner-state.py" --pr-progress --log "$runlog" --since "$started_at" 2>/dev/null || echo 0)
         [[ "$pr_made" =~ ^[0-9]+$ ]] && progress=$pr_made
