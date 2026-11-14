@@ -402,6 +402,11 @@ EOF
 # Rest after a run. A FAIL that dies fast (crash, dead login) rests 15 minutes so a broken slot does not spin.
 # A FAIL after a long run (the 3h limit) is no crash loop: the slot picks again in 30s (14 Nov, runners 1, 9, 10 idle 15m each).
 fail_rest() { if [ "$1" = FAIL ] && [ "$2" -lt "${FAIL_FAST_SECONDS:-600}" ]; then echo 900; else echo 30; fi; }
+# A run the reply cap ended twice ("no model reply for 600s twice") means the provider stayed silent for 20 minutes. The runner
+# then rests 30 minutes, doubling per silent run in a row, 6 hours at most (house rule: provider outage, the same runner
+# resumes later). Before this the slot picked the same ticket again after 30 seconds: runners 9 and 1 spent 14 Nov 00:13 to
+# 01:10 on three silent 20-minute runs each of HTPR-9205 and HTPR-9130 (HYCI-422). $1 = silent runs in a row, counting this one.
+silent_rest() { local c=${1:-1} r=${SILENT_REST_BASE:-1800} cap=${SILENT_REST_MAX:-21600}; while [ "$c" -gt 1 ] && [ "$r" -lt "$cap" ]; do r=$((r * 2)); c=$((c - 1)); done; [ "$r" -le "$cap" ] || r=$cap; echo "$r"; }
 
 case "${1:-}" in
   brief-check)
@@ -415,6 +420,10 @@ case "${1:-}" in
     expect "fast crash" "$(fail_rest FAIL 4)" 900
     expect "3h timeout" "$(fail_rest FAIL 10800)" 30
     expect "clean end" "$(fail_rest OK 5)" 30
+    expect "first silent run" "$(silent_rest 1)" 1800
+    expect "second silent run in a row" "$(silent_rest 2)" 3600
+    expect "fourth silent run in a row" "$(silent_rest 4)" 14400
+    expect "silent rest is capped" "$(silent_rest 9)" 21600
     [ "$bad" = 0 ] && echo 'fleet/runner fail-rest self-test ok'; exit "$bad" ;;
   ticket-selftest)
     # The one-run guard, proved without a model call: only a real ticket key starts a run; an empty pick is IDLE, not a FAULT.
@@ -879,6 +888,13 @@ TM
         "$HERE/park" "$pick_ticket" --waits-on "$waits" >>"$rlog" 2>&1 || echo "$(date -u +%FT%TZ) park-waits failed" >>"$rlog"
       fi
       [ "$res" = FAIL ] && save_fail_tail "$pick_ticket" "$runlog"
-      sleep "$(fail_rest "$res" "$elapsed")"
+      if [ "$res" = FAIL ] && grep -q 'no model reply for [0-9]*s twice' <<<"$final"; then
+        silent_n=$(( $(cat "$STATE/silent-runs-$n" 2>/dev/null || echo 0) + 1 )); echo "$silent_n" > "$STATE/silent-runs-$n"
+        echo "$(date -u +%FT%TZ) silent provider: $silent_n run(s) in a row ended by the reply cap, resting $(silent_rest "$silent_n")s" >> "$rlog"
+        sleep "$(silent_rest "$silent_n")"
+      else
+        rm -f "$STATE/silent-runs-$n"
+        sleep "$(fail_rest "$res" "$elapsed")"
+      fi
     done ;;
 esac
