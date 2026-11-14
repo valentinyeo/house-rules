@@ -53,6 +53,21 @@ PC_WAIT = re.compile(r"\b(?:desktops?|laptops?|PC|phone|computer|Windows)\b[^.;]
                      r"|\b(?:disconnected|unavailable|unreachable|offline)\b[^.;]{0,20}\b(?:desktops?|laptops?|PC|phone)\b", re.I)
 
 
+# 14 Nov (HYCI-388, HTPR-9106 run 8): a run that pushed a PR fix ended, as the brief orders, on "RUNNER IDLE checks pending on PR 3468".
+# That ending was counted as an invalid leave ("waited on checks") although the one-run hold (fleet/pick) and bin/pr-merger own that wait.
+# While the one-run hold is live (one-run.on), a wait line that names a PR is tagged "script owns:", which valid-leaves.json skips.
+ONE_RUN_FLAG = Path(os.environ.get("FLEET_ONE_RUN_FLAG", Path.home() / ".local/state/fleet/one-run.on"))
+PR_WAIT = re.compile(r"\bPR\s*#?\d+\b", re.I)
+
+
+def _wait_detail(line):
+    """Detail of a WAIT_CHECK ending. A wait on a named PR while the one-run hold is live is a script's wait, not a runner's leave."""
+    text = line[:160]
+    if PR_WAIT.search(line) and ONE_RUN_FLAG.exists():
+        return ("script owns: " + text)[:160]
+    return text
+
+
 def _out(state, result, park="", waits="", detail=""):
     if state not in STATES:
         raise RuntimeError(f"unlisted state {state}")
@@ -111,7 +126,7 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
     if line and WAIT.search(line):
         if waited is not None and int(waited) >= WAIT_LIMIT:
             return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 6 h")
-        return _out("WAIT_CHECK", "WAIT_CHECK", detail=line[:160])
+        return _out("WAIT_CHECK", "WAIT_CHECK", detail=_wait_detail(line))
     if line and OWN.search(line):
         return _out("OWN_PR", "DONE", detail=line[:160])
     if line and TICKET_WAIT.search(line):
@@ -127,7 +142,7 @@ def classify(final, rc, elapsed, stop, waited, ticket, overload=False):
     if line and re.search(r"\bRUNNER IDLE\b", line):
         if waited is not None and int(waited) >= WAIT_LIMIT:
             return _out("FAULT", "FAULT", detail="WAIT_CHECK exceeded 6 h")
-        return _out("WAIT_CHECK", "WAIT_CHECK", detail=line[:160])
+        return _out("WAIT_CHECK", "WAIT_CHECK", detail=_wait_detail(line))
     if int(rc) == 124 or int(elapsed) >= 3 * 3600 - 10:
         return _out("FAULT", "FAIL", detail="timeout: hit the 3h run limit")
     if not line and (int(rc) != 0 or int(elapsed) < 120):
@@ -368,6 +383,21 @@ def self_test():
     idle_review = classify("CI RUNNER IDLE HYCI-171 waiting Codex re-review and gate on 50020e7977", 0, 400, "", 0, "HYCI-171")
     assert idle_review["state"] == "WAIT_CHECK" and idle_review["park"] == "", idle_review
     assert classify("RUNNER IDLE something new", 0, 400, "", 0, "HTPR-1")["state"] == "WAIT_CHECK"
+    import tempfile
+    global ONE_RUN_FLAG
+    saved_flag = ONE_RUN_FLAG
+    with tempfile.TemporaryDirectory() as td:
+        ONE_RUN_FLAG = Path(td) / "one-run.on"
+        wline = "RUNNER IDLE checks pending on PR 3468 until 2026-11-14T00:19:00Z"
+        off = classify(wline, 0, 1200, "", 0, "HTPR-9106")
+        assert off["state"] == "WAIT_CHECK" and not off["detail"].startswith("script owns"), "one-run hold off: a plain wait"
+        ONE_RUN_FLAG.write_text("")
+        on = classify(wline, 0, 1200, "", 0, "HTPR-9106")
+        assert on["state"] == "WAIT_CHECK" and on["detail"].startswith("script owns: "), on
+        assert leave_verdict(on["state"], on["detail"], json.loads(VALID_LEAVES.read_text()))[0] == "skip", "a script-owned wait is no leave"
+        nopr = classify("RUNNER IDLE checks pending", 0, 400, "", 0, "HYCI-1")
+        assert not nopr["detail"].startswith("script owns"), "no PR named: still the runner's wait"
+    ONE_RUN_FLAG = saved_flag
     pc = classify("RUNNER IDLE IGSH-1923 desktop disconnected; live proof pending", 0, 400, "", 0, "IGSH-1923")
     assert pc["state"] == "PARKED" and pc["park"] == "pc", pc
     assert classify("RUNNER IDLE IGSH-1925 live-proof unavailable; laptops disconnected", 0, 400, "", 0, "IGSH-1925")["park"] == "pc"
