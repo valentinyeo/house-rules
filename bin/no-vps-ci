@@ -14,7 +14,7 @@ review_unit() {
   esac
   return 1
 }
-REVIEW_PROC='[c]laude-standin|[w]azig-ai-review|[h]ypertask-ai-review-dispatch|[h]ypertask-dispatch-(scan|review)|ai-review-[p]oll\.sh'
+REVIEW_PROC='^([^ ]*/)?((bash|sh|python3?|node) )?([^ ]*/)?(claude-standin|wazig-ai-review|hypertask-ai-review-dispatch|hypertask-dispatch-(scan|review)|ai-review-poll[.]sh)([ .]|$)'
 
 if [ "${1:-}" = "--self-test" ]; then
   bad=0
@@ -23,6 +23,12 @@ if [ "${1:-}" = "--self-test" ]; then
   done
   for u in blocker-review.service ready-review-prs.timer review-switch.service; do
     review_unit "$u" && { echo "FAIL should keep $u"; bad=1; } || echo "ok keep $u"
+  done
+  for c in "/bin/bash /home/x/.local/bin/claude-standin run" "python3 /opt/hypertask-ai-review-dispatch.py"; do
+    printf '%s\n' "$c" | grep -qE "$REVIEW_PROC" && echo "ok kill proc $c" || { echo "FAIL should kill proc $c"; bad=1; }
+  done
+  for c in "/bin/bash -c eval grep claude-standin foo" "grep -rn claude-standin ."; do
+    printf '%s\n' "$c" | grep -qE "$REVIEW_PROC" && { echo "FAIL should keep proc $c"; bad=1; } || echo "ok keep proc $c"
   done
   [ $bad = 0 ] && echo "no-vps-ci self-test ok"
   exit $bad
