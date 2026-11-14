@@ -1740,7 +1740,9 @@ def one_run_state(p):
     if not checks:
         return "unread", False
     failed = failed_checks(checks)
-    if p.get("red") or any(not CANCELLED_CHECK.search(c) for c in failed):
+    rerunning = any(FAILED_CHECK.search(c) for c in checks) and not any(not CANCELLED_CHECK.search(c) for c in failed)
+    # the cached `red` flag is any FAILURE in the rollup; a failure whose check runs again is not red (HYCI-350)
+    if (p.get("red") and not rerunning) or any(not CANCELLED_CHECK.search(c) for c in failed):
         return "red", False
     if p.get("mergeable") == "CONFLICTING":
         return "conflicting", False
@@ -2542,12 +2544,18 @@ CANCELLED_CHECK = re.compile(r"=CANCELLED$")
 
 def failed_checks(checks):
     """The failing 'name=state' entries of a check list, minus every CANCELLED attempt that a newer attempt of the same check
-    supersedes (the list holds the same name twice, e.g. `bugfix-regression=CANCELLED` and `bugfix-regression=IN_PROGRESS`).
-    A superseded cancel is not red; a lone cancel stays listed so the caller can hand it to the script that reruns it."""
+    supersedes (the list holds the same name twice, e.g. `bugfix-regression=CANCELLED` and `bugfix-regression=IN_PROGRESS`),
+    and minus every failure whose same-named check is running again (HYCI-350, 14 Nov: a FAILURE beside an IN_PROGRESS of the
+    same check read red, a model woke on HYCI-408 each 20 minutes only to see "rerunning"; 21 of 42 checker runs).
+    A superseded cancel is not red; a lone cancel stays listed so the caller can hand it to the script that reruns it.
+    A failure beside a finished same-named check stays red: the list has no order, so only a running rerun proves it is old."""
     names = {}
     for c in checks or []:
         names.setdefault(c.rpartition("=")[0], set()).add(c.rpartition("=")[2])
-    return [c for c in checks or [] if FAILED_CHECK.search(c) and not (CANCELLED_CHECK.search(c) and len(names[c.rpartition("=")[0]]) > 1)]
+
+    def rerun(c):
+        return any(RUNNING_CHECK.search("=" + s) for s in names[c.rpartition("=")[0]])
+    return [c for c in checks or [] if FAILED_CHECK.search(c) and not (CANCELLED_CHECK.search(c) and len(names[c.rpartition("=")[0]]) > 1) and not rerun(c)]
 
 
 def gate_checks(checks):
@@ -3738,6 +3746,12 @@ def one_run_self_test():
         assert one_run_state(pr(1, "HTPR-1", ("bugfix-regression=CANCELLED", "e2e=FAILURE"))) == ("red", False), "a real failure stays red"
         assert one_run_state(pr(1, "HTPR-1", ("ci=FAILURE", "ci=SUCCESS"))) == ("red", False), "only CANCELLED attempts are superseded"
         assert gate_checks(["a=CANCELLED", "a=IN_PROGRESS"]) == ["running"], gate_checks(["a=CANCELLED", "a=IN_PROGRESS"])
+        # HYCI-350: the HYCI-408 PR (14 Nov 05:43) listed one check as FAILURE, IN_PROGRESS and SUCCESS at once, with the cached red flag set
+        rr = ("guards=FAILURE", "guards=IN_PROGRESS", "guards=SUCCESS", "e2e=SUCCESS")
+        assert one_run_state(pr(1, "HTPR-1", rr, red=True)) == ("pending", True), "a failure whose check runs again is a script's wait"
+        assert one_run_state(pr(1, "HTPR-1", ("ci=FAILURE", "ci=IN_PROGRESS", "e2e=FAILURE"), red=True)) == ("red", False), "another real failure stays red"
+        assert one_run_state(pr(1, "HTPR-1", ("ci=FAILURE", "e2e=IN_PROGRESS"), red=True)) == ("red", False), "a rerun of another check hides nothing"
+        assert failed_checks(["a=FAILURE", "a=IN_PROGRESS"]) == [] and failed_checks(["a=FAILURE", "a=SUCCESS"]) == ["a=FAILURE"]
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="BLOCKED")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks pending"], \
             "all listed checks green but GitHub BLOCKED: a required check has not reported, held as pending"
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="CLEAN")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks green"], "CLEAN reads green"
