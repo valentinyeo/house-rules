@@ -352,6 +352,18 @@ def pr_progress(text, since, created=_pr_created):
     return n
 
 
+# 14 Nov (HYCI-388, SOFT-2271 run 7): the run found one red check on its PR (a one-sample perf flake), reran the failed jobs and ended on its
+# correct wait line. Nothing was pushed, so progress read 0 and the 6 h wait cap (counted from the first wait, hours earlier, across six runs
+# that each fixed something) turned it into FAULT "WAIT_CHECK exceeded 6 h", an excess leave. A rerun of failed CI jobs on the ticket's own
+# PR is work on that PR: it restarts the wait like a push does.
+RERUN = re.compile(r"\b(?:re-?ran|re-?run(?:ning)?|re-?triggered|re-?started|re-?queued)\b[^.\n]{0,60}\b(?:jobs?|checks?|workflows?|runs?)\b|\bgh run rerun\b", re.I)
+
+
+def rerun_progress(text):
+    """1 when the run's output links a PR and says it reran failed CI jobs, else 0."""
+    return 1 if PR_URL.search(text) and RERUN.search(text) else 0
+
+
 def append_ledger(path, row):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -644,6 +656,10 @@ def self_test():
     assert pr_progress("see https://github.com/o/r/pull/30", since, look) == 1, "a push to an existing PR is progress"
     assert pr_progress("see https://github.com/o/r/pull/9", since, look) == 0, "an older PR is not this run's"
     assert pr_progress("no link, or https://github.com/o/r/pull/77", since, look) == 0, "an unknown PR counts nothing"
+    assert rerun_progress("Reran the failed jobs on run 1. https://github.com/o/r/pull/970") == 1, "a rerun of failed CI jobs on the PR is progress"
+    assert rerun_progress("I reran the failed check. https://github.com/o/r/pull/970") == 1
+    assert rerun_progress("checks pending, https://github.com/o/r/pull/970") == 0, "waiting alone is not progress"
+    assert rerun_progress("reran the failed jobs, no PR named") == 0, "a rerun with no PR link counts nothing"
     git("checkout", "-q", "main")
     git("branch", "-q", "-D", "runner-3/hyci-77-fix")
     assert progress_count(tmp, ticket_refs(tmp, key) or {"runner-3/hyci-77-fix": "x"}, {}) == 1, "a removed branch counts one"
@@ -682,7 +698,8 @@ def main():
             body = Path(_arg("--log")).read_text(errors="replace")
         except OSError:
             body = ""
-        print(pr_progress(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", body), float(_arg("--since", "0") or 0)))
+        body = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", body)
+        print(pr_progress(body, float(_arg("--since", "0") or 0)) or rerun_progress(body))
         return
     if "--park-reason" in sys.argv:
         try:
