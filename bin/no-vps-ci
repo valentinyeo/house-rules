@@ -1,8 +1,32 @@
 #!/usr/bin/env bash
 # House rule (Valentin 2026-11-08): CI work on this VPS is strictly forbidden.
 # Switches off every GitHub Actions runner service and kills any runner process on this server.
+# AI review is the same (HYCI-416): reviewers run only on GitHub-hosted runners. Any enabled or active VPS review unit is
+# switched off, any VPS review process is killed, any "standin" unit or script is refused.
 # Runs every 5 minutes from the no-vps-ci timer. --check only reports (exit 1 when something was found).
+# --self-test checks the review unit name table and exits.
 set -uo pipefail
+
+review_unit() {
+  local n=${1%.service}; n=${n%.timer}
+  case "$n" in
+    *standin*|wazig-ai-review|hypertask-ai-review-dispatch) return 0 ;;
+  esac
+  return 1
+}
+REVIEW_PROC='[c]laude-standin|[w]azig-ai-review|[h]ypertask-ai-review-dispatch|[h]ypertask-dispatch-(scan|review)|ai-review-[p]oll\.sh'
+
+if [ "${1:-}" = "--self-test" ]; then
+  bad=0
+  for u in claude-standin.service wazig-ai-review.timer hypertask-ai-review-dispatch.service claude-standin-v2.timer; do
+    review_unit "$u" && echo "ok kill $u" || { echo "FAIL should kill $u"; bad=1; }
+  done
+  for u in blocker-review.service ready-review-prs.timer review-switch.service; do
+    review_unit "$u" && { echo "FAIL should keep $u"; bad=1; } || echo "ok keep $u"
+  done
+  [ $bad = 0 ] && echo "no-vps-ci self-test ok"
+  exit $bad
+fi
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/no-vps-ci.log"
 mkdir -p "$(dirname "$LOG")"
 check=0; [ "${1:-}" = "--check" ] && check=1
@@ -28,6 +52,33 @@ for pid in $(pgrep -f '[R]unner\.(Listener|Worker)|[a]ct_runner|[a]ct-runner run
   if [ $check = 1 ]; then echo "FOUND pid $pid $(ps -o user=,args= -p "$pid" | cut -c1-100)"; continue; fi
   echo "$(date -u +%FT%TZ) kill $pid $(ps -o user=,args= -p "$pid" | cut -c1-100)" >> "$LOG"
   sudo -n kill "$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+done
+review_off() {
+  local scope=$1 u state active
+  local -a sc=(systemctl); [ "$scope" = user ] && sc=(systemctl --user)
+  for u in $("${sc[@]}" list-unit-files --no-legend 2>/dev/null | awk '{print $1}'); do
+    review_unit "$u" || continue
+    state=$("${sc[@]}" is-enabled "$u" 2>/dev/null); active=$("${sc[@]}" is-active "$u" 2>/dev/null)
+    [ "$state" != enabled ] && [ "$active" != active ] && continue
+    found=1
+    if [ $check = 1 ]; then echo "FOUND review $scope $u ($state, $active)"; continue; fi
+    if [ "$scope" = user ]; then "${sc[@]}" disable --now "$u" >/dev/null 2>&1; else sudo -n systemctl disable --now "$u" >/dev/null 2>&1; fi \
+      && echo "$(date -u +%FT%TZ) off review $scope $u" >> "$LOG" || echo "$(date -u +%FT%TZ) FAIL review $scope $u" >> "$LOG"
+  done
+}
+review_off system
+review_off user
+for pid in $(pgrep -f "$REVIEW_PROC"); do
+  [ "$pid" = "$$" ] && continue
+  found=1
+  if [ $check = 1 ]; then echo "FOUND review pid $pid $(ps -o user=,args= -p "$pid" | cut -c1-100)"; continue; fi
+  echo "$(date -u +%FT%TZ) kill review $pid $(ps -o user=,args= -p "$pid" | cut -c1-100)" >> "$LOG"
+  sudo -n kill "$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+done
+for f in $(find "$HOME/.local/share" "$HOME/.local/bin" "$HOME/.config/systemd" /usr/local/libexec /usr/local/bin /etc/systemd/system -maxdepth 3 -iname '*standin*' 2>/dev/null); do
+  found=1
+  echo "FOUND standin file $f (refused: delete it)"
+  echo "$(date -u +%FT%TZ) standin file $f" >> "$LOG"
 done
 [ $check = 1 ] && { [ $found = 0 ] && echo "no-vps-ci: clean"; exit $found; }
 exit 0

@@ -26,7 +26,7 @@ Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house
 
 ## Doing the work
 - HARD: every long-lived session listens to Agent Chat. Arm `fleet/runner-chat listen` as a background task at start, answer each message with `runner-chat reply` within a minute, rearm after each completion, run `listen --once` before ending a turn.
-- HARD: no CI work on this VPS. CI runs only on GitHub-hosted runners. Minutes, polling and watchers: `reference/github.md`.
+- HARD: no CI or AI review on this VPS; both run only on GitHub's free hosted runners. Details: `reference/github.md`. Enforcer: `bin/no-vps-ci`.
 - HARD: one ticket, one runner, build to Done. The model never waits inside a run: it ends the run while review and checks run, and the picker resumes the same runner. Steps, runs, pick order and WIP cap: `reference/runner-pipeline.md`.
 - HARD: a runner that takes a ticket delivers it. It leaves only for a provider outage, `RUNNER TOO HARD <KEY> | why: ...`, removal from the roster or Valentin's own call.
 - HARD: a board 15 ticket with the `incident` label means customers are down. Any runner takes it first. Roll back first, then fix forward.
