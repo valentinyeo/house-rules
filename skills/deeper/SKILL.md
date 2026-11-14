@@ -1,6 +1,6 @@
 ---
 name: deeper
-description: "make this deeper;how would a pro do this. /deeper [task]: deepen, not widen. Name unasked expert work, rawest sources, exact methods/tools, external proof; rewrite prompt. Felix Rieseberg."
+description: "make this deeper;how would a pro do this. /deeper [task]: deepen, not widen. Name unasked expert work, rawest sources, exact methods/tools, external proof; rewrite prompt. Felix Rieseberg. Use for /deeper, \"make this deeper\" or \"how would a pro do this\"."
 model: opus
 effort: medium
 ---
