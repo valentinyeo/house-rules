@@ -1573,7 +1573,10 @@ def gate_parts(key):
         rel = (stored_relations().get(key) or [0, None])[1]
     blk = None
     if rel is not None:
-        blk = sorted([b, (by_key(b) or {}).get("section") or "gone"] for b in rel[0])
+        # HYCI-352 (14 Nov): a blocker already Done or No Flag was listed as [key, "gone"] and never changed again, so a wait on it was
+        # held to the 6-hour cap (R8, R10, R11 idle on HTPR-9132, 9133, 9134, 9135). Only an open blocker is something to observe;
+        # is_open reads a ticket outside the pick columns once per pick.
+        blk = sorted([b, (by_key(b) or {}).get("section") or "gone"] for b in rel[0] if is_open(b))
     return {"pr": prs, "blk": blk}
 
 
@@ -2286,6 +2289,11 @@ def second_ticket(n, owned, now=None):
     now = now or dt.datetime.now(dt.timezone.utc)
     waits = []
     for t in held:
+        if t["key"] in RESUME_FAILED:
+            # HYCI-352 (Valentin, 14 Nov, 0 of 13 building): a held ticket choose() could not resume counts as a wait with no
+            # minimum, so the runner takes one more ticket (max SECOND_MAX) instead of idling behind it.
+            waits.append(SECOND_WAIT)
+            continue
         if own_wait_reason(t) is None:
             return None
         waits.append(wait_age(t, now))
@@ -2518,8 +2526,22 @@ def second_claim(n, t, dry):
     return True
 
 
-def try_claim(n, t, source, dry):
-    """Claim t for Runner N. Returns True when it is ours, raises Pick for an own ticket found by a refusal."""
+RESUME_FAILED = set()  # HYCI-352: owned building-column tickets the owned loop could not resume this pick; second_ticket counts them as waits
+BEHIND_OWN = [None]  # set by try_claim: the runner's other owned ticket whose open PR or merged work made ship-claim refuse an own resume
+
+
+def owner_of(key):
+    """The runner number the owner record of key names, else None."""
+    t = by_key(key)
+    return ((t or {}).get("_owner") or {}).get("runner")
+
+
+def try_claim(n, t, source, dry, own_resume=False):
+    """Claim t for Runner N. Returns True when it is ours, raises Pick for an own ticket found by a refusal.
+    own_resume (HYCI-352, 14 Nov): t is already the runner's own by owner record. ship-claim's hold for the runner's other unfinished
+    work is meant for taking a NEW ticket. A building-column ticket (In Progress, AI Review, QA) is resumed by assigning it again; a
+    Backlog or Todo one waits behind the other ticket (BEHIND_OWN) for the second-ticket lane, so the pick goes on instead of ending."""
+    BEHIND_OWN[0] = None
     if t.get("_owner") and t["_owner"]["runner"] != int(n):
         return False
     adopting = t["board"] == "2060" or source in ("orphan", "incident-takeover")
@@ -2542,9 +2564,24 @@ def try_claim(n, t, source, dry):
     if rc == 0:
         record_claim(n, t["key"], dry)
         return True
+    if rc == 4 and own_resume and source != "incident":
+        held = held_ticket(out)
+        if held and held != t["key"] and owner_of(held) == int(n):
+            if t["section"] not in BOARDS[t["board"]][1]:
+                BEHIND_OWN[0] = held
+                note(t["key"], f"behind own {held}: waits for the second-ticket lane")
+                return False
+            if dry:
+                record_claim(n, t["key"], True)
+                return True
+            if adopt(n, t, f"Resumed: its owner Runner {n} also holds {held}, which waits on something outside the runner"):
+                record_claim(n, t["key"], False)
+                return True
+            note(t["key"], "own resume: adopt refused")
+            return False
     if rc == 4 and SECOND[0] and source != "incident" and held_ticket(out) in SECOND[0]["keys"]:
         return second_claim(n, t, dry)
-    last = out.strip().splitlines()[-1] if out.strip() else "no output"
+    last =out.strip().splitlines()[-1] if out.strip() else "no output"
     note(t["key"], f"ship-claim refused (rc {rc}): {last}")
     if rc == 4 and "Domain admission failed" in out and not dry:
         remember_admission(n, t["key"])
@@ -2976,6 +3013,7 @@ def owned_order(t):
 def choose(n, dry):
     PICKER[0] = n
     SECOND[0] = None
+    RESUME_FAILED.clear()
     RELATION_CAP[0] = BLOCK_LOOKUPS * 2
     hit = incident_step(n, dry)
     if hit:
@@ -2991,8 +3029,15 @@ def choose(n, dry):
             record = t["_owner"]
             set_engine(record.get("engine") or runner_engine(n))
             if skipped(t) or t["waiting"] or t["key"] in SKIP[0] or held_back(t, own=True) or open_blocked_by(t):
+                if not skipped(t) and not t["waiting"] and t["key"] not in SKIP[0] and t["section"] in BOARDS[t["board"]][1] \
+                        and own_wait_reason(t) is None:
+                    RESUME_FAILED.add(t["key"])  # held back with no stated wait: still counts for the second-ticket lane
                 continue
-            if f"runner {n}" not in names(t) and not try_claim(n, t, "board", dry):
+            if f"runner {n}" not in names(t) and not try_claim(n, t, "board", dry, own_resume=True):
+                if t["section"] in BOARDS[t["board"]][1]:
+                    RESUME_FAILED.add(t["key"])  # HYCI-352: it does not end the pick; the second-ticket lane may open on it
+                if BEHIND_OWN[0] or t["key"] in RESUME_FAILED:
+                    continue
                 raise SystemExit(f"none: Runner {n} keeps {t['key']}; assignment could not resume")
             return t, "own"
         # HYCI-431 (14 Nov): the "one runner, one ticket until live" rule binds a runner to tickets in In Progress, AI Review or QA
@@ -3004,7 +3049,8 @@ def choose(n, dry):
             # blocker, and none built. A ticket that has waited SECOND_WAIT on something outside the runner lets its runner take one more.
             SECOND[0] = second_ticket(n, owned)
             if not SECOND[0]:
-                raise SystemExit(f"none: Runner {n} keeps {building_wait['key']}; waiting, no hand-off")
+                why = "assignment could not resume" if building_wait["key"] in RESUME_FAILED else "waiting, no hand-off"
+                raise SystemExit(f"none: Runner {n} keeps {building_wait['key']}; {why}")
         else:
             log(f"own: Runner {n} keeps {owned[0]['key']} in {owned[0]['section']} (not a building column); new work may start")
     if owned:
@@ -3610,6 +3656,15 @@ def wait_gate_self_test():
         held()
         SNAP["tickets"] = [tk("HTPR-2")]
         assert held() == set(), "the blocker leaving the board lifts the hold"
+        # HYCI-352: a blocker already Done (outside the pick columns) was listed "gone" and held the wait to the 6-hour cap; it is now no
+        # wait at all, so the 30-minute blind wait applies. A blocker outside the columns that is still open keeps holding.
+        late = now + dt.timedelta(minutes=40)
+        fresh([wait("HTPR-2", 5, "RUNNER IDLE waits on HYCI-9")], [tk("HTPR-2")], rel={"HTPR-2": [["HYCI-9"], []]})
+        SNAP["open"] = {"HYCI-9": False}
+        assert held() == {"HTPR-2"} and held(late) == set(), "a wait on a blocker that is already Done is not held past the blind wait"
+        fresh([wait("HTPR-2", 5, "RUNNER IDLE waits on HYCI-9")], [tk("HTPR-2")], rel={"HTPR-2": [["HYCI-9"], []]})
+        SNAP["open"] = {"HYCI-9": True}
+        assert held() == {"HTPR-2"} and held(late) == {"HTPR-2"}, "a blocker outside the pick columns that is still open keeps holding"
         # cap, by type
         rows = [wait("HTPR-1", 5)]
         fresh(rows, [tk("HTPR-1")], [pr(1, "HTPR-1")])
@@ -4318,6 +4373,14 @@ def second_ticket_self_test():
         # a short wait does not open it
         SNAP = snap({**first, "updated": iso(10)}, blocker, fresh)
         assert pick() is None and SECOND[0] is None, "waiting 10 minutes: no second ticket"
+        # HYCI-352: a held building ticket choose() could not resume opens the lane at once, whatever its wait; two owned still close it
+        free = {**first, "updated": iso(1)}
+        SNAP = snap(free, blocker, fresh, rel_={**rel, "HTPR-80": [[], []]})
+        assert second_ticket(1, [free]) is None, "a ticket with nothing to wait on and no failed resume: no second ticket"
+        RESUME_FAILED.add("HTPR-80")
+        assert second_ticket(1, [free]) and second_ticket(1, [free])["keys"] == ["HTPR-80"], "a failed resume counts as a wait"
+        assert second_ticket(1, [free, tk("HTPR-82", "AI Review")]) is None, "max 2 owned building tickets still holds"
+        RESUME_FAILED.clear()
         # a ledger row (the run's end) dates the wait, not the ticket's last change
         _LEDGER.clear()
         (RUNNER_STATE / "run-ledger.jsonl").write_text(json.dumps({"ts": iso(5), "runner": 1, "ticket": "HTPR-80", "state": "WAIT_CHECK"}) + "\n")
