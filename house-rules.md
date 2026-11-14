@@ -20,15 +20,14 @@ Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house
 - Fast mode off everywhere.
 - No automatic model fallback or router chain. DeepSeek is allowed.
 - A runner's brain comes from the ticket's brain tag. Map, roles, engines: `reference/brain-map.md`, `reference/engines.md`.
-- HARD: script first. Anything a script can do runs as a script on a timer, with no model. A model wakes only when the script finds work it cannot do. Then climb the ladder: Haiku, Sonnet, Opus only for the hardest cases. A chat with Valentin may run on Opus; its checks, crons and loops may not. Code work goes to the runner pool as a ticket. Opus in a timer needs `# opus-scan: allow` and a reason.
+- HARD: orchestrators follow the pstack orchestrate playbook. They spawn their own workers and verifiers. One owner per PR. The HARD lines on VPS CI, money and keys still win.
+- HARD: spread workers fairly over every plan: Claude, Pi on DeepSeek, Codex, Grok. Read `~/.local/state/pacing/allocation.json`. Fill the plan furthest behind pace first.
 - HARD: Cursor has no extra charges. Never report, propose or count Cursor extra usage as money.
 - Our own Claude or Codex subscription costs nothing extra. Using it is never money. Never ask him.
 
 ## Doing the work
 - HARD: every long-lived session listens to Agent Chat. Arm `fleet/runner-chat listen` as a background task at start, answer each message with `runner-chat reply` within a minute, rearm after each completion, run `listen --once` before ending a turn.
 - HARD: no CI or AI review on this VPS; both run only on GitHub's free hosted runners. Details: `reference/github.md`. Enforcer: `bin/no-vps-ci`.
-- HARD: one ticket, one runner, build to Done. The model never waits inside a run: it ends the run while review and checks run, and the picker resumes the same runner. Steps, runs, pick order and WIP cap: `reference/runner-pipeline.md`.
-- HARD: a runner that takes a ticket delivers it. It leaves only for a provider outage, `RUNNER TOO HARD <KEY> | why: ...`, removal from the roster or Valentin's own call.
 - HARD: a board 15 ticket with the `incident` label means customers are down. Any runner takes it first. Roll back first, then fix forward.
 - Move your tickets live. Every change that lands in a repo carries a ticket key.
 - Prove it, never claim it. "Looks good", "should work", bare "tests pass" are not evidence. Show a demo, before and after numbers or a walkthrough.
@@ -43,7 +42,7 @@ Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house
 - His direct order is his yes, in chat or on a ticket. Act that turn. Never re-ask, never file a confirm ticket. This covers money, keys and deletes he names himself.
 - He asks for a design, options or "what do you suggest"? Wait for his pick.
 - His yes in chat counts on the ticket. Quote him there that turn.
-- Leads and experts act on his direct order to move, close or relabel tickets, that turn. They still never run runners.
+- Leads and experts act on his direct order to move, close or relabel tickets, that turn.
 
 ## Tickets
 - Every ticket and comment follows `skills/tickets/`.
@@ -67,7 +66,7 @@ Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house
 - Slack: reply only inside the starting thread.
 
 ## Managers
-- Leads and experts own no runners. Report blockers to your own project's lead. Roles, pool, deadlocks: `reference/roster.md`.
+- Report blockers to your own project's lead. Roles and deadlocks: `reference/roster.md`.
 - Managers run `/manager-shift` at every check-in.
 
 ## Valentin's alone
@@ -91,7 +90,6 @@ Path: `~/.local/share/house-rules/house-rules.md`, synced from valentinyeo/house
 | `reference/setup.md` | Session start, installing pstack or caveman |
 | `reference/brain-map.md` | Picking a model, brain tag, helpers |
 | `reference/engines.md` | Engine or plan switch, reviewer, pacing |
-| `reference/runner-pipeline.md` | Runner picks, resumes or leaves a ticket; counting runs |
 | `reference/boards.md` | Filing or cleaning tickets; CI snags; board caps |
 | `reference/github.md` | Waiting on a PR, watching a run, CI |
 | `reference/roster.md` | Runners, managers, deadlocks, identities |
