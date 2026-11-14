@@ -14,7 +14,7 @@
      "then": "Valentin Review plus one marked Question; the runner keeps ownership"}
   ],
   "skip": ["BUILDING", "OWN_PR", "IDLE_NO_TICKET", "IDLE_CAP", "IDLE_PACER", "IDLE_LOAD"],
-  "skip_detail": "one-run:|sf-wait:|wait gate:|script owns",
+  "skip_detail": "one-run:|sf-wait:|wait gate:|script owns|ci-blocked hyci-\\d+",
   "invalid": {
     "WAIT_CHECK": "Waited on checks, release or timer",
     "PARKED": "Parked or handed back",
