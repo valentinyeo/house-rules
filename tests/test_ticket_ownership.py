@@ -85,7 +85,8 @@ class OwnershipTests(unittest.TestCase):
                 patch.object(pick, "skipped", return_value=False), \
                 patch.object(pick, "held_back", return_value=False), \
                 patch.object(pick, "open_blocked_by", return_value=False), \
-                patch.object(pick, "incident_step", return_value=None):
+                patch.object(pick, "incident_step", return_value=None), \
+                patch.object(pick, "open_prs", return_value=[]):
             self.assertEqual(pick.choose(6, True), (self.ticket, "own"))
             self.ticket["waiting"] = True
             with self.assertRaisesRegex(SystemExit, "keeps HYCI-404"):
