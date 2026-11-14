@@ -60,13 +60,13 @@ observe is held until its stated recheck time, else 30 minutes. A run that built
 too while its PR's checks run at the first pick (canary HYCI-358: the next run only found them running). Unreadable or late data, and any error, hold nothing.
 fleet/pick --replay-waits [DAYS] counts what it would have held in the run ledger. The park lane is not gated.
 One ticket, one run, one PR (13 Nov): a ticket whose open PR checks are still running (or finished but GitHub still says BLOCKED
-for under 30 minutes) is held from every lane (through resting()) and logged as "one-run: <KEY> PR open, checks pending"; a script
-watches the checks, a model has nothing to do yet. Valentin 14 Nov (HYCI-352): "no merge robot". One runner owns a ticket end to end:
-build, review rounds, merge its own PR, QA, Done. So a PR that is green, has only cancelled checks left, or has been BLOCKED with all
-checks finished for over 30 minutes is NOT held: the owner runner resumes for the merge and QA run (it updates the branch if behind,
-runs gh pr merge --squash with the App token, then QA, then Done). Red, conflicting and change-requested PRs go to the owner as PR
-fix runs, as before. Read from the shared open-PR list, so no extra GitHub call. A PR untouched for 6 hours (Urgent 1) is released.
-An incident is never held. The orphan lane skips a ticket whose open PR checks are still running (HYCI-358: two orphan parks in
+for under 30 minutes), or green, or with only cancelled checks left, is held from every lane (through resting()) and logged as
+"one-run: <KEY> PR open, checks pending|green"; a script owns it. Valentin 14 Nov (HYCI-352): merge needs no model. fleet/pr-merge, one
+instance per PR, merges the green PR with the repo's own login (the hypertask-runners App for hypertask-ai), reruns a cancelled check once
+and writes DEPLOY_WAIT after a merge until the production deploy ends. The owner runner resumes for QA once the PR is merged and the deploy
+has ended, and for a Fix run when the PR is red, conflicting or change-requested, or BLOCKED over 30 minutes with every check finished
+(it asks for the review again). Read from the shared open-PR list, so no extra GitHub call. A PR untouched for 6 hours (Urgent 1) is
+released. An incident is never held. The orphan lane skips a ticket whose open PR checks are still running (HYCI-358: two orphan parks in
 two minutes). fleet/runner refuses a launch with no ticket key.
 Cannot be built yet (HYCI-355): a new-work ticket that says it needs Valentin, a key only he or an admin can place, access,
 a design sign-off or a person at a PC is refused before any model starts ("cannot be built yet: <what>"). Text only, no
@@ -168,12 +168,13 @@ SHORT_REST = 2 * 3600
 REST_RESULTS = {"IDLE", "WAIT_CHECK", "FAULT"}
 URGENT_REST = 600
 # 13 Nov, Valentin: "ticket to run to pr is a one to one to one must". A ticket whose open PR checks still run needs a script (the
-# check watch), never a model. 14 Nov, Valentin (HYCI-352): "no merge robot": once the checks end the owner runner resumes and merges
-# its own PR, then QA and Done. The old on/off flag file and the second wait file are gone.
+# check watch), never a model. 14 Nov, Valentin (HYCI-352): merge needs no model either: fleet/pr-merge merges a green PR (one script
+# instance per PR, no shared queue), the owner runner resumes for a Fix run when it clashes or goes red and for QA once it is merged.
 BLOCKED_S = 30 * 60  # all checks finished, GitHub still says BLOCKED this long: a review check never reported, the owner asks again
 SF_RELEASE_WAIT = Path(os.environ.get("FLEET_SF_RELEASE_WAIT", HOME / ".local/state/fleet/sf-release-wait.json"))  # written by fleet/sf-release-watch
-WAIT_FILES = lambda: (SF_RELEASE_WAIT,)
-WAIT_STATES = ("pr", "release")
+DEPLOY_WAIT = Path(os.environ.get("FLEET_DEPLOY_WAIT", HOME / ".local/state/fleet/deploy-wait.json"))  # written by fleet/pr-merge after a merge, until its production deploy ends (HYCI-352)
+WAIT_FILES = lambda: (SF_RELEASE_WAIT, DEPLOY_WAIT)
+WAIT_STATES = ("pr", "release", "deploy")
 SF_WAIT_FRESH_S = 900  # an older file holds nothing: a dead watcher must not freeze tickets
 ALLOCATION = Path(os.environ.get("FLEET_PICK_ALLOCATION", HOME / ".local/state/pacing/allocation.json"))
 ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without it means it stopped
@@ -1069,10 +1070,9 @@ def resting(n, dry):
     rest -= fault_rest_over(rest, now)
     waiting = rest | gate
     if waiting:
-        # HYCI-352 (Valentin 14 Nov: "no merge robot"): a ticket whose PR is green, cancelled only or blocked for long goes to its owner
-        # for the merge run, whatever an IDLE rest or the wait gate still says. HTPR-9055 (PR 3496 green and clean, review passed) sat in
-        # the gate after a PARKED end because nothing in its fingerprint changed once the PR turned green. At most PR_FIX_RUNS ends since
-        # the PR's last update, so a merge run that ends waiting again without a push puts the hold back (pr_fix_due).
+        # HYCI-352: a ticket whose PR is BLOCKED over 30 minutes with every check finished goes to its owner (ask for the review again),
+        # whatever an IDLE rest or the wait gate still says: nothing in the gate's fingerprint changes once every check ended. At most
+        # PR_FIX_RUNS ends since the PR's last update, so a run that ends waiting again without a push puts the hold back (pr_fix_due).
         ends = defaultdict(list)
         for r in ledger_rows():
             k, when = r.get("ticket"), stamp_time(r.get("ts", ""))
@@ -1458,15 +1458,14 @@ def waits_until(now=None):
 
 
 PR_FIX_RUNS = 2  # house rules: a red PR is a PR fix run, at most 2 (pr_fix_max) per PR state
-# PR states that need the owner runner (HYCI-352, no merge robot): the three fix states, plus green (merge, QA, Done), cancelled only
-# (rerun once) and blocked over BLOCKED_S (ask for the review again). A rest or recheck time from the run that waited must not hide them.
-OWNER_STATES = ("red", "conflicting", "change request", "green", "cancelled", "blocked")
-MERGE_STATES = ("green", "cancelled", "blocked")  # the states the merge robot used to take; resting() lifts the IDLE rest and the gate for these
+# PR states that need the owner runner (HYCI-352): the three fix states, plus blocked over BLOCKED_S (ask for the review again). A rest or
+# recheck time from the run that waited must not hide them. Green and cancelled-only are fleet/pr-merge's: a script merges or reruns them.
+OWNER_STATES = ("red", "conflicting", "change request", "blocked")
+MERGE_STATES = ("blocked",)  # resting() lifts the IDLE rest and the gate for these
 
 
 def pr_fix_due(key, ends, states=None):
-    """True when the ticket's open PR needs its owner (OWNER_STATES: red, conflicting, change request, and since HYCI-352 green,
-    cancelled only, blocked over 30 minutes) and fewer than PR_FIX_RUNS waiting or faulted ends came after the PR's last update. The
+    """True when the ticket's open PR needs its owner (OWNER_STATES: red, conflicting, change request, blocked over 30 minutes) and fewer than PR_FIX_RUNS waiting or faulted ends came after the PR's last update. The
     WAIT_CHECK streak and the recheck time only mean "a script waits on checks"; a PR that has no check left to wait for gets its owner. A fix run that ends waiting again without a
     push counts as the second and the hold returns, so it cannot loop; a push changes the PR's update time and resets the count.
     Software Factory tickets read their PR in the app repo (sf_open_prs). Unreadable GitHub keeps the hold (no extra run on a lost read)."""
@@ -1768,10 +1767,10 @@ def wait_gate(dry, now=None):
 
 
 def one_run_state(p, now=None):
-    """(word, script's) for one open PR: what it needs next. Only a PR whose checks still run needs a script, so only "pending" is
-    held. Everything else needs the owner runner: red, conflicting, change-requested, draft and unreadable PRs; and, since HYCI-352
-    (Valentin 14 Nov: no merge robot), a green PR ("green": merge it, QA, Done), a PR with only cancelled checks left ("cancelled":
-    rerun once), and a PR whose checks all finished but GitHub still says BLOCKED for BLOCKED_S ("blocked": ask for the review again).
+    """(word, script's) for one open PR: what it needs next. Running checks ("pending"), a green PR ("green": fleet/pr-merge merges it) and
+    a PR with only cancelled checks left ("cancelled": fleet/pr-merge reruns it once) need a script, so they are held (HYCI-352, Valentin
+    14 Nov: merge needs no model). Everything else needs the owner runner: red, conflicting, change-requested, draft and unreadable PRs,
+    and a PR whose checks all finished but GitHub still says BLOCKED for BLOCKED_S ("blocked": ask for the review again).
     An empty or missing check list fails open, as every gate in this file does."""
     checks = p.get("checks")
     if p.get("draft"):
@@ -1790,9 +1789,9 @@ def one_run_state(p, now=None):
     if any(RUNNING_CHECK.search(c) for c in checks):
         return "pending", True
     # Only CANCELLED checks are left (HYCI-388, 13 Nov: HTPR-9106 woke a runner each time). A cancelled check whose newer attempt exists
-    # is already dropped by failed_checks(). The owner reruns the cancelled check once, then merges.
+    # is already dropped by failed_checks(). fleet/pr-merge reruns the cancelled check once, then merges.
     if failed:
-        return "cancelled", False
+        return "cancelled", True
     # Every listed check is done but GitHub still says BLOCKED: a required check has not reported yet (HYCI-358, 13 Nov 16:36:
     # ai-review and claude-review were not on the list, the PR read green, a run started and parked). Nothing a model can do for 30
     # minutes; after that the review check never came and the owner asks for it again (comment @codex review).
@@ -1802,7 +1801,7 @@ def one_run_state(p, now=None):
         if updated and (now - updated).total_seconds() > BLOCKED_S:
             return "blocked", False
         return "pending", True
-    return "green", False
+    return "green", True
 
 
 _SF_PRS = {}
@@ -1886,12 +1885,13 @@ def ticket_id(key):
 def sf_wait_hold(now):
     """Tickets a script is waiting on (HYCI-352, SOFT-2273: five runs, four only waited). fleet/sf-release-watch writes SF_RELEASE_WAIT every
     five minutes: state pr (PR open, checks or review still running) or release (merged, release not out). Either way the next step is
-    a script's, so no lane hands the ticket to a model. A green PR is not listed: its owner merges it. Red, conflicting, change-requested
-    and failed-release tickets are never held. A file older than SF_WAIT_FRESH_S holds nothing, and so does a wait older than
+    a script's, so no lane hands the ticket to a model. fleet/pr-merge writes DEPLOY_WAIT: state deploy (merged, production deploy of the merge
+    commit not finished), so a merged ticket reaches its runner for the live check only once the deploy ended. Red, conflicting,
+    change-requested, failed-release and failed-deploy tickets are never held. A file older than SF_WAIT_FRESH_S holds nothing, and so does a wait older than
     gate_cap(t). Incidents are never held. Makes no GitHub call. Fails open."""
     held = set()
     for path in WAIT_FILES():
-        name = "sf-wait"
+        name = "deploy-wait" if path == DEPLOY_WAIT else "sf-wait"
         try:
             doc = json.loads(path.read_text())
             age = now.timestamp() - float(doc["at"])
@@ -1921,7 +1921,7 @@ HOUSE_PRS_CACHE = Path(STATE) / "house-prs.json"
 
 def house_prs():
     """Open PRs on this repo (HYCI-435, 14 Nov: a CI-lane runner's PR here was not in open_prs(), which reads hypertask-ai/hypertask, so the
-    one-run hold never saw it, the runner ended WAIT_CHECK and was woken again to wait). Same shape as open_prs(). The owner merges
+    one-run hold never saw it, the runner ended WAIT_CHECK and was woken again to wait). Same shape as open_prs(). fleet/pr-merge merges
     them when green (HYCI-352). Read with the default gh login: the runner App cannot see this private repo. Cached ten minutes. Fails open to [].
     Only after a real open_prs() read (SNAP has prs_at), so a test that injects SNAP makes no GitHub call."""
     if not SNAP or not SNAP.get("prs_at"):
@@ -1955,9 +1955,9 @@ def house_prs():
 
 def one_run_hold(dry, now=None):
     """One ticket, one run, one PR (13 Nov). Tickets whose open PR checks are still running (or all finished with GitHub BLOCKED
-    for under BLOCKED_S), no conflict and no change request: no lane hands them to a model (they all read resting()). A script
-    watches the checks. Valentin 14 Nov (HYCI-352): "no merge robot". Once the checks end, the PR is green, cancelled only or
-    blocked for long, and the owner runner resumes: it merges its own PR, does QA, moves the ticket to Done. So green is not held.
+    for under BLOCKED_S), or green, or cancelled only, no conflict and no change request: no lane hands them to a model (they all read
+    resting()). A script watches the checks and merges the green PR (fleet/pr-merge, HYCI-352, Valentin 14 Nov: merge needs no model);
+    the owner resumes when the PR goes red, conflicts, has a change request or is BLOCKED over 30 minutes, and for QA after the merge.
     Read from the open-PR list the pick already holds (shared 10-minute cache): no new GitHub call. An incident is never
     held, and a PR untouched for gate_cap(t) (6 hours, Urgent 1 hour) is released so a stalled PR gets looked at."""
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -1982,9 +1982,10 @@ def one_run_hold(dry, now=None):
             newest = max((x for x in stamps if x), default=None)
             if newest is None or (now - newest).total_seconds() > gate_cap(t):
                 continue
-            log(f"one-run: {key} PR open, checks pending")
+            word = "pending" if any(x[0] == "pending" for x in states) else "green" if all(x[0] == "green" for x in states) else "cancelled"
+            log(f"one-run: {key} PR open, checks {word}")
             held.add(key)
-            note(key, "one-run: PR open, checks pending")
+            note(key, f"one-run: PR open, checks {word}")
     except Exception as e:
         log(f"one-run: error, nothing held ({type(e).__name__}: {str(e)[:80]})")
         held = set()
@@ -3544,21 +3545,22 @@ def wait_gate_self_test():
         finally:
             idle.unlink()
 
-        # HYCI-352 (14 Nov, HTPR-9055): a PR that is green when the run parks has nothing left to change, so the gate and the IDLE rest
-        # held it for hours although its owner has the merge to do. A green PR goes to its owner; a second end without a push holds again.
-        green = lambda: pr(1, "HTPR-1", checks=("ci=SUCCESS", "ai-review=SUCCESS"), review="APPROVED")
-        fresh([wait("HTPR-1", 5, "RUNNER PARKED waits on review", "PARKED")], [tk("HTPR-1")], [green()])
+        # HYCI-352 (14 Nov, HTPR-9055): a PR whose checks all finished while GitHub still says BLOCKED for over 30 minutes (the review
+        # never reported) has nothing left to change, so the gate and the IDLE rest held it for hours. Its owner asks for the review again;
+        # a second end without a push holds again. A green PR is fleet/pr-merge's: held, never offered to a model.
+        blocked = lambda: pr(1, "HTPR-1", checks=("ci=SUCCESS", "e2e=SUCCESS")) | {"merge_state": "BLOCKED", "updated": ago(45)}
+        fresh([wait("HTPR-1", 5, "RUNNER PARKED waits on review", "PARKED")], [tk("HTPR-1")], [blocked()])
         idle = RUNNER_STATE / "runner-2.idle"
         idle.write_text(f"{ago(5)} HTPR-1\n")
         try:
             _GATE.clear()
             _ONE_RUN.clear()
-            assert held() == {"HTPR-1"}, "the gate alone still holds a green PR whose fingerprint never changed"
+            assert held() == {"HTPR-1"}, "the gate alone still holds a blocked PR whose fingerprint never changed"
             _GATE.clear()
             _ONE_RUN.clear()
-            assert "HTPR-1" not in resting(2, True), "a green PR is offered to its owner for the merge run, gate and IDLE rest lifted"
+            assert "HTPR-1" not in resting(2, True), "a PR blocked for long is offered to its owner, gate and IDLE rest lifted"
             fresh([wait("HTPR-1", 9, "RUNNER PARKED waits on review", "PARKED"), wait("HTPR-1", 5, "RUNNER PARKED waits on review", "PARKED")],
-                  [tk("HTPR-1")], [green()])
+                  [tk("HTPR-1")], [blocked()])
             _GATE.clear()
             _ONE_RUN.clear()
             assert "HTPR-1" in resting(2, True), "two ends since the PR's last update: the hold returns, no loop"
@@ -3566,6 +3568,10 @@ def wait_gate_self_test():
             _GATE.clear()
             _ONE_RUN.clear()
             assert "HTPR-1" in resting(2, True), "a PR whose checks still run stays held"
+            fresh([wait("HTPR-1", 5, "RUNNER IDLE checks green", "IDLE")], [tk("HTPR-1")], [pr(1, "HTPR-1", checks=("ci=SUCCESS", "e2e=SUCCESS"))])
+            _GATE.clear()
+            _ONE_RUN.clear()
+            assert "HTPR-1" in resting(2, True), "a green PR stays held: the script merges it, no model wakes for it"
         finally:
             idle.unlink()
 
@@ -3791,7 +3797,7 @@ def ticket_ready_self_test():
 
 def one_run_self_test():
     """One ticket, one run, one PR: running checks hold the ticket from every lane; green, cancelled-only, long-BLOCKED, red,
-    conflicting, change-requested, draft, unread, incident and stalled PRs are never held (HYCI-352: the owner merges its own PR)."""
+    conflicting, change-requested, draft, unread, incident and stalled PRs are never held (HYCI-352: fleet/pr-merge merges a green PR, so a green one is held)."""
     global SNAP, log
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
@@ -3813,8 +3819,9 @@ def one_run_self_test():
         return one_run_hold(dry, now)
 
     try:
-        assert held([tk("HTPR-1")], [pr(1, "HTPR-1")]) == set() and not lines, "green checks hold nothing: the owner merges its PR (HYCI-352)"
-        assert "HTPR-1" not in resting(2, True), "a green PR is offered to its owner through every lane"
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1")]) == {"HTPR-1"} and lines == ["one-run: HTPR-1 PR open, checks green"], \
+            "green checks hold the ticket: fleet/pr-merge merges the PR (HYCI-352), no model wakes for it"
+        assert "HTPR-1" in resting(2, True), "a green PR is held from every lane, not offered to a runner"
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1", ("ci=IN_PROGRESS", "e2e=SUCCESS"))]) == {"HTPR-1"}, "pending checks hold the ticket"
         assert lines == ["one-run: HTPR-1 PR open, checks pending"], lines
         assert "HTPR-1" in resting(2, True) and "HTPR-1" in Skip(set(), resting(2, True)), "every lane reads the hold through resting()"
@@ -3823,13 +3830,13 @@ def one_run_self_test():
         saved_cache = HOUSE_PRS_CACHE
         HOUSE_PRS_CACHE = Path(STATE) / "house-prs-selftest.json"
         try:
-            for checks, hold in ((["self-test=IN_PROGRESS"], {"HYCI-435"}), (["self-test=SUCCESS"], set())):
+            for checks, hold in ((["self-test=IN_PROGRESS"], {"HYCI-435"}), (["self-test=SUCCESS"], {"HYCI-435"})):
                 HOUSE_PRS_CACHE.write_text(json.dumps({"at": time.time(), "prs": [pr(483, "HYCI-435", checks)]}))
                 SNAP = {"tickets": [tk("HYCI-435")], "rel": {}, "prs": [], "prs_at": time.time(), "incidents": []}
                 _ONE_RUN.clear()
                 lines.clear()
                 assert one_run_hold(True, now) == hold, (checks, lines)
-                assert lines == ([f"one-run: HYCI-435 PR open, checks pending"] if hold else []), (checks, lines)
+                assert lines == ([f"one-run: HYCI-435 PR open, checks {'pending' if checks[0].endswith('IN_PROGRESS') else 'green'}"]), (checks, lines)
             HOUSE_PRS_CACHE.write_text(json.dumps({"at": time.time(), "prs": [pr(483, "HYCI-435", ["self-test=FAILURE"])]}))
             _ONE_RUN.clear()
             lines.clear()
@@ -3842,17 +3849,16 @@ def one_run_self_test():
         for why, extra in (("a failed check", {"checks": ["ci=FAILURE", "e2e=IN_PROGRESS"]}), ("a red flag", {"red": True}),
                            ("a conflict", {"mergeable": "CONFLICTING"}), ("a change request", {"review": "CHANGES_REQUESTED"}),
                            ("a draft", {"draft": True}), ("an unread check list", {"checks": []}), ("a REST-only list", {"checks": None}),
-                           ("a stalled PR", {"checks": ["ci=IN_PROGRESS"], "updated": 400}), ("a green PR", {}),
-                           ("a green PR behind its base", {"merge_state": "BEHIND"})):
+                           ("a stalled PR", {"checks": ["ci=IN_PROGRESS"], "updated": 400})):
             assert held([tk("HTPR-1")], [pr(1, "HTPR-1", **extra)]) == set() and not lines, f"{why} is a model's job: not held"
         for why, checks, state in (("a cancelled check with a newer attempt running", ("bugfix-regression=CANCELLED", "bugfix-regression=IN_PROGRESS", "e2e=SUCCESS"), "pending"),
                                    ("a cancelled check with a newer attempt green", ("bugfix-regression=CANCELLED", "bugfix-regression=SUCCESS"), "green"),
                                    ("only a cancelled check left", ("bugfix-regression=CANCELLED", "e2e=SUCCESS"), "cancelled")):
             assert one_run_state(pr(1, "HTPR-1", checks))[0] == state, why
-            assert (held([tk("HTPR-1")], [pr(1, "HTPR-1", checks)]) == {"HTPR-1"}) == (state == "pending"), \
-                f"{why} is not red; only a running check is held, the owner takes the rest: {lines}"
+            assert held([tk("HTPR-1")], [pr(1, "HTPR-1", checks)]) == {"HTPR-1"}, \
+                f"{why} is not red; fleet/pr-merge owns pending, green and cancelled-only PRs, so all three are held: {lines}"
         assert one_run_state(pr(1, "HTPR-1", ("bugfix-regression=CANCELLED", "bugfix-regression=IN_PROGRESS"))) == ("pending", True)
-        assert one_run_state(pr(1, "HTPR-1", ("bugfix-regression=CANCELLED", "e2e=SUCCESS"))) == ("cancelled", False), "a lone cancel is the owner's: rerun once"
+        assert one_run_state(pr(1, "HTPR-1", ("bugfix-regression=CANCELLED", "e2e=SUCCESS"))) == ("cancelled", True), "a lone cancel is the script's: fleet/pr-merge reruns it once"
         assert one_run_state(pr(1, "HTPR-1", ("bugfix-regression=CANCELLED", "e2e=FAILURE"))) == ("red", False), "a real failure stays red"
         assert one_run_state(pr(1, "HTPR-1", ("ci=FAILURE", "ci=SUCCESS"))) == ("red", False), "only CANCELLED attempts are superseded"
         assert gate_checks(["a=CANCELLED", "a=IN_PROGRESS"]) == ["running"], gate_checks(["a=CANCELLED", "a=IN_PROGRESS"])
@@ -3867,15 +3873,18 @@ def one_run_self_test():
         assert one_run_state(pr(1, "HTPR-1", merge_state="BLOCKED", updated=45), now) == ("blocked", False) \
             and held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="BLOCKED", updated=45)]) == set(), \
             "BLOCKED over 30 minutes with every check finished: the review never reported, the owner asks again"
-        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="CLEAN")]) == set() and one_run_state(pr(1, "HTPR-1", merge_state="CLEAN"))[0] == "green", \
-            "CLEAN reads green: the owner merges"
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="CLEAN")]) == {"HTPR-1"} and one_run_state(pr(1, "HTPR-1", merge_state="CLEAN"))[0] == "green", \
+            "CLEAN reads green: fleet/pr-merge merges"
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", merge_state="BEHIND")]) == {"HTPR-1"}, "a green PR behind its base is still the script's: it updates the branch"
         assert held([tk("HTPR-1", prio="Urgent")], [pr(1, "HTPR-1", ("ci=IN_PROGRESS",), updated=90)]) == set(), "an Urgent PR is released after an hour"
         assert held([tk("HTPR-1", ("incident",))], [pr(1, "HTPR-1", ("ci=IN_PROGRESS",))]) == set(), "an incident is never held"
         assert held([tk("HTPR-1")], [pr(1, "HTPR-1", ("ci=IN_PROGRESS",)), pr(2, "HTPR-1", ("ci=FAILURE",))]) == set(), "one red PR of two wakes the ticket"
-        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", ("ci=IN_PROGRESS",)), pr(2, "HTPR-1")]) == set(), "one green PR of two wakes the owner"
-        # HYCI-352: a green, cancelled-only or long-blocked PR lifts the rest a waiting run left (recheck time, three waits in two hours)
+        assert held([tk("HTPR-1")], [pr(1, "HTPR-1", ("ci=IN_PROGRESS",)), pr(2, "HTPR-1")]) == {"HTPR-1"}, "a running and a green PR are both the script's"
+        # HYCI-352: a long-blocked PR lifts the rest a waiting run left (recheck time, three waits in two hours); a green PR does not
         SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "prs": [pr(1, "HTPR-1")], "incidents": []}
-        assert pr_fix_due("HTPR-1", []), "a green PR with no wait since its last update: the owner resumes for the merge"
+        assert not pr_fix_due("HTPR-1", []), "a green PR is the script's: the owner is not resumed to merge it"
+        SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "prs": [pr(1, "HTPR-1", merge_state="BLOCKED", updated=45)], "incidents": []}
+        assert pr_fix_due("HTPR-1", []), "a long-blocked PR with no wait since its last update: the owner asks for the review again"
         assert not pr_fix_due("HTPR-1", [now, now]), "two waits or faults since the last PR update: the hold returns, no loop"
         SNAP = {"tickets": [tk("HTPR-1")], "rel": {}, "prs": [pr(1, "HTPR-1", ("ci=IN_PROGRESS",))], "incidents": []}
         assert not pr_fix_due("HTPR-1", []), "running checks stay a script's wait"
