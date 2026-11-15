@@ -9,6 +9,7 @@ new cloudflare work starts from the joelhooks/rat-stack template.
 valentin's lines:
 - every review and verifier runs on github's free hosted runners. no orchestrator starts a reviewer or verifier on this server.
 - valentin decides money, keys, going public and deleting live data. ask him once, with your pick.
+- github billing is valentin's. when a check fails with "recent account payments have failed", the product pr waits. never verify it on this server or merge around the check. say it once on the ticket, then build the next unit.
 
 everything else is a check, not a rule:
 - no-vps-ci stops ci on this server
