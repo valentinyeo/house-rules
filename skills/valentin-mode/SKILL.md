@@ -35,7 +35,7 @@ Run `/pstack:poteto-mode` for the task and follow `/house-rules`. This skill add
 - **DeepSeek:** Always Flash, never Pro. Fast mode stays off on every model.
 - **Commands:**
   - Grok: `cursor-agent -p --model grok-4.7 "$(cat brief.txt)"`
-  - DeepSeek: `~/.opencode/bin/opencode run -m opencode-go/deepseek-v4.1-flash "$(cat brief.txt)"`
+  - DeepSeek: `pi -p --provider opencode-go --model deepseek-v4.1-flash --thinking medium "$(cat brief.txt)"`. Never the OpenCode app; the `deepseek-via-pi` hook blocks it.
   - Codex: `hax -p --provider=codex --model=gpt-6.1-sol --effort=medium "$(cat brief.txt)"`
 - **Briefs:** Put each brief in a file and pass it with `"$(cat file)"`; the secrets guard blocks some inline prompts. Open each brief with the user's goal.
 - **Own the result:** Read each worker's diff and run its checks yourself before you report it.
