@@ -14,4 +14,3 @@ valentin's lines:
 everything else is a check, not a rule:
 - no-vps-ci stops ci on this server
 - secrets-guard blocks secrets
-- the pacer picks which plan each worker runs on
