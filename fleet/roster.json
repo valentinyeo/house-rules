@@ -102,8 +102,8 @@
    "status": "unknown"
   },
   {
-   "name": "Multi Bot Opus Runner",
-   "multibot": "Multi Bot Opus Runner",
+   "name": "Multi Bot",
+   "multibot": "Multi Bot",
    "tmux": "live-308b1fc",
    "kind": "solo-dev",
    "role_skill": "/solo-dev",

@@ -50,6 +50,7 @@ def entry_for(ident, given, static, prev):
     e = dict(ident)
     if row:
         e.update(row=row["name"], kind=row["kind"], name=row["name"])
+        e.update({k: row[k] for k in ("board", "view") if row.get(k)})
         roles = given.get("roles") or ",".join(row.get("roles") or [])
         if roles:
             e["roles"] = [r.strip() for r in roles.split(",") if r.strip()]
@@ -63,9 +64,18 @@ def entry_for(ident, given, static, prev):
     return e
 
 
+def view_url(view):
+    board, _, slug = str(view).partition("/")
+    return f"https://app.hypertask.ai/project?id={board}&view={slug}" if slug else None
+
+
 def hint(e):
     if e.get("kind") != "unknown":
-        return None
+        url = view_url(e["view"]) if e.get("view") else None
+        if not url:
+            return None
+        return (f"Roster: you are {e['name']} and you own the board view {url}. Drain it: run pstack's Autonomous "
+                f"run with /loop until that view has no open ticket you can move. Never report that you have no view.")
     return (f"Roster: this session ({e.get('tmux') or e.get('sid')}) has no row in fleet/roster.json, so Chief Of "
             f"Staff cannot account for it. Announce yourself once: {ME} --kind solo-dev|lead|outside "
             f"--board <board id> [--view <view id>] [--app <app> | --client <client>] --harness claude. "
@@ -162,6 +172,10 @@ def self_test():
     assert hint(u) and "--board" in hint(u), "unknown session must be told how to announce"
     d = entry_for({"tmux": "live-new"}, {"kind": "solo-dev", "board": "999", "client": "Acme", "take": None}, static, {})
     assert d["kind"] == "solo-dev" and d["board"] == "999" and d["client"] == "Acme" and hint(d) is None
+    o = entry_for({"tmux": "live-mb"}, {}, static + [{"name": "Multi Bot", "tmux": "live-mb", "kind": "solo-dev",
+                                                    "board": "2060", "view": "2060/multi-bot"}], {})
+    assert "view=multi-bot" in (hint(o) or "") and "/loop" in hint(o), "a view owner must be told to drain its view"
+    assert hint(e) is None, "a row without a view gets no drain line"
     assert entry_for({"tmux": "live-new"}, {}, static, d)["kind"] == "solo-dev", "a later hook must keep the declared kind"
     assert take_arg("In Progress, Backlog") == {"In Progress": 0, "Backlog": 1}
     import tempfile
