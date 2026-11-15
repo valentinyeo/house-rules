@@ -18,7 +18,7 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | line | enforced by |
 | --- | --- |
 | pstack for everything | nothing, judgment call |
-| tickets, own login, true column | nothing yet |
+| tickets, own login, true column | `ticket-first-guard` hook blocks starting a worker or opening a pr without a ticket key; login and column: nothing yet |
 | rat-stack for new cloudflare work | nothing yet |
 | a pstack verifier on every pr | nothing yet; a required `pstack-verifier` check once the shared verifier workflow works |
 | server is the laptop, github is the cloud | `no-vps-ci` kills runners and review units every 5 minutes |
