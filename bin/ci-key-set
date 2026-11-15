@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Give a repo's GitHub review and verifier runners one of Valentin's plan logins, as a repo secret.
+Valentin authorised this for every repo (2026-11-15): agents run it themselves and never ask him.
+The value goes straight from the local login to `gh secret set`; it is never printed or written to a file.
+
+ci-key-set OWNER/REPO deepseek     OPENCODE_API_KEY from Pi's opencode-go login (OpenCode Go plan, DeepSeek Flash via Pi)
+ci-key-set OWNER/REPO claude       CLAUDE_CODE_OAUTH_TOKEN from 1Password "Claude runner OAuth token (1y)" (only for judging DeepSeek-authored PRs)
+ci-key-set OWNER/REPO --list       which plan secrets the repo already has
+ci-key-set --self-test
+"""
+import subprocess
+import sys
+
+PI = "/home/valentin/.npm-global/bin/pi"
+PLANS = {
+    "deepseek": ("OPENCODE_API_KEY", [PI, "auth", "print-api-key", "--provider", "opencode-go"]),
+    "claude": ("CLAUDE_CODE_OAUTH_TOKEN", ["/home/valentin/.local/bin/stack-key", "Claude runner OAuth token (1y)",
+                                          "CLAUDE_CODE_OAUTH_TOKEN"]),
+}
+
+
+def secret_names(repo):
+    out = subprocess.run(["gh", "secret", "list", "-R", repo], capture_output=True, text=True, timeout=60)
+    return [line.split("\t")[0] for line in out.stdout.splitlines() if line.strip()]
+
+
+def set_plan(repo, plan):
+    name, reader = PLANS[plan]
+    value = subprocess.run(reader, capture_output=True, text=True, timeout=60)
+    if value.returncode or not value.stdout.strip():
+        print(f"ci-key-set: no {plan} login on this server ({' '.join(reader[:3])} failed)", file=sys.stderr)
+        return 1
+    done = subprocess.run(["gh", "secret", "set", name, "-R", repo], input=value.stdout.strip(), text=True,
+                          capture_output=True, timeout=60)
+    if done.returncode:
+        print(f"ci-key-set: gh secret set {name} on {repo} failed: {done.stderr.strip()}", file=sys.stderr)
+        return 1
+    print(f"ci-key-set: {repo} has {name} ({plan} plan)")
+    return 0
+
+
+def self_test():
+    ok = set(PLANS) == {"deepseek", "claude"} and PLANS["deepseek"][0] == "OPENCODE_API_KEY" and "opencode-go" in PLANS["deepseek"][1]
+    print("ci-key-set self-test ok" if ok else "ci-key-set self-test FAILED")
+    return 0 if ok else 1
+
+
+def main(argv):
+    if argv == ["--self-test"]:
+        return self_test()
+    if len(argv) != 2 or "/" not in argv[0] or (argv[1] not in PLANS and argv[1] != "--list"):
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    repo, what = argv
+    if what == "--list":
+        names = [n for n in secret_names(repo) if n in {v[0] for v in PLANS.values()}]
+        print(f"{repo}: {', '.join(names) or 'no plan secrets'}")
+        return 0
+    return set_plan(repo, what)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -7,7 +7,11 @@
 
 Checks:
   date         a rule line with "(20xx-" or "why:". Dates and reasons go in the PR body.
+  enforcer     an Enforcement row whose second cell is not "judgment", "not yet" or a backticked check (in --diff mode: also "not yet" rows growing past BASE)
+  format       a house-rules.md bullet outside Enforcement that is not "- **Label:** sentence."
   frontmatter  SKILL.md without name, description, a trigger ("use when ...") in it, or a description over 1024 characters
+  length       a rule bullet over 45 words (each code span counts as one word)
+  pair         a rule label with no row in the Enforcement table, or an Enforcement row whose rule has no bullet
   size         SKILL.md over 500 lines: move detail to reference/<topic>.md
   table        a path in the "Read X when Y" table of house-rules.md that does not exist
   orphan       a reference/*.md file that house-rules.md and no skill points to
@@ -26,10 +30,13 @@ MAX_FILE_WORDS = 1500
 WORD_CEILING = MAX_FILE_WORDS  # in --diff mode the file may not grow past the cap
 MAX_DESC = 1024
 MAX_SKILL_LINES = 500
+MAX_RULE_WORDS = 45
 
 DATE_RE = re.compile(r"\(20\d\d-|\bwhy:", re.I)
 CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
 URL_RE = re.compile(r"https?://\S+")
+RULE_RE = re.compile(r"^- \*\*[^*]+:\*\* .+$")
+LABEL_RE = re.compile(r"^- \*\*([^*]+):\*\*")
 
 
 def sh(root, *args, check=True):
@@ -85,6 +92,113 @@ def line_problems(s):
     if DATE_RE.search(c):
         return [("date", "dates and why: go in the PR body, not the rule")]
     return []
+
+
+def md_lines(text):
+    """(lineno, stripped line, in_fence) for markdown lines, YAML frontmatter skipped."""
+    lines = text.split("\n")
+    start = 0
+    if lines and lines[0].strip() == "---":
+        start = 1
+        while start < len(lines) and lines[start].strip() != "---":
+            start += 1
+        start += 1
+    out, fence = [], False
+    for n in range(start, len(lines)):
+        s = lines[n].strip()
+        if s.startswith("```"):
+            fence = not fence
+            out.append((n + 1, s, True))
+        else:
+            out.append((n + 1, s, fence))
+    return out
+
+
+def rule_bullets(text):
+    """(lineno, stripped line, label or None) for "- " bullets of house-rules.md outside Enforcement."""
+    out, section = [], ""
+    for n, s, fence in md_lines(text):
+        if fence:
+            continue
+        if s.startswith("#"):
+            section = s.lstrip("#").strip().lower()
+        elif not section.startswith("enforcement") and s.startswith("- "):
+            m = LABEL_RE.match(s) if RULE_RE.match(s) else None
+            out.append((n, s, m.group(1) if m else None))
+    return out
+
+
+def enforcement_rows(text, fallback=True):
+    """(lineno, rule cell, enforced-by cell) for the table under the Enforcement heading.
+
+    fallback reads a table whose header says "Enforced by" in a file with no Enforcement
+    heading, so an old-format file reports its rows as unpaired.
+    """
+    lines = [(n, s) for n, s, fence in md_lines(text) if not fence]
+    has_section = any(s.startswith("#") and s.lstrip("#").strip().lower().startswith("enforcement") for _, s in lines)
+    rows, insec, header, want = [], False, True, False
+    for n, s in lines:
+        if s.startswith("#"):
+            insec = s.lstrip("#").strip().lower().startswith("enforcement")
+            header, want = True, insec
+            continue
+        if not s.startswith("|") or not (insec or (fallback and not has_section)):
+            continue
+        cells = [c.strip() for c in s.split("|")]
+        if cells and not cells[0]:
+            cells = cells[1:]
+        if cells and not cells[-1]:
+            cells = cells[:-1]
+        if header:
+            header = False
+            want = len(cells) >= 2 and (insec or "enforced by" in cells[1].lower())
+            continue
+        if not want or len(cells) < 2:
+            continue
+        if all(re.fullmatch(r":?-{2,}:?", c) for c in cells[:2]):
+            continue
+        rows.append((n, cells[0], cells[1]))
+    return rows
+
+
+def enforcer_ok(cell):
+    c = cell.strip().lower()
+    return c in ("judgment", "not yet") or "`" in cell
+
+
+def house_rules_problems(text, base_text=None):
+    """(lineno, code, message) for the labelled-rule format of house-rules.md."""
+    out, labelled = [], []
+    bullets, rows = rule_bullets(text), enforcement_rows(text)
+    for n, s, label in bullets:
+        if label is None:
+            out.append((n, "format", 'write "- **Label:** imperative sentence.", one rule per bullet'))
+            continue
+        labelled.append((n, label))
+        words = len(CODE_SPAN_RE.sub(" CODE ", s).split())
+        if words > MAX_RULE_WORDS:
+            out.append((n, "length", "%d words, max %d: cut it or move detail to a reference file" % (words, MAX_RULE_WORDS)))
+    table = set(r[1] for r in rows)
+    for n, label in labelled:
+        if label not in table:
+            out.append((n, "pair", "no Enforcement row for %s" % label))
+    names = set(l for _, l in labelled)
+    for n, rule, enforced in rows:
+        if rule not in names:
+            out.append((n, "pair", "Enforcement row %s has no rule bullet" % rule))
+        if not enforcer_ok(enforced):
+            out.append((n, "enforcer", 'second cell must be "judgment", "not yet", or a backticked check'))
+    if base_text is not None:
+        # an old-format base has no Enforcement section, so the first table is grandfathered
+        base = enforcement_rows(base_text, fallback=False)
+        if base:  # the first table in a file is grandfathered
+            before = sum(1 for r in base if r[2].strip().lower() == "not yet")
+            after = [r for r in rows if r[2].strip().lower() == "not yet"]
+            if len(after) > before:
+                old = set(r[1] for r in base)
+                n = next((r[0] for r in after if r[1] not in old), after[0][0])
+                out.append((n, "enforcer", "new rule with no enforcer: add a check, or mark it judgment if it truly needs judgment"))
+    return out
 
 
 def parse_frontmatter(text):
@@ -179,6 +293,11 @@ def run(root, files, base, head, out):
 
     wc = lambda t: len(t.split()) if t else 0
     structure_problems(root, head, report)
+    hr_text = read(root, head, "house-rules.md")
+    if hr_text is not None:
+        base_text = read(root, base, "house-rules.md") if base is not None else None
+        for n, code, msg in house_rules_problems(hr_text, base_text):
+            report("house-rules.md", n, code, msg)
     if base is None:
         paths = files or ["house-rules.md"] + [x for x in tree(root, head) if re.fullmatch(r"skills/[^/]+/SKILL\.md|reference/[^/]+\.md", x)]
         for p in paths:
@@ -212,6 +331,46 @@ def self_test():
     check("frontmatter no trigger", bool(frontmatter_problems("---\nname: a\ndescription: Does things.\n---\n")))
     check("frontmatter empty desc", bool(frontmatter_problems("---\nname: a\ndescription:\n---\n")))
 
+    def hr_doc(bullets, rows):
+        """A minimal house-rules.md in the labelled style."""
+        text = "# House rules\n\n## Work\n\n" + "\n".join(bullets)
+        text += "\n\n## Enforcement\n\n| Rule | Enforced by |\n| --- | --- |\n"
+        return text + "".join("| %s | %s |\n" % r for r in rows)
+
+    def codes(text, base=None):
+        return [c for _, c, _ in house_rules_problems(text, base)]
+
+    check("format: labelled rule with its row passes",
+          not house_rules_problems(hr_doc(["- **Tickets:** Open a ticket on your board."], [("Tickets", "judgment")])))
+    check("format: unlabelled bullet refused",
+          "format" in codes(hr_doc(["- Open a ticket."], [("Tickets", "judgment")])))
+    check("pair: rule label without a table row refused",
+          codes(hr_doc(["- **Tickets:** Open a ticket."], [])).count("pair") == 1)
+    check("pair: table row without a rule refused",
+          codes(hr_doc(["- **Tickets:** Open a ticket."], [("Tickets", "judgment"), ("Models", "judgment")])).count("pair") == 1)
+    check("length: rule over 45 words refused",
+          "length" in codes(hr_doc(["- **Long:** " + "word " * 50 + "end."], [("Long", "judgment")])))
+    check("length: a code span counts as one word",
+          "length" not in codes(hr_doc(["- **Cmd:** Run `" + "x " * 80 + "` now."], [("Cmd", "judgment")])))
+    check("enforcer: bare second cell refused",
+          "enforcer" in codes(hr_doc(["- **Tickets:** Open a ticket."], [("Tickets", "nothing")])))
+    check("enforcer: judgment, not yet and a backticked check pass",
+          not house_rules_problems(hr_doc(["- **A:** Do a.", "- **B:** Do b.", "- **C:** Do c."],
+                                          [("A", "judgment"), ("B", "not yet"), ("C", "`rules-lint` required")])))
+    base = hr_doc(["- **A:** Do a."], [("A", "not yet")])
+    check("enforcer: diff mode refuses a new unenforced rule",
+          any(m.startswith("new rule with no enforcer") for _, c, m in house_rules_problems(
+              hr_doc(["- **A:** Do a.", "- **B:** Do b."], [("A", "not yet"), ("B", "not yet")]), base)))
+    check("enforcer: diff mode allows a new judgment rule",
+          not house_rules_problems(hr_doc(["- **A:** Do a.", "- **B:** Do b."], [("A", "not yet"), ("B", "judgment")]), base))
+    check("enforcer: the first table in a file is grandfathered",
+          not house_rules_problems(hr_doc(["- **A:** Do a.", "- **B:** Do b."], [("A", "not yet"), ("B", "not yet")]),
+                                   "# Old rules\n- Never do X.\n"))
+
+    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    check("format, pair, length: current house-rules.md passes",
+          not house_rules_problems(read(here, None, "house-rules.md") or ""))
+
     class Buf:
         def __init__(self):
             self.t = ""
@@ -223,39 +382,59 @@ def self_test():
         def g(*a):
             subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True)
 
-        def put(path, text, mode="w"):
+        def put(path, text):
             os.makedirs(os.path.dirname(os.path.join(d, path)), exist_ok=True)
-            with open(os.path.join(d, path), mode) as f:
+            with open(os.path.join(d, path), "w") as f:
                 f.write(text)
 
+        def commit(msg):
+            g("add", "-A")
+            g("commit", "-qm", msg)
+
+        old_rule = "- **Old:** Never do X. (2026-11-01, why: old)."
+        run_rule = "- **Run:** Run the lint before every pull request."
         g("init", "-q", "-b", "main")
-        put("house-rules.md", "# Rules\n- Never do X (2026-11-01, why: old).\n")
-        g("add", "-A"); g("commit", "-qm", "base")
+        put("house-rules.md", hr_doc([old_rule], [("Old", "`old-check`")]))
+        commit("base")
         b = Buf()
         check("full mode fails on old file", run(d, None, None, None, b) == 1 and "bad=1" in b.t)
-        put("house-rules.md", "- Run the lint before every pull request.\n", "a")
-        g("commit", "-qam", "good")
+        put("house-rules.md", hr_doc([old_rule, run_rule], [("Old", "`old-check`"), ("Run", "judgment")]))
+        commit("good")
         check("diff mode grandfathers old bad line", run(d, None, "HEAD~1", "HEAD", Buf()) == 0)
-        put("house-rules.md", '- Never skip it (2026-11-14, why: Valentin said "never skip it").\n', "a")
-        g("commit", "-qam", "bad")
+        put("house-rules.md", hr_doc([old_rule, run_rule, '- **Bad:** Never skip it. (2026-11-14, why: Valentin said it).'],
+                                     [("Old", "`old-check`"), ("Run", "judgment"), ("Bad", "judgment")]))
+        commit("bad")
         b = Buf()
-        check("diff mode refuses dated line", run(d, None, "HEAD~1", "HEAD", b) == 1 and "house-rules.md:4: date" in b.t)
+        check("diff mode refuses dated line", run(d, None, "HEAD~1", "HEAD", b) == 1 and ": date:" in b.t)
         put("skills/x/SKILL.md", "# no frontmatter\nDo the thing.\n")
-        g("add", "-A"); g("commit", "-qm", "skill")
+        commit("skill")
         b = Buf()
         check("new skill without frontmatter refused", run(d, None, "HEAD~1", "HEAD", b) == 1 and "frontmatter" in b.t)
         put("reference/boards.md", "Board 15 is Hypertask.\n")
-        put("house-rules.md", "## Read X when Y\n| Read | When |\n|---|---|\n| `reference/missing.md` | boards |\n", "a")
-        g("add", "-A"); g("commit", "-qm", "ref")
+        put("house-rules.md", hr_doc([old_rule, run_rule], [("Old", "`old-check`"), ("Run", "judgment")])
+            + "\n## Read X when Y\n| Read | When |\n|---|---|\n| `reference/missing.md` | boards |\n")
+        commit("ref")
         b = Buf()
         run(d, None, "HEAD~1", "HEAD", b)
         check("read-table missing target refused", ": table:" in b.t)
         check("orphan reference refused", "reference/boards.md:1: orphan" in b.t)
-        put("house-rules.md", "- Pad line. " + "pad " * 9000 + "\n", "a")
-        g("commit", "-qam", "big")
+        put("house-rules.md", hr_doc(["- **Pad:** " + "pad " * 9000], [("Pad", "judgment")]))
+        commit("big")
         b = Buf()
         run(d, None, "HEAD~1", "HEAD", b)
         check("diff mode refuses file growing past cap", ": words:" in b.t)
+
+    old = sh(here, "show", "origin/main:house-rules.md", check=False) or sh(here, "show", "main:house-rules.md", check=False)
+    if not old or "format" not in codes(old):
+        print("SKIP old house-rules.md: origin/main already uses the labelled style")
+    else:
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "-C", d, "init", "-q", "-b", "main"], check=True, capture_output=True)
+            with open(os.path.join(d, "house-rules.md"), "w") as f:
+                f.write(old)
+            b = Buf()
+            check("old house-rules.md fails format and pair", run(d, None, None, None, b) == 1
+                  and ": format:" in b.t and ": pair:" in b.t)
     print("SELF-TEST " + ("ok" if ok else "FAILED"))
     return 0 if ok else 1
 

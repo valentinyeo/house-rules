@@ -3,17 +3,11 @@ name: house-rules-update
 description: Add or change a house rule in valentinyeo/house-rules. Use on "/house-rules-update [rule]", "add this to house rules", or when Valentin gives a standing rule for every agent. No argument means capture every standing rule from this conversation.
 ---
 
-# /house-rules-update [rule]
+# /house-rules-update [correction]
 
-## Write
+Run `/pstack:correct` on the correction, in a clone of valentinyeo/house-rules. Fix it at the highest level that works: delete or change a script or check first. Add a line to house-rules.md last, only for a judgment call.
 
-- Write one imperative line. Short sentences. No reason, date, quote or history. The PR body and git keep those.
-- Put the line under the section it belongs to. Already covered? Edit that line. Contradicts a line? Replace it.
-- Rule for one role only? Put it in that role's skill, not in `house-rules.md`.
-- Needs more than one line? Write `skills/<name>/SKILL.md` or `reference/<topic>.md`. Add one row to the "Read X when Y" table in `house-rules.md`.
-- Something keeps breaking? Ship a script that refuses it in the same PR. Never add more prose.
-- Keep `house-rules.md` under 1,500 words. Over? Cut or move first.
-- Skip one-off asks and project-only rules. They belong in that project's repo.
+A new line is `- **Label:** imperative sentence.` under the right section, with a row in the Enforcement table. No reasons, dates or quotes; the PR body keeps those. `rules-lint` fails anything else.
 
 ## Ship
 
@@ -31,8 +25,7 @@ gh pr create --repo valentinyeo/house-rules --title "rule: <what> (<TICKET>)" --
 
 ## Merge
 
-- The PR only restates what Valentin said: `gh pr merge --squash --delete-branch` once the check is green.
-- New idea, or it contradicts Valentin: do not merge. Ask Valentin through your own lead with your recommendation.
+Get a pstack verifier verdict on the PR from another model family, then `gh pr merge --squash --delete-branch` once `rules-lint` is green. A change Valentin did not ask for: do not merge; ask him with your pick.
 
 ## After merge
 

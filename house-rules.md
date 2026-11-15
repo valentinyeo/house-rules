@@ -1,27 +1,46 @@
-# house rules
+# House rules
 
-every agent uses pstack for everything: poteto-mode for any task, the orchestrate playbook for orchestrators. the only exception is work pstack has nothing to say about. if any other rule or skill disagrees with pstack, pstack wins. only valentin's lines beat it.
+Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for every task; orchestrators use its Orchestrate playbook. These rules beat pstack. pstack beats every other rule and skill.
 
-hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view, under its own login (board-identity sets it up). move the ticket to the next column the moment its work moves, so the board always shows the true stage. status and questions go on the ticket, not in chat.
+## Work
 
-new cloudflare work starts from the joelhooks/rat-stack template.
+- **Tickets:** Start and end every unit on a Hypertask ticket, on your own board, under your own login (`/board-identity`). Move it the moment its work moves. Put status and questions on it; a question for Valentin also goes first in chat.
+- **Cloudflare:** Start new Cloudflare work from `joelhooks/rat-stack`.
+- **Secrets:** Never write a secret into a file, commit, ticket or chat.
+- **Open source:** Create new repos public. Make one private only when Valentin says so or it holds client, money or personal data, and state that reason.
 
-valentin's lines:
-- every pr gets a pstack verifier before merge: an agent that did not write it, from another model family, runs the change like a user and posts PASS, PASS+NOTES or FAIL on the pr. a bot review or green ci is not a verdict.
-- this server is lauren's laptop: orchestrators, workers writing code, a focused test while fixing (pstack tdd), driving the app or the qa phone like a user, benchmarks, git, boards, keys. github-hosted runners are her cloud: the full test suite, ci, reviews and the pstack verifier. no self-hosted runner, ever.
-- orchestrators set their reviewers and verifiers up themselves on valentin's codex, claude and deepseek plans, keys included, in that order, and move on when one runs out. on deepseek, always flash, never pro. no need to ask anyone.
-- valentin decides money, keys, going public and deleting live data. ask him once, with your pick.
-- github billing is valentin's. when a check fails with "recent account payments have failed", the product pr waits. never verify it on this server or merge around the check. say it once on the ticket, then build the next unit.
+## Verify and ship
 
-what enforces each line (pstack /correct: a check beats a sentence; drop a line once its mistake can't happen):
+- **Verifier:** Give every PR a pstack verifier before merge. It comes from another model family than the author, runs the change like a user, and posts `pstack-verifier: PASS|PASS+NOTES|FAIL @ <sha>`. Green CI or a bot review is not a verdict.
+- **Verifier per repo:** Build each repo's own verifier and app driver. Make `pstack-verifier` a required check once it posts a real verdict.
+- **Where work runs:** Run agents, builds, focused tests and app or phone driving on this server. Run the full suite, CI, reviews and verifiers on GitHub-hosted runners. Never add a self-hosted runner.
+- **Models:** Set up reviewers and verifiers yourself on Valentin's plans: Codex, then Grok, then DeepSeek. Keep Claude for orchestrators. Move on when one runs out. Use DeepSeek Flash, never Pro.
+- **Runner keys:** Give a repo's GitHub review and verifier runners Valentin's plan logins yourself with `ci-key-set`. Never ask him first.
+- **DeepSeek via Pi:** Run DeepSeek through Pi on the OpenCode Go plan, never the OpenCode app.
+- **Billing block:** Billing blocks only private repos on Valentin's personal account; run `billing-blocks OWNER/REPO` before you blame it. A blocked PR waits: never verify it here or merge around it. Say so once on the ticket.
 
-| line | enforced by |
+## Valentin decides
+
+- **His calls:** Ask Valentin before new spend, rotating or deleting keys, making an existing repo public or deleting live data. Ask once, with your pick.
+
+## Changing these rules
+
+- **Changes:** Change this file only through `/house-rules-update`.
+
+## Enforcement
+
+| Rule | Enforced by |
 | --- | --- |
-| pstack for everything | nothing, judgment call |
-| tickets, own login, true column | nothing yet |
-| rat-stack for new cloudflare work | nothing yet |
-| a pstack verifier on every pr | nothing yet; a required `pstack-verifier` check once the shared verifier workflow works |
-| server is the laptop, github is the cloud | `no-vps-ci` kills runners and review units every 5 minutes |
-| money, keys, public, deleting live data | nothing, judgment call |
-| no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
-| no secrets anywhere | `secrets-guard` hook |
+| Tickets | not yet |
+| Cloudflare | not yet |
+| Secrets | `secrets-guard` hook |
+| Open source | `repo-public-default` hook |
+| Verifier | not yet |
+| Verifier per repo | not yet |
+| Where work runs | `no-vps-ci` |
+| Models | judgment |
+| Runner keys | `ci-key-set` script |
+| DeepSeek via Pi | `deepseek-via-pi` hook |
+| Billing block | `billing-blocks` script, `billing-claim-guard` hook |
+| His calls | judgment |
+| Changes | `rules-lint` required on main |
