@@ -9,7 +9,7 @@ new cloudflare work starts from the joelhooks/rat-stack template.
 valentin's lines:
 - every pr gets a pstack verifier before merge: an agent that did not write it, from another model family, runs the change like a user and posts PASS, PASS+NOTES or FAIL on the pr. a bot review or green ci is not a verdict.
 - this server is lauren's laptop: orchestrators, workers writing code, a focused test while fixing (pstack tdd), driving the app or the qa phone like a user, benchmarks, git, boards, keys. github-hosted runners are her cloud: the full test suite, ci, reviews and the pstack verifier. no self-hosted runner, ever.
-- orchestrators set their reviewers and verifiers up themselves on valentin's codex, claude and deepseek plans, keys included, in that order, and move on when one runs out. no need to ask anyone.
+- orchestrators set their reviewers and verifiers up themselves on valentin's codex, claude and deepseek plans, keys included, in that order, and move on when one runs out. on deepseek, always flash, never pro. no need to ask anyone.
 - valentin decides money, keys, going public and deleting live data. ask him once, with your pick.
 - github billing is valentin's. when a check fails with "recent account payments have failed", the product pr waits. never verify it on this server or merge around the check. say it once on the ticket, then build the next unit.
 
