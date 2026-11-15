@@ -6,6 +6,8 @@ hypertask is where work lives. every unit starts and ends on a ticket, on the or
 
 new cloudflare work starts from the joelhooks/rat-stack template.
 
+count and name live sessions from `fleet/roster-live`, never from memory or roster.json.
+
 valentin's lines:
 - every pr gets a pstack verifier before merge: an agent that did not write it, from another model family, runs the change like a user and posts PASS, PASS+NOTES or FAIL on the pr. a bot review or green ci is not a verdict.
 - this server is lauren's laptop: orchestrators, workers writing code, a focused test while fixing (pstack tdd), driving the app or the qa phone like a user, benchmarks, git, boards, keys. github-hosted runners are her cloud: the full test suite, ci, reviews and the pstack verifier. no self-hosted runner, ever.
@@ -25,3 +27,4 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | money, keys, public, deleting live data | nothing, judgment call |
 | no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
 | no secrets anywhere | `secrets-guard` hook |
+| live sessions from roster-live | `roster-live --hook` puts the live list into every claude session at start, resume and compact |

@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""roster-live: who is running on this server right now, derived from live state, never from a hand-kept list.
+
+Sources: Multibot's agent-host state (chat names), tmux panes with an agent process, Claude's own registry of
+interactive sessions (~/.claude/sessions/<pid>.json, kept while the process lives), and each session's own
+start-up record under ~/.local/state/roster/announce/ (fleet/roster-announce). A session that stops drops out;
+a new one appears on its first start. Nobody edits a list.
+
+roster-live              one line per live session: name, tmux, harness, cwd
+roster-live --count      just the number of live sessions
+roster-live --hook       SessionStart hook: puts the live list into the session's context (start, resume, compact)
+roster-live --self-test
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import roster  # noqa: E402
+
+
+CLAUDE_SESSIONS = Path.home() / ".claude/sessions"
+
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def claude_registry():
+    """Interactive Claude sessions from Claude's own registry, keyed by session id, live processes only."""
+    out = {}
+    for f in CLAUDE_SESSIONS.glob("*.json"):
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if d.get("kind") == "interactive" and d.get("sessionId") and alive(d.get("pid")):
+            out[d["sessionId"]] = d
+    return out
+
+
+def merged(live, announced, registry=None):
+    registry = registry or {}
+    by_tmux = {a.get("tmux"): a for a in announced if a.get("tmux")}
+    by_sid = {a.get("sid"): a for a in announced if a.get("sid")}
+    seen = {s.get("sid") for s in live if s.get("sid")} | {by_tmux.get(s["tmux"], {}).get("sid") for s in live}
+    live = list(live) + [dict(tmux=f"pid {d['pid']}", name=None, sid=sid, harness="claude", cwd=d.get("cwd"),
+                              peer=d.get("name"))
+                         for sid, d in registry.items() if sid not in seen]
+    out = []
+    for s in live:
+        a = by_tmux.get(s["tmux"]) or by_sid.get(s.get("sid")) or {}
+        name = (s.get("name") or a.get("multibot") or (a.get("name") if a.get("name") not in (None, "Claude") else None)
+                or s.get("peer"))
+        out.append(dict(name=name or s["tmux"], tmux=s["tmux"], harness=s.get("harness") or a.get("harness"),
+                        cwd=a.get("cwd") or s.get("cwd") or "", kind=a.get("kind") or ""))
+    return sorted(out, key=lambda r: r["name"].lower())
+
+
+def current():
+    return merged(roster.live_sessions(), roster.announced(), claude_registry())
+
+
+def line(r):
+    return f"{r['name']} ({r['tmux']}, {r['harness']}{', ' + r['cwd'].replace(str(Path.home()) + '/', '~/') if r['cwd'] else ''})"
+
+
+def self_test():
+    live = [dict(tmux="live-a", name=None, harness="claude"), dict(tmux="live-b", name="HT Product Lead", harness="claude"),
+            dict(tmux="live-c", name=None, harness="hax")]
+    ann = [dict(tmux="live-a", multibot="Pstack Software Factory", cwd="/x"), dict(tmux="live-c", name="Claude")]
+    reg = {"sid-x": dict(pid=1, cwd="/p", name="pecunia-e7"), "sid-y": dict(pid=2, name="hypertask-4a")}
+    ann.append(dict(sid="sid-x", multibot="Pecunia Ratstack Transitioner"))
+    got = [r["name"] for r in merged(live, ann, reg)]
+    ok = got == ["HT Product Lead", "hypertask-4a", "live-c", "Pecunia Ratstack Transitioner", "Pstack Software Factory"]
+    print("roster-live self-test ok" if ok else f"roster-live self-test FAILED {got}")
+    return 0 if ok else 1
+
+
+def main(argv):
+    if argv == ["--self-test"]:
+        return self_test()
+    try:
+        rows = current()
+    except Exception as exc:
+        if argv == ["--hook"]:
+            print(json.dumps({}))
+            return 0
+        print(f"roster-live: {exc}", file=sys.stderr)
+        return 1
+    if argv == ["--count"]:
+        print(len(rows))
+    elif argv == ["--hook"]:
+        text = (f"Live sessions on this server now: {len(rows)} (from roster-live; never count from memory, rerun "
+                f"`~/.local/share/house-rules/fleet/roster-live` before naming or messaging sessions): "
+                + "; ".join(line(r) for r in rows))
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
+    else:
+        for r in rows:
+            print(line(r))
+        print(f"{len(rows)} live sessions")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
