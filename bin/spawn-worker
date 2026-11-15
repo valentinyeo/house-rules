@@ -2,7 +2,7 @@
 """spawn-worker: the only supported way to start a worker.
 
 Every worker start spends one subscription's quota. This script reads live plan usage
-(`token-ladder pools --json`) before it starts anything, so the choice cannot be skipped
+in-process (plan_usage.pools) before it starts anything, so the choice cannot be skipped
 and cannot be guessed: Claude is kept for orchestrators, and work goes to the family
 that is furthest from its pace.
 
@@ -29,13 +29,13 @@ command is not installed. Otherwise the worker replaces this process (exec).
 Read only: it never writes usage, config or state.
 """
 import argparse
-import json
 import os
-import subprocess
 import sys
 
-READER = os.environ.get("TOKEN_LADDER", "/home/valentin/.local/bin/token-ladder")
-READER_TIMEOUT = 60
+_BIN = os.path.dirname(os.path.realpath(__file__))
+if _BIN not in sys.path:
+    sys.path.insert(0, _BIN)
+import plan_usage
 
 # One dict, family -> what it may run and how to run it. "{brief}" is replaced by the
 # brief file's text at exec time. Add a family here, nowhere else.
@@ -196,24 +196,13 @@ def choose(pools, level, family="auto"):
 
 
 def read_pools():
-    """Live usage from token-ladder. Refuses with the reader's error, never guesses."""
+    """Live usage from plan_usage, in this process. A bad accounts file or fixture refuses the start."""
     try:
-        done = subprocess.run([READER, "pools", "--json"],
-                              capture_output=True, text=True, timeout=READER_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise Refused(f"token-ladder pools timed out after {READER_TIMEOUT}s")
-    except OSError as exc:
-        raise Refused(f"cannot run token-ladder ({READER}): {exc.strerror or exc}")
-    if done.returncode != 0:
-        err = (done.stderr or done.stdout or "").strip().splitlines()
-        raise Refused(f"token-ladder pools failed (exit {done.returncode}): "
-                      f"{err[-1] if err else 'no output'}")
-    try:
-        pools = json.loads(done.stdout)
-    except ValueError as exc:
-        raise Refused(f"token-ladder pools returned invalid JSON: {exc}")
+        pools = plan_usage.pools()
+    except plan_usage.UsageError as exc:
+        raise Refused(str(exc))
     if not isinstance(pools, dict):
-        raise Refused("token-ladder pools did not return a JSON object")
+        raise Refused("usage reader did not return an object")
     return pools
 
 

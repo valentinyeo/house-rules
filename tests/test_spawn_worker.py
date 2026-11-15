@@ -1,7 +1,8 @@
 """Tests for bin/spawn-worker: the only supported way to start a worker.
 
 The script is a file, not a module, so it is imported by path. choose() is pure, so every
-routing rule is tested without a reader, a network call or a worker start.
+routing rule is tested without a network call or a worker start. CLI tests pass finished
+readings through PLAN_USAGE_FIXTURE.
 """
 import importlib.util
 import json
@@ -38,7 +39,7 @@ def pools(**families):
     return dict(families)
 
 
-# The live shape of `token-ladder pools --json` on 2026-11-15.
+# The pool shape spawn-worker ranks on.
 EXAMPLE = json.loads("""
 {"claude": {"used_pct": 75.0, "hours_left": 15.4, "resets_at": 1794762000.1,
             "state": "ON", "pace_ratio": 0.8257},
@@ -217,12 +218,11 @@ def test_build_argv_substitutes_the_brief():
 # --- CLI -------------------------------------------------------------------------
 
 def run_cli(tmp_path, pools_json, *args, exit_code=0):
-    reader = tmp_path / "token-ladder"
-    reader.write_text("#!/usr/bin/env python3\nprint(%r)\n" % json.dumps(pools_json))
-    reader.chmod(0o755)
+    fixture = tmp_path / "readings.json"
+    fixture.write_text(json.dumps(pools_json))
     brief = tmp_path / "brief.md"
     brief.write_text("fix the failing test")
-    env = {**os.environ, "TOKEN_LADDER": str(reader)}
+    env = {**os.environ, "PLAN_USAGE_FIXTURE": str(fixture)}
     done = subprocess.run([sys.executable, str(SCRIPT), *args, str(brief)],
                           capture_output=True, text=True, env=env)
     assert done.returncode == exit_code, done.stdout + done.stderr
@@ -244,35 +244,31 @@ def test_cli_refusal_exits_2(tmp_path):
 
 
 def test_cli_reader_failure_refuses(tmp_path):
-    reader = tmp_path / "token-ladder"
-    reader.write_text("#!/bin/sh\necho 'no such plan' >&2\nexit 3\n")
-    reader.chmod(0o755)
+    fixture = tmp_path / "readings.json"
+    fixture.write_text("{")
     brief = tmp_path / "brief.md"
     brief.write_text("work")
     done = subprocess.run([sys.executable, str(SCRIPT), "--level", "normal", str(brief)],
                           capture_output=True, text=True,
-                          env={**os.environ, "TOKEN_LADDER": str(reader)})
+                          env={**os.environ, "PLAN_USAGE_FIXTURE": str(fixture)})
     assert done.returncode == 2
-    assert "no such plan" in done.stderr
+    assert "not valid JSON" in done.stderr
 
 
 def test_cli_missing_brief_refuses(tmp_path):
     done = subprocess.run([sys.executable, str(SCRIPT), "--level", "normal",
                            str(tmp_path / "nope.md")],
-                          capture_output=True, text=True,
-                          env={**os.environ, "TOKEN_LADDER": "/bin/false"})
+                          capture_output=True, text=True)
     assert done.returncode == 2
     assert "cannot read brief" in done.stderr
 
 
 def test_cli_exec_replaces_process_with_the_chosen_argv(tmp_path, monkeypatch, capsys):
-    reader = tmp_path / "token-ladder"
-    reader.write_text("#!/usr/bin/env python3\nprint(%r)\n" % json.dumps(EXAMPLE))
-    reader.chmod(0o755)
+    fixture = tmp_path / "readings.json"
+    fixture.write_text(json.dumps(EXAMPLE))
     brief = tmp_path / "brief.md"
     brief.write_text("fix the failing test")
-    monkeypatch.setenv("TOKEN_LADDER", str(reader))
-    monkeypatch.setattr(sw, "READER", str(reader))
+    monkeypatch.setenv("PLAN_USAGE_FIXTURE", str(fixture))
     calls = []
     monkeypatch.setattr(sw.os, "execvp", lambda prog, argv: calls.append((prog, argv)))
     assert sw.main(["--level", "normal", str(brief)]) == 0

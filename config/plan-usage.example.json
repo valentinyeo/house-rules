@@ -1,0 +1,10 @@
+{
+  "claude": {
+    "credentials": "~/.claude/.credentials.json",
+    "email": "person@example.invalid"
+  },
+  "codex": {
+    "sessions": "~/.codex/sessions",
+    "email": "person@example.invalid"
+  }
+}
