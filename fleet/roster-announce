@@ -69,9 +69,19 @@ def view_url(view):
     return f"https://app.hypertask.ai/project?id={board}&view={slug}" if slug else None
 
 
-def hint(e):
+def owns_nothing(rows):
+    from importlib.machinery import SourceFileLoader
+    lint = SourceFileLoader("roster_lint", str(Path(__file__).resolve().parent / "roster-lint")).load_module()
+    return {line.split(":", 1)[0] for line in lint.problems(rows, "9999-12-31")}
+
+
+def hint(e, rows=None):
     if e.get("kind") != "unknown":
         url = view_url(e["view"]) if e.get("view") else None
+        if not url and rows is not None and e.get("row") in owns_nothing(rows):
+            return (f"Roster: you are {e['name']}, an orchestrator, and you own no board view. Stop other work. "
+                    f"Create a view named \"{e['name']}\" on your board, add it as `view` to your row in "
+                    f"fleet/roster.json by PR, then drain it. Orchestrators cannot operate without one.")
         if not url:
             return None
         return (f"Roster: you are {e['name']} and you own the board view {url}. Drain it: run pstack's Autonomous "
@@ -141,7 +151,7 @@ def hook():
             return
         ident.setdefault("harness", "claude")
         e = roster.write_announce(entry_for(ident, {}, roster.static_rows(), previous(ident)))
-        h = hint(e)
+        h = hint(e, roster.static_rows())
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": h}}) if h else "{}")
     except Exception as err:  # a hook must never break a session start
         print("{}")
@@ -176,6 +186,12 @@ def self_test():
                                                     "board": "2060", "view": "2060/multi-bot"}], {})
     assert "view=multi-bot" in (hint(o) or "") and "/loop" in hint(o), "a view owner must be told to drain its view"
     assert hint(e) is None, "a row without a view gets no drain line"
+    rows = static + [{"name": "Pecunia", "tmux": "live-pe", "kind": "view-lead", "board": "2060"},
+                     {"name": "Multi Bot", "kind": "solo-dev", "board": "2060", "view": "2060/multi-bot"},
+                     {"name": "Upwork", "tmux": "live-up", "kind": "view-lead", "board": "8783"}]
+    p = entry_for({"tmux": "live-pe"}, {}, rows, {})
+    assert "own no board view" in (hint(p, rows) or ""), "an orchestrator on a shared board without a view must stop"
+    assert hint(entry_for({"tmux": "live-up"}, {}, rows, {}), rows) is None, "an orchestrator with its own board passes"
     assert entry_for({"tmux": "live-new"}, {}, static, d)["kind"] == "solo-dev", "a later hook must keep the declared kind"
     assert take_arg("In Progress, Backlog") == {"In Progress": 0, "Backlog": 1}
     import tempfile

@@ -5,12 +5,13 @@
  "rows": [
   {
    "name": "poteto-2-advisor",
-   "multibot": "Poteto 2 LC",
+   "multibot": "Poteto",
    "tmux": "live-8bc7bac",
    "kind": "chief",
    "role_skill": "/hypertask-triage",
    "login": "Chief Of Staff",
    "board": "15,2060,11514",
+   "view": "2060/poteto-2-advisor",
    "status": "live",
    "notes": "Poteto takes Chief Of Staff at the switch. Runs the factory only; no app contact. Owns board-health on every board. Reuses the Chief Of Staff login."
   },

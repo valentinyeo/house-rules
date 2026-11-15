@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""roster-lint: every live orchestrator row in fleet/roster.json owns a board or a view.
+
+An orchestrator (kind chief, solo-dev or view-lead) needs a `view` ("board/slug" or a view id), or a `board` that
+no other live orchestrator row lists. Without one it has nothing to drain, so it cannot operate.
+
+    roster-lint             exit 1 and one line per row that owns nothing
+    roster-lint --self-test
+"""
+import json
+import sys
+from pathlib import Path
+
+ORCHESTRATOR = {"chief", "solo-dev", "view-lead"}
+# row name: (expiry YYYY-MM-DD, reason). Each needs Valentin's yes on its PR; remove the line when the row is fixed.
+EXCEPTIONS = {"Pecunia": ("2026-11-22", "Pecunia Private Finances creates the pecunia view once it has its own login")}
+
+
+def live_orchestrators(rows):
+    return [r for r in rows if r.get("kind") in ORCHESTRATOR and r.get("status") not in ("dead", "closed")]
+
+
+def problems(rows, today):
+    orch = live_orchestrators(rows)
+    boards = {}
+    for r in orch:
+        for b in str(r.get("board") or "").split(","):
+            if b.strip():
+                boards.setdefault(b.strip(), []).append(r["name"])
+    out = []
+    for r in orch:
+        if r.get("view"):
+            continue
+        mine = [b.strip() for b in str(r.get("board") or "").split(",") if b.strip()]
+        if any(len(boards[b]) == 1 for b in mine):
+            continue
+        expiry, _ = EXCEPTIONS.get(r["name"], ("", ""))
+        if expiry and today <= expiry:
+            continue
+        out.append(f"{r['name']}: owns no board or view. Add a `view` (create one named after its chat) "
+                   f"or give it a board no other orchestrator shares.")
+    return out
+
+
+def self_test():
+    rows = [{"name": "A", "kind": "solo-dev", "board": "2060", "view": "2060/a"},
+            {"name": "Pecunia", "kind": "view-lead", "board": "2060", "view": None},
+            {"name": "Own", "kind": "view-lead", "board": "8783"},
+            {"name": "Lead", "kind": "lead", "board": "15"}]
+    assert problems(rows, "2026-12-01") == [problems(rows, "2026-12-01")[0]] and "Pecunia" in problems(rows, "2026-12-01")[0], \
+        "a shared board with no view must fail (the Pecunia row, 2026-11-15)"
+    assert problems(rows, "2026-11-16") == [], "an approved exception passes until it expires"
+    print("roster-lint self-test ok")
+
+
+def main(argv):
+    if argv == ["--self-test"]:
+        self_test()
+        return 0
+    import datetime
+    rows = json.loads((Path(__file__).resolve().parent / "roster.json").read_text())["rows"]
+    bad = problems(rows, datetime.date.today().isoformat())
+    for line in bad:
+        print(line)
+    print(f"ROSTER-LINT bad={len(bad)}")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
