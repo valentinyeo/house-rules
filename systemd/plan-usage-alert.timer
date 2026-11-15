@@ -1,0 +1,11 @@
+# Example only. Nothing in this repo enables or installs this timer.
+[Unit]
+Description=Check plan pace every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+Unit=plan-usage-alert.service
+
+[Install]
+WantedBy=timers.target

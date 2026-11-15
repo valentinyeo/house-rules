@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Live plan usage for spawn-worker. One reading per family, called in-process.
 
 Spawn-worker ranks on this shape and nothing else:
@@ -23,11 +24,20 @@ read from it. config/plan-usage.example.json shows the shape with example.invali
 
 PLAN_USAGE_FIXTURE, when set, is a JSON file of finished readings for tests.
 Leave it unset outside tests.
+
+`plan_usage.py alert` posts to ntfy when a family runs ahead of pace, or when
+used_pct crosses 80 or 95. Claude's pace line is 1.15. Codex and Grok use 1.3.
+One push per family per two hours. A Fable model that made more than 30% of
+the last hour of Claude calls is a separate push and names its three busiest
+chats. State is kept in ~/.local/state/plan-usage/. NTFY_TOPIC overrides the
+topic. The command never prints a token.
 """
+import fcntl
 import glob
 import json
 import math
 import os
+import re
 import selectors
 import signal
 import subprocess
@@ -456,3 +466,342 @@ def pools(now=None, readings=None):
     if fixture:
         return load_fixture(fixture)
     return derive(live_readings(now), now)
+
+
+ALERT_FAMILIES = ("claude", "codex", "grok")
+PACE_OVER = {"claude": 1.15}
+PACE_OVER_DEFAULT = 1.3
+USED_MARKS = (80, 95)
+ALERT_GAP = 7200
+FABLE_SHARE = 0.30
+DEFAULT_STATE_DIR = os.path.expanduser("~/.local/state/plan-usage")
+DEFAULT_NTFY_TOPIC = "valentin-vps-pKVwzApRPTep"
+CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
+TOPIC_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def pace_limit(family):
+    return PACE_OVER.get(family, PACE_OVER_DEFAULT)
+
+
+def family_reasons(family, reading, prev):
+    reading = reading or {}
+    prev = prev or {}
+    reasons = []
+    pace = reading.get("pace_ratio")
+    used = reading.get("used_pct")
+    if number(pace) and pace > pace_limit(family):
+        reasons.append({"kind": "pace", "pace": pace})
+    prev_used = prev.get("used_pct")
+    if number(used):
+        for mark in USED_MARKS:
+            if used >= mark and not (number(prev_used) and prev_used >= mark):
+                reasons.append({"kind": "used", "mark": mark})
+    return reasons
+
+
+def merge_pending(pending, crosses, used):
+    """Keep a crossing that landed inside the quiet period.
+
+    The stored used percent would hide it on the next run, so the 95% mark
+    would never send if it was crossed within two hours of the 80% push.
+    A mark already fallen back under is dropped.
+    """
+    kept, seen = [], set()
+    items = pending if isinstance(pending, list) else []
+    for reason in items + list(crosses):
+        if not isinstance(reason, dict) or reason.get("kind") != "used":
+            continue
+        mark = reason.get("mark")
+        if mark not in USED_MARKS or mark in seen:
+            continue
+        if number(used) and used < mark:
+            continue
+        seen.add(mark)
+        kept.append({"kind": "used", "mark": mark})
+    return kept
+
+
+def format_family(family, reasons, used):
+    name = family.capitalize()
+    parts = []
+    paces = [reason["pace"] for reason in reasons if reason["kind"] == "pace"]
+    if paces:
+        parts.append(f"{name} is burning at {max(paces):.2f}x its pace.")
+    marks = [reason["mark"] for reason in reasons if reason["kind"] == "used"]
+    if marks:
+        shown = " and ".join(f"{mark}%" for mark in marks)
+        used_bit = f" ({used:.0f}% used)" if number(used) else ""
+        parts.append(f"{name} crossed {shown}{used_bit}.")
+    return " ".join(parts)
+
+
+def evaluate_family(family, reading, prev, now):
+    prev = prev if isinstance(prev, dict) else {}
+    reading = reading if isinstance(reading, dict) else {}
+    used = reading.get("used_pct")
+    stored_used = used if number(used) else prev.get("used_pct")
+    fresh = family_reasons(family, reading, prev)
+    crosses = [reason for reason in fresh if reason["kind"] == "used"]
+    pace = [reason for reason in fresh if reason["kind"] == "pace"]
+    pending = merge_pending(prev.get("pending"), crosses, stored_used)
+    sent_at = prev.get("sent_at") if number(prev.get("sent_at")) else 0
+    quiet = {"used_pct": stored_used, "sent_at": sent_at, "pending": pending}
+    due = pending + pace
+    if not due or now - sent_at < ALERT_GAP:
+        return None, quiet, quiet
+    message = {"family": family, "title": "Plan burning too fast",
+               "body": format_family(family, due, stored_used)}
+    sent = {"used_pct": stored_used, "sent_at": now, "pending": []}
+    return message, quiet, sent
+
+
+def is_fable(model):
+    return isinstance(model, str) and "fable" in model.lower()
+
+
+def fable_burn(calls):
+    """The Fable model, if any, that made more than 30% of these calls."""
+    if not calls:
+        return None
+    by_model = {}
+    for model, chat in calls:
+        if not isinstance(model, str) or not isinstance(chat, str):
+            continue
+        chats = by_model.setdefault(model, {})
+        chats[chat] = chats.get(chat, 0) + 1
+    best = None
+    counted = sum(sum(chats.values()) for chats in by_model.values())
+    if not counted:
+        return None
+    for model, chats in by_model.items():
+        if not is_fable(model):
+            continue
+        count = sum(chats.values())
+        if count / counted <= FABLE_SHARE:
+            continue
+        if best is not None and count <= best["count"]:
+            continue
+        top = sorted(chats.items(), key=lambda item: (-item[1], item[0]))[:3]
+        best = {"count": count, "total": counted, "chats": top}
+    return best
+
+
+def evaluate_fable(calls, prev, now):
+    prev = prev if isinstance(prev, dict) else {}
+    sent_at = prev.get("sent_at") if number(prev.get("sent_at")) else 0
+    quiet = {"sent_at": sent_at}
+    burn = fable_burn(calls)
+    if burn is None or now - sent_at < ALERT_GAP:
+        return None, quiet, quiet
+    pct = 100 * burn["count"] / burn["total"]
+    chats = ", ".join(f"{label} ({count})" for label, count in burn["chats"])
+    body = (f"Fable made {pct:.0f}% of Claude calls in the last hour "
+            f"({burn['count']} of {burn['total']}). Top Fable chats: {chats}.")
+    return {"family": "fable", "title": "Fable is burning Claude", "body": body}, quiet, {"sent_at": now}
+
+
+def plain(text, limit):
+    return "".join(ch for ch in text if ch.isprintable())[:limit].strip()
+
+
+def chat_label(entry, path):
+    cwd = entry.get("cwd")
+    project = os.path.basename(cwd) if isinstance(cwd, str) else ""
+    slug = entry.get("slug")
+    if isinstance(slug, str) and slug.strip():
+        name = slug.strip()
+    else:
+        session = entry.get("sessionId")
+        if isinstance(session, str) and session.strip():
+            name = session.strip()[:8]
+        else:
+            name = os.path.splitext(os.path.basename(path))[0][:8]
+    name, project = plain(name, 60), plain(project, 40)
+    if project and name:
+        return f"{project}: {name}"
+    return name or project or "chat"
+
+
+def assistant_model(entry):
+    message = entry.get("message")
+    if isinstance(message, dict):
+        model = message.get("model")
+        if isinstance(model, str) and model:
+            return model
+    model = entry.get("model")
+    return model if isinstance(model, str) and model else None
+
+
+def call_from_line(line, path, since, now):
+    if '"assistant"' not in line or '"model"' not in line:
+        return None, None
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None, None
+    if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        return None, None
+    stamp = entry.get("timestamp")
+    if not isinstance(stamp, str):
+        return None, None
+    try:
+        ts = iso_to_ts(stamp)
+    except (ValueError, TypeError, AttributeError):
+        return None, None
+    if not since <= ts <= now:
+        return ts, None
+    model = assistant_model(entry)
+    if not model:
+        return ts, None
+    return ts, (model, chat_label(entry, path))
+
+
+def recent_calls(path, since, now, chunk=8_000_000):
+    """Assistant calls with since <= timestamp <= now, reading from the end."""
+    try:
+        handle = open(path, "rb")
+    except OSError:
+        return []
+    calls = []
+    with handle:
+        pos = os.fstat(handle.fileno()).st_size
+        suffix = ""
+        while pos > 0:
+            take = min(chunk, pos)
+            pos -= take
+            handle.seek(pos)
+            text = handle.read(take).decode("utf-8", "ignore") + suffix
+            parts = text.split("\n")
+            if pos > 0:
+                suffix = parts[0]
+                parts = parts[1:]
+            else:
+                suffix = ""
+            oldest, found = None, []
+            for line in parts:
+                ts, call = call_from_line(line, path, since, now)
+                if ts is None:
+                    continue
+                oldest = ts if oldest is None else min(oldest, ts)
+                if call is not None:
+                    found.append(call)
+            calls = found + calls
+            if oldest is not None and oldest <= since:
+                break
+    return calls
+
+
+def scan_calls(root, now, hour=3600):
+    since = now - hour
+    calls = []
+    if not root:
+        return calls
+    for path in glob.glob(os.path.join(root, "*", "*.jsonl")):
+        try:
+            if os.path.getmtime(path) < since:
+                continue
+        except OSError:
+            continue
+        calls.extend(recent_calls(path, since, now))
+    return calls
+
+
+def load_state(path):
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(path, data):
+    temporary = path + ".tmp"
+    with open(temporary, "w") as handle:
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def send_ntfy(message):
+    topic = os.environ.get("NTFY_TOPIC") or DEFAULT_NTFY_TOPIC
+    if not TOPIC_NAME.fullmatch(topic or ""):
+        raise UsageError("NTFY_TOPIC is not a single topic name")
+    title = message["title"].replace("\r", " ").replace("\n", " ")
+    request = urllib.request.Request(
+        "https://ntfy.sh/" + topic,
+        data=message["body"].encode("utf-8"),
+        method="POST",
+        headers={"Title": title, "Priority": "high", "Content-Type": "text/plain; charset=utf-8"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+    except Exception:
+        raise OSError("ntfy push failed") from None
+
+
+def alert(now=None, readings=None, state_dir=None, send=None, projects_root=None, calls=None):
+    """Post due warnings. `calls` skips the transcript scan. Returns pushes that landed."""
+    now = time.time() if now is None else now
+    state_dir = state_dir or os.environ.get("PLAN_USAGE_STATE_DIR") or DEFAULT_STATE_DIR
+    deliver = send or send_ntfy
+    if calls is None:
+        calls = scan_calls(projects_root or CLAUDE_PROJECTS, now)
+    usage = pools(now=now, readings=readings)
+    try:
+        os.makedirs(state_dir, mode=0o700, exist_ok=True)
+    except OSError:
+        raise UsageError("cannot create alert state directory") from None
+    delivered = []
+    state_path = os.path.join(state_dir, "alerts.json")
+    with open(os.path.join(state_dir, "alerts.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = load_state(state_path)
+        planned = []
+        for family in ALERT_FAMILIES:
+            message, quiet, sent = evaluate_family(family, usage.get(family), state.get(family), now)
+            state[family] = quiet
+            if message:
+                planned.append((family, message, sent))
+        message, quiet, sent = evaluate_fable(calls, state.get("fable"), now)
+        state["fable"] = quiet
+        if message:
+            planned.append(("fable", message, sent))
+        # Quiet state first, so a failed push keeps the pending crossing and the old time.
+        save_state(state_path, state)
+        for key, message, sent in planned:
+            try:
+                deliver(message)
+            except UsageError:
+                raise
+            except Exception:
+                return delivered
+            state[key] = sent
+            save_state(state_path, state)
+            delivered.append(message)
+    return delivered
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv != ["alert"]:
+        sys.stderr.write("usage: plan_usage.py alert\n")
+        return 2
+    try:
+        delivered = alert()
+    except UsageError as exc:
+        sys.stderr.write(f"plan-usage: {exc}\n")
+        return 1
+    for message in delivered:
+        sys.stdout.write(message["body"] + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
