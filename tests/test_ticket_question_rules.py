@@ -35,6 +35,29 @@ class QuestionLintTest(unittest.TestCase):
         body = "Question: **Should we move the logs to the free bucket?**\n\nWhy: no charge."
         self.assertEqual(self.bad(body), "")
 
+    # Real asks from SOFT-2293, SOFT-2290, SOFT-1878 and SOFT-2308 that sat in his blockers until 2026-11-15.
+    def test_design_pick_asks_are_refused(self):
+        ctx = "What this is: the phone look for opening a chat table big. Desktop has it, the phone does not. It reached you because the design needs your pick. Yes builds it, no leaves it.\n\n"
+        for q in [
+            "Question: Build the table sheet with the expand button (B)?\n\nMy recommendation: Yes.",
+            "Question: Add the skill pill to the kit and build option A?\n\nMy recommendation: Yes.",
+            "Question: build A?\n\nMy recommendation: Yes, build A.",
+            "Question: Which look do we build, A, B or C?\n\nMy recommendation: A.",
+        ]:
+            self.assertIn("design pick", self.bad(ctx + q), q)
+
+    def test_money_option_ask_is_not_a_design_pick(self):
+        body = ("What this is: the photo model for the calorie app. It reached you because it costs money per photo. "
+                "Yes turns it on, no keeps the app without photo reading for now.\n\n"
+                "Question: Pay for option A at $5 a month?\n\nMy recommendation: Yes.")
+        self.assertNotIn("design pick", self.bad(body))
+
+    def test_plain_decision_ask_is_not_a_design_pick(self):
+        body = ("What this is: the old bank key copies in the data. It reached you because deleting live data is your call. "
+                "Yes deletes them after a backup, no keeps them where they are today.\n\n"
+                "Question: Delete the old key copies?\n\nMy recommendation: Yes.")
+        self.assertNotIn("design pick", self.bad(body))
+
     def test_once_ask_is_refused(self):
         body = "Question: **Should this go live once the checks pass?**\n\nMy recommendation: Yes."
         self.assertIn("once X", self.bad(body))

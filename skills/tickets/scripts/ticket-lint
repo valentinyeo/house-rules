@@ -37,6 +37,10 @@ CODE = [
     (re.compile(r"\b(Traceback|stderr|stdout|exit code|stack trace|tmux|--[a-z][\w-]+)\b"), "log or command"),
     (re.compile(r"\b(this server|this setup|the hub|messaging hub|hub checks|exception|forbids|preflight|solo-dev|CI)\b", re.I), "insider word, say what he sees in the app"),
 ]
+# Valentin 2026-11-15, seven Software Factory tickets waiting on him for a look: "prevent stuff like this landing in blockers again"
+DESIGN_PICK = re.compile(r"\b(build|pick|choose|use|go with|ship)\b[^.?\n]{0,80}\b(option|look|design|variant|layout|wireframe|mockup)s?\b"
+                         r"|\boption [A-F]\b|\(([A-F])\)\s*\?|\bbuild [A-F]\s*\?|\b(which|what) (look|design|option|layout|variant)\b"
+                         r"|\badd the\b[^.?\n]{0,60}\bto the kit\b", re.I)
 
 
 def plain(text):
@@ -89,6 +93,8 @@ def question_rules(text):
         bad.append("costs nothing extra (subscription or 0): not money, not his call. Decide and act yourself")
     if REASK.search(ours):
         bad.append("asks him to confirm his own order: his direct order is the yes. Act on it, drop the Question")
+    if q and DESIGN_PICK.search(q.group(1).split("My recommendation")[0]) and not MONEY.search(q.group(1)):
+        bad.append("design pick: not his call. Build your own recommendation, post the pick as a plain comment, he judges the live result")
     if SECRET_ASK.search(ours):
         bad.append("asks him to paste a key into the ticket: keys go only in 1Password, name the item instead")
     return bad
