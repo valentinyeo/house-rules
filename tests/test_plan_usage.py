@@ -56,9 +56,36 @@ def test_unknown_when_there_are_no_numbers():
     got = pu.pools(now=NOW, readings={
         "claude": None,
         "codex": {},
-        "grok": {"week": reading(10, 10080, 50)},
+        "grok": None,
     })
     for name in ("claude", "codex", "grok"):
         assert got[name]["state"] == "unknown"
         assert got[name]["used_pct"] is None
         assert got[name]["pace_ratio"] is None
+
+
+# Recorded from GetCurrentPeriodUsage. Strings are the proto JSON int64 form.
+# No login, no account id. The period is exactly 7 days.
+RECORDED_GROK = {
+    "billingCycleStart": "1794672623669",
+    "billingCycleEnd": "1795277423669",
+    "planUsage": {
+        "autoPercentUsed": 35.31365646719018,
+        "totalPercentUsed": 35.31365646719018,
+    },
+    "enabled": True,
+    "displayMessage": "You've used 35% of your included usage",
+}
+GROK_RESET = 1795277423669 / 1000
+GROK_MID = GROK_RESET - (7 * 24 * 3600) / 2
+
+
+def test_grok_recorded_period_reports_used_pace_and_reset():
+    bars = pu.parse_grok_response(RECORDED_GROK, GROK_MID)
+    got = pu.pools(now=GROK_MID, readings={"claude": None, "codex": None, "grok": bars})
+    assert got["grok"]["used_pct"] == 35.3
+    assert got["grok"]["pace_ratio"] == 0.706
+    assert got["grok"]["state"] == "ON"
+    assert got["grok"]["resets_at"] == GROK_RESET
+    assert got["claude"]["state"] == "unknown"
+    assert got["codex"]["state"] == "unknown"

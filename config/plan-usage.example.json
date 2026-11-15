@@ -6,5 +6,8 @@
   "codex": {
     "sessions": "~/.codex/sessions",
     "email": "person@example.invalid"
+  },
+  "grok": {
+    "credentials": "~/.config/cursor/auth.json"
   }
 }

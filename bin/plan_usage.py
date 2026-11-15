@@ -13,7 +13,10 @@ has elapsed, and spawn-worker then treats the family as unknown. OFF is 95%
 used on either window. WARN is 80% used, or used running ahead of the window
 once 80% of it has elapsed.
 
-Claude and Codex are read live. Grok has no live reader, so it is always unknown.
+Claude, Codex and Grok are read live. Grok is Cursor's current billing
+period: the interactive /usage command calls GetCurrentPeriodUsage, and there
+is no usage subcommand. This reader makes that same call with the stored
+Cursor login. The login is never logged or returned.
 Account emails, client names and ssh hosts are not stored here. When
 ~/.config/plan-usage/accounts.json exists, credential and session paths are
 read from it. config/plan-usage.example.json shows the shape with example.invalid.
@@ -28,6 +31,7 @@ import os
 import selectors
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 from datetime import datetime
@@ -120,11 +124,10 @@ def pool_from_bars(name, raw, now):
 def derive(readings, now):
     if not isinstance(readings, dict):
         raise UsageError("usage readings must be a JSON object")
-    # Grok stays unknown until a live reader exists. A supplied bar is ignored.
     return {
         "claude": pool_from_bars("claude", readings.get("claude"), now),
         "codex": pool_from_bars("codex", readings.get("codex"), now),
-        "grok": unknown_pool(),
+        "grok": pool_from_bars("grok", readings.get("grok"), now),
     }
 
 
@@ -343,9 +346,88 @@ def read_codex(now, accounts):
         return None
 
 
+def cursor_auth_path(accounts):
+    """Where the Cursor CLI stores its login. Same paths as getAuthFilePath."""
+    override = account_section(accounts, "grok").get("credentials")
+    if isinstance(override, str) and override:
+        return os.path.expanduser(override)
+    home = os.path.expanduser("~")
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+        return os.path.join(base, "Cursor", "auth.json")
+    if sys.platform == "darwin":
+        return os.path.join(home, ".cursor", "auth.json")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return os.path.join(base, "cursor", "auth.json")
+
+
+def _epoch_seconds(value):
+    """Proto JSON sends int64 timestamps as millisecond strings."""
+    if isinstance(value, str) and value.lstrip("-").isdigit():
+        value = int(value)
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return None
+    if abs(value) > 10_000_000_000:
+        value = value / 1000.0
+    return value
+
+
+def grok_percent(plan):
+    """Included-usage percent, the number the /usage screen prints."""
+    if not isinstance(plan, dict):
+        return None
+    percent = plan.get("totalPercentUsed", plan.get("total_percent_used"))
+    if type(percent) in (int, float) and math.isfinite(percent):
+        return percent
+    used = plan.get("includedSpend", plan.get("included_spend"))
+    limit = plan.get("limit")
+    if type(used) in (int, float) and type(limit) in (int, float) and math.isfinite(used) and limit > 0:
+        return used / limit * 100.0
+    return None
+
+
+def parse_grok_response(payload, now):
+    """One Cursor billing period. The live period is 7 days, so it is the week bar."""
+    if not isinstance(payload, dict):
+        return None
+    plan = payload.get("planUsage") or payload.get("plan_usage")
+    used = grok_percent(plan)
+    resets_at = _epoch_seconds(payload.get("billingCycleEnd", payload.get("billing_cycle_end")))
+    if used is None or resets_at is None:
+        return None
+    return {"week": window(used, resets_at, WEEK_MINUTES, now)}
+
+
+def read_grok(now, accounts):
+    path = cursor_auth_path(accounts)
+    try:
+        with open(path) as handle:
+            token = json.load(handle).get("accessToken")
+        if not isinstance(token, str) or not token:
+            return None
+        base = os.environ.get("CURSOR_API_ENDPOINT") or "https://api2.cursor.sh"
+        request = urllib.request.Request(
+            base.rstrip("/") + "/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+            data=b"{}",
+            method="POST",
+            headers={
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json",
+            })
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.load(response)
+        return parse_grok_response(payload, now)
+    except Exception:
+        return None
+
+
 def live_readings(now):
     accounts = load_accounts()
-    return {"claude": read_claude(now, accounts), "codex": read_codex(now, accounts)}
+    return {
+        "claude": read_claude(now, accounts),
+        "codex": read_codex(now, accounts),
+        "grok": read_grok(now, accounts),
+    }
 
 
 def load_fixture(path):
