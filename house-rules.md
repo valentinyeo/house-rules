@@ -22,6 +22,6 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | rat-stack for new cloudflare work | nothing yet |
 | a pstack verifier on every pr | nothing yet; a required `pstack-verifier` check once the shared verifier workflow works |
 | server is the laptop, github is the cloud | `no-vps-ci` kills runners and review units every 5 minutes |
-| money, keys, public, deleting live data | nothing, judgment call |
+| money, keys, public, deleting live data | `ask-first-guard` Stop hook sends back any how-or-whether question outside these calls (or a stated exception pstack cannot settle) |
 | no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
 | no secrets anywhere | `secrets-guard` hook |
