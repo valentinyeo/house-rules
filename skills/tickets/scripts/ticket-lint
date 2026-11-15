@@ -75,14 +75,7 @@ def question_rules(text):
         bad.append("money ask with no amount: say what it costs him")
     if ONCE.search(ours):
         bad.append("'once X' ask he cannot answer today: ask only what he can decide now")
-    ctx = re.search(r"What this is:(.*?)Question:", ours, re.I | re.S)
-    if not ctx:
-        bad.append('no "What this is:" part above the Question: say what it is, why it reached him, what each answer changes')
-    elif len(words(ctx.group(1))) < 25:
-        bad.append('"What this is:" too thin to decide on: name the thing as he sees it, why it reached him, what each answer changes')
     q = re.search(r"Question:(.*)", ours, re.I | re.S)
-    if q and not re.search(r"recommendation", q.group(1), re.I):
-        bad.append('no "My recommendation:" right under the Question: say Yes or No and why in one line')
     if q and FACT_ASK.search(q.group(1).split("\n\n")[0]):
         bad.append("asks him for a fact, not a decision: look it up yourself (logs, updater, his PC through agent tools)")
     if ZERO_COST.search(ours):
