@@ -4,7 +4,7 @@ Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for ever
 
 ## Work
 
-- **Tickets:** Start and end every unit on a Hypertask ticket, on your own board or view, under your own login (`/board-identity`). Move the ticket the moment its work moves. Put status and questions on the ticket, not in chat.
+- **Tickets:** Start and end every unit on a Hypertask ticket, on your own board or view, under your own login (`/board-identity`). Move the ticket the moment its work moves. Put status and questions on the ticket. A question Valentin must answer also goes first in chat.
 - **Cloudflare:** Start new Cloudflare work from `joelhooks/rat-stack`.
 - **Secrets:** Never write a secret into a file, commit, ticket or chat.
 - **Open source:** Create new repos public. Make one private only when Valentin says so or it holds client, money or personal data, and state that reason.
