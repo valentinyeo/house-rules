@@ -14,7 +14,7 @@ Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for ever
 - **Verifier:** Give every PR a pstack verifier before merge. It comes from another model family than the author, runs the change like a user, and posts `pstack-verifier: PASS|PASS+NOTES|FAIL @ <sha>`. Green CI or a bot review is not a verdict.
 - **Verifier per repo:** Build each repo's own verifier and app driver. Make `pstack-verifier` a required check once it posts a real verdict.
 - **Where work runs:** Run agents, builds, focused tests and app or phone driving on this server. Run the full suite, CI, reviews and verifiers on GitHub-hosted runners. Never add a self-hosted runner.
-- **Models:** Set up reviewers and verifiers yourself on Valentin's plans: Codex, then Claude, then DeepSeek. Move on when one runs out. Use DeepSeek Flash, never Pro.
+- **Models:** Set up reviewers and verifiers yourself on Valentin's plans: Codex, then Grok, then DeepSeek. Keep Claude for orchestrators. Move on when one runs out. Use DeepSeek Flash, never Pro.
 - **DeepSeek via Pi:** Run DeepSeek through Pi on the OpenCode Go plan, never the OpenCode app.
 - **Billing block:** A check that fails with "recent account payments have failed" means the PR waits. Never verify it here or merge around it. Say so once on the ticket and build the next unit.
 
