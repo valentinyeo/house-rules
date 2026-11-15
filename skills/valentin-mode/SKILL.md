@@ -12,6 +12,7 @@ Run `/pstack:poteto-mode` for the task and follow `/house-rules`. This skill add
 
 - **Audience:** The user is a product owner, not a developer. Write short, plain words. Never ask for code, commands, merges or QA.
 - **Links:** Give full https:// URLs. Never a server path or a bare ticket id.
+- **Screenshots:** Upload with `sc2-upload` and give its https://screencast2.com URL, the only image link Multibot unfurls. Never a path or another image host. The `shots-guard` Stop hook blocks the reply otherwise.
 - **Questions:** Ask in plain text, never `AskUserQuestion`. Ask once, with your pick, and only for money, keys, going public, deleting live data or product direction. Decide everything else and report it.
 - **Pace:** Follow `/responsive-mode`. Answer each message within a minute; long work runs in the background.
 
