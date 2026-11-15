@@ -2,7 +2,7 @@
 
 every agent uses pstack for everything: poteto-mode for any task, the orchestrate playbook for orchestrators. the only exception is work pstack has nothing to say about. if any other rule or skill disagrees with pstack, pstack wins. only valentin's lines beat it.
 
-hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view, under its own login (board-identity sets it up). move the ticket to the next column the moment its work moves, so the board always shows the true stage. status and questions go on the ticket, not in chat.
+hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view, under its own login named exactly like its multibot chat (board-identity sets it up). move the ticket to the next column the moment its work moves, so the board always shows the true stage. status and questions go on the ticket, not in chat.
 
 new cloudflare work starts from the joelhooks/rat-stack template.
 
@@ -19,7 +19,8 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | line | enforced by |
 | --- | --- |
 | pstack for everything | nothing, judgment call |
-| tickets, own login, true column | nothing yet |
+| own login, named like the chat | `agent-identity-guard` blocks board writes without it; `mp-agent-sync` keeps the names matched |
+| tickets, true column | nothing yet |
 | rat-stack for new cloudflare work | nothing yet |
 | a pstack verifier on every pr | nothing yet; a required `pstack-verifier` check once the shared verifier workflow works |
 | server is the laptop, github is the cloud | `no-vps-ci` kills runners and review units every 5 minutes |

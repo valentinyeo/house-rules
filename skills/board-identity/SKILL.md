@@ -5,6 +5,8 @@ description: First step of every lead role (support-manager, design-lead, market
 
 # Board identity
 
+One name everywhere: `NAME` is your Multibot chat name (`~/.local/state/multiprompt/chat-names.json`, key `$MULTIPROMPT_TAB`), and `SLUG` is that name in lowercase with dashes. The board map below only says which boards you get. A chat without its own login cannot write to a board: `agent-identity-guard` blocks it.
+
 Get your own board login. Do it yourself. Never ask Valentin: this rule already allows finding, renaming, creating and boarding your own role agent. Never print a token.
 
 ## Board map
@@ -85,6 +87,7 @@ open('$F','w').write(t); print('saved',a.get('id') or d.get('id',''))"; chmod 60
   `h PATCH /mcp/agents/$ID '{"add_project_ids":[2462]}'`
   "Agents can only belong to boards in one team": this agent is not yours. Remove only the links you made in 3 and 5, then go to 4 and create.
 - Then rename to `$NAME` if needed: `h PATCH /mcp/agents/$ID "{\"display_name\":\"$NAME\"}"`
+- Link the chat to the login so the names stay matched: `mp-agent-sync link --tmux "$MULTIPROMPT_TAB" --id $ID`. From then on `mp-agent-sync` renames the login whenever the chat is renamed.
 
 ## 6. Verify (read and write)
 
