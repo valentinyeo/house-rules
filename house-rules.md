@@ -16,7 +16,7 @@ Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for ever
 - **Where work runs:** Run agents, builds, focused tests and app or phone driving on this server. Run the full suite, CI, reviews and verifiers on GitHub-hosted runners. Never add a self-hosted runner.
 - **Models:** Set up reviewers and verifiers yourself on Valentin's plans: Codex, then Grok, then DeepSeek. Keep Claude for orchestrators. Move on when one runs out. Use DeepSeek Flash, never Pro.
 - **DeepSeek via Pi:** Run DeepSeek through Pi on the OpenCode Go plan, never the OpenCode app.
-- **Billing block:** A check that fails with "recent account payments have failed" means the PR waits. Never verify it here or merge around it. Say so once on the ticket and build the next unit.
+- **Billing block:** Billing blocks only private repos on Valentin's personal account; run `billing-blocks OWNER/REPO` before you blame it. A blocked PR waits: never verify it here or merge around it. Say so once on the ticket.
 
 ## Valentin decides
 
@@ -39,6 +39,6 @@ Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for ever
 | Where work runs | `no-vps-ci` |
 | Models | judgment |
 | DeepSeek via Pi | `deepseek-via-pi` hook |
-| Billing block | not yet |
+| Billing block | `billing-blocks` script, `billing-claim-guard` hook |
 | His calls | judgment |
 | Changes | `rules-lint` required on main |

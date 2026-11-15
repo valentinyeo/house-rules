@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Does GitHub billing block Actions on this repo? Only private repos on Valentin's personal account are blocked
+while his payment fails. Public repos run free; hypertask-ai repos are paid by the org.
+
+billing-blocks OWNER/REPO     prints BLOCKED or NOT BLOCKED with the reason; exit 1 when blocked, 0 when not
+billing-blocks --self-test
+"""
+import json
+import subprocess
+import sys
+
+PERSONAL = "valentinyeo"
+MESSAGE = "recent account payments have failed"
+
+
+def verdict(owner, visibility, last_failure_text):
+    if visibility == "PUBLIC":
+        return False, "public repo: GitHub Actions are free, billing never blocks it"
+    if owner.lower() != PERSONAL:
+        return False, f"{owner} pays for its own Actions, Valentin's personal billing does not apply"
+    if MESSAGE in (last_failure_text or "").lower():
+        return True, "private repo on Valentin's personal account, and its last failed run says the payment failed"
+    return False, "private repo on Valentin's personal account, but no run has failed on billing; read the real failure"
+
+
+def gh(*args):
+    return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=60).stdout
+
+
+def last_failure_text(repo):
+    runs = json.loads(gh("run", "list", "-R", repo, "-L", "10", "--json", "databaseId,conclusion") or "[]")
+    failed = next((r["databaseId"] for r in runs if r.get("conclusion") == "failure"), None)
+    return gh("run", "view", str(failed), "-R", repo) if failed else ""
+
+
+def self_test():
+    cases = [
+        (verdict("valentinyeo", "PUBLIC", MESSAGE), False),
+        (verdict("hypertask-ai", "PRIVATE", MESSAGE), False),
+        (verdict("valentinyeo", "PRIVATE", "X The job was not started because recent account payments have failed"), True),
+        (verdict("valentinyeo", "PRIVATE", "npm test failed"), False),
+    ]
+    ok = all(got[0] == want for got, want in cases)
+    print("billing-blocks self-test ok" if ok else f"billing-blocks self-test FAILED {cases}")
+    return 0 if ok else 1
+
+
+def main():
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
+    if len(sys.argv) != 2 or "/" not in sys.argv[1]:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    repo = sys.argv[1]
+    info = json.loads(gh("repo", "view", repo, "--json", "visibility,owner") or "{}")
+    if not info:
+        print(f"billing-blocks: cannot read {repo}", file=sys.stderr)
+        return 2
+    owner, vis = info["owner"]["login"], info["visibility"]
+    text = last_failure_text(repo) if vis != "PUBLIC" and owner.lower() == PERSONAL else ""
+    blocked, why = verdict(owner, vis, text)
+    print(f"{'BLOCKED' if blocked else 'NOT BLOCKED'}: {repo}: {why}")
+    return 1 if blocked else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
