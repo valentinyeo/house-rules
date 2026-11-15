@@ -28,4 +28,5 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | needs-design shown before build | nothing yet |
 | no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
 | no real email in a public repo | `new-public-repo` refuses to push one; per repo, a ci check on commit emails |
+| merged branches delete themselves | github `delete_branch_on_merge` on every repo; `new-public-repo` sets it on new ones |
 | no secrets anywhere | `secrets-guard` hook |
