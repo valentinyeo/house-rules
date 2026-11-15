@@ -211,7 +211,6 @@ class BudgetTest(unittest.TestCase):
             "merge->release p90 40.0 min > 15 (.github/workflows/auto-release.yml)",
             "PR check 21 jobs > 20 (.github/workflows/ci.yml)",
             "superseded run still running (.github/workflows/ci.yml)",
-            "missing concurrency cancel-in-progress (.github/workflows/auto-release.yml)",
         ])
 
     def test_over_budget_json_includes_queue_wait(self):

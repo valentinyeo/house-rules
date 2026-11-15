@@ -307,12 +307,12 @@ def audit(repo):
         for run in items:
             if run.get("status") not in ACTIVE:
                 continue
-            if any(newer(other, run) for other in items if other.get("id") != run.get("id")):
+            if path not in release_paths and any(newer(other, run) for other in items if other.get("id") != run.get("id")):
                 superseded.add(path)
 
     missing = sorted(
         path for path, text in workflows.items()
-        if triggers_pr_or_push(text) and not cancels_in_progress(text)
+        if triggers_pr_or_push(text) and not cancels_in_progress(text) and path not in release_paths
     )
 
     merge = []
