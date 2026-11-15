@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""Budget for how long a merge takes to release, and how wide a PR check is.
+
+Usage: ci-budget OWNER/REPO [--json]
+
+The last 20 workflow runs supply PR job counts, queue wait, and superseded
+runs that are still active. Merge-to-release uses the last 20 successful
+pushes of the release workflow (release.yml, auto-release.yml, or a workflow
+named Release) on the default branch. Queue wait is copied from ci-time-audit:
+job started_at minus created_at.
+
+Budgets, exit 1 with one plain line each:
+  merge->release median and p90 <= 15 min
+  a PR check <= 20 jobs (skipped jobs do not count)
+  every pull_request or push workflow has top-level concurrency
+  cancel-in-progress set to true, so the older run stops
+
+Read only. Uses gh with GH_TOKEN or the gh login.
+"""
+import argparse
+import base64
+import datetime as dt
+import json
+import os
+import re
+import statistics
+import subprocess
+import sys
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote
+
+ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
+PR_EVENTS = {"pull_request", "pull_request_target"}
+RELEASE_FILES = {
+    "release.yml", "release.yaml", "auto-release.yml", "auto-release.yaml",
+}
+RELEASE_NAMES = {"release", "auto-release"}
+MERGE_BUDGET_MIN = 15
+JOB_BUDGET = 20
+WORKERS = 8
+
+
+def gh(path, retry=True):
+    out = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    if out.returncode and retry and "Bad credentials" in out.stderr and os.environ.get("GH_TOKEN"):
+        fresh = subprocess.run(["gh-app-token"], capture_output=True, text=True)
+        if fresh.returncode == 0:
+            os.environ["GH_TOKEN"] = fresh.stdout.strip()
+            return gh(path, retry=False)
+    if out.returncode:
+        raise RuntimeError(safe_err(out.stderr.strip() or f"gh api {path} failed"))
+    return json.loads(out.stdout)
+
+
+def safe_err(msg):
+    line = str(msg).splitlines()[0] if str(msg).strip() else "gh api failed"
+    line = re.sub(r"gh[pousr]_[A-Za-z0-9_]+", "[redacted]", line)
+    line = re.sub(r"github_pat_[A-Za-z0-9_]+", "[redacted]", line)
+    return line[:300]
+
+
+def q(path, pairs=()):
+    if not pairs:
+        return path
+    return path + "?" + "&".join(f"{key}={value}" for key, value in pairs)
+
+
+def ts(s):
+    return dt.datetime.fromisoformat(s.replace("Z", "+00:00")) if s else None
+
+
+def secs(a, b):
+    return max(0.0, (ts(b) - ts(a)).total_seconds()) if a and b else 0.0
+
+
+def med(xs):
+    return round(statistics.median(xs) / 60, 1) if xs else 0.0
+
+
+def p90(xs):
+    xs = sorted(xs)
+    return round(xs[min(len(xs) - 1, int(len(xs) * 0.9))] / 60, 1) if xs else 0.0
+
+
+def pool_map(fn, items):
+    if not items:
+        return {}
+    out = {}
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {ex.submit(fn, item): item for item in items}
+        for fut in as_completed(futs):
+            out[futs[fut]] = fut.result()
+    return out
+
+
+def text_of(payload):
+    if isinstance(payload, str):
+        return payload
+    raw = payload.get("content") or ""
+    if payload.get("encoding") == "base64":
+        return base64.b64decode(raw).decode()
+    return raw
+
+
+def indent_of(line):
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def top_level(text, want):
+    """Return (found, body_lines, inline_rest) for one top-level YAML key."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if indent_of(line) != 0:
+            continue
+        match = re.match(r"^['\"]?([A-Za-z0-9_-]+)['\"]?\s*:\s*(.*)$", line.strip())
+        if not match or match.group(1) != want:
+            continue
+        rest = match.group(2).strip()
+        if rest and rest not in ("|", ">", "|-", ">-"):
+            return True, [], rest
+        body = []
+        for nxt in lines[i + 1:]:
+            if not nxt.strip():
+                body.append(nxt)
+                continue
+            if indent_of(nxt) == 0:
+                break
+            body.append(nxt)
+        return True, body, ""
+    return False, [], ""
+
+
+def triggers_pr_or_push(text):
+    found, body, inline = top_level(text, "on")
+    if not found:
+        return False
+    if inline:
+        return bool(re.search(r"\b(push|pull_request|pull_request_target)\b", inline))
+    for line in body:
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        name = stripped.split(":", 1)[0].strip().strip("'\"")
+        if name in ("push", "pull_request", "pull_request_target"):
+            return True
+    return False
+
+
+def cancels_in_progress(text):
+    found, body, inline = top_level(text, "concurrency")
+    if not found:
+        return False
+    if inline:
+        return bool(re.search(r"cancel-in-progress:\s*['\"]?true['\"]?\b", inline))
+    for line in body:
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped.startswith("cancel-in-progress:"):
+            continue
+        value = stripped.split(":", 1)[1].strip().strip("'\"")
+        return value == "true"
+    return False
+
+
+def workflow_name(text):
+    for line in text.splitlines():
+        if indent_of(line) != 0 or not line.startswith("name:"):
+            continue
+        return line.split(":", 1)[1].strip().strip("'\"")
+    return ""
+
+
+def is_release(path, text):
+    base = path.rsplit("/", 1)[-1].lower()
+    return base in RELEASE_FILES or workflow_name(text).lower() in RELEASE_NAMES
+
+
+def newer(a, b):
+    ta, tb = ts(a.get("created_at")), ts(b.get("created_at"))
+    if ta and tb and ta != tb:
+        return ta > tb
+    return (a.get("id") or 0) > (b.get("id") or 0)
+
+
+def gh_pages(path, pairs, key):
+    rows = []
+    for page in range(1, 6):
+        data = gh(q(path, list(pairs) + [("page", str(page))]))
+        batch = data.get(key) or []
+        rows.extend(batch)
+        if len(batch) < 100:
+            break
+    return rows
+
+
+def run_id_of(url):
+    match = re.search(r"/actions/runs/(\d+)", url or "")
+    return int(match.group(1)) if match else None
+
+
+def audit(repo):
+    meta = gh(f"repos/{repo}")
+    branch = meta["default_branch"]
+    ref = quote(branch, safe="")
+    lists = {
+        "recent": q(f"repos/{repo}/actions/runs", [("per_page", "20")]),
+        "queued": q(f"repos/{repo}/actions/runs", [("status", "queued"), ("per_page", "100")]),
+        "in_progress": q(f"repos/{repo}/actions/runs", [("status", "in_progress"), ("per_page", "100")]),
+        "pending": q(f"repos/{repo}/actions/runs", [("status", "pending"), ("per_page", "100")]),
+        "files": q(f"repos/{repo}/contents/.github/workflows", [("ref", ref)]),
+    }
+    fetched = pool_map(gh, list(lists.values()))
+    by_url = {url: fetched[url] for url in lists.values()}
+    recent = (by_url[lists["recent"]].get("workflow_runs") or [])[:20]
+    active = []
+    for name in ("queued", "in_progress", "pending"):
+        active.extend(by_url[lists[name]].get("workflow_runs") or [])
+    listing = by_url[lists["files"]]
+    if isinstance(listing, dict):
+        listing = []
+    paths = [
+        item["path"] for item in listing
+        if item.get("type") == "file" and item.get("name", "").endswith((".yml", ".yaml"))
+    ]
+    bodies = pool_map(lambda path: text_of(gh(q(f"repos/{repo}/contents/{path}", [("ref", ref)]))), paths)
+    workflows = {path: bodies[path] for path in paths}
+
+    release_paths = sorted(path for path, text in workflows.items() if is_release(path, text))
+    release_runs = pool_map(
+        lambda path: gh(q(
+            f"repos/{repo}/actions/workflows/{path.rsplit('/', 1)[-1]}/runs",
+            [("branch", ref), ("event", "push"), ("per_page", "20"), ("status", "success")],
+        )).get("workflow_runs") or [],
+        release_paths,
+    )
+
+    started = [run["id"] for run in recent if run.get("status") in ("completed", "in_progress")]
+    job_pages = pool_map(
+        lambda run_id: gh_pages(
+            f"repos/{repo}/actions/runs/{run_id}/jobs",
+            [("per_page", "100")],
+            "jobs",
+        ),
+        started,
+    )
+    queue = []
+    for run_id, jobs in job_pages.items():
+        for job in jobs:
+            if job.get("conclusion") in ("skipped", "cancelled"):
+                continue
+            if job.get("created_at") and job.get("started_at"):
+                queue.append(secs(job["created_at"], job["started_at"]))
+
+    sha_event = {}
+    for run in recent:
+        sha = run.get("head_sha")
+        if run.get("event") in PR_EVENTS and sha:
+            sha_event.setdefault(sha, run["event"])
+
+    def pr_check(item):
+        sha, event = item
+        runs = gh_pages(
+            f"repos/{repo}/actions/runs",
+            [("event", event), ("head_sha", quote(sha, safe="")), ("per_page", "100")],
+            "workflow_runs",
+        )
+        paths_by_id = {run["id"]: run.get("path") or "" for run in runs}
+        checks = gh_pages(
+            f"repos/{repo}/commits/{quote(sha, safe='')}/check-runs",
+            [("per_page", "100")],
+            "check_runs",
+        )
+        by_path = defaultdict(int)
+        total = 0
+        for check in checks:
+            if check.get("conclusion") == "skipped":
+                continue
+            run_id = run_id_of(check.get("details_url") or "")
+            path = paths_by_id.get(run_id)
+            if not path:
+                continue
+            by_path[path] += 1
+            total += 1
+        heaviest = sorted(by_path, key=lambda path: (-by_path[path], path))[0] if by_path else ""
+        return total, heaviest
+
+    checks = list(pool_map(pr_check, list(sha_event.items())).values())
+    if checks:
+        jobs_n, jobs_file = sorted(checks, key=lambda item: (-item[0], item[1]))[0]
+        jobs_median = round(statistics.median([item[0] for item in checks]), 1)
+    else:
+        jobs_n, jobs_file, jobs_median = 0, "", 0
+
+    seen = set()
+    grouped = defaultdict(list)
+    for run in recent + active:
+        if run.get("id") in seen:
+            continue
+        seen.add(run.get("id"))
+        path = run.get("path") or ""
+        if path:
+            grouped[(path, run.get("head_branch") or "")].append(run)
+    superseded = set()
+    for (path, _branch), items in grouped.items():
+        for run in items:
+            if run.get("status") not in ACTIVE:
+                continue
+            if any(newer(other, run) for other in items if other.get("id") != run.get("id")):
+                superseded.add(path)
+
+    missing = sorted(
+        path for path, text in workflows.items()
+        if triggers_pr_or_push(text) and not cancels_in_progress(text)
+    )
+
+    merge = []
+    for path in release_paths:
+        samples = []
+        for run in release_runs.get(path) or []:
+            if run.get("event") != "push" or run.get("head_branch") != branch:
+                continue
+            if run.get("conclusion") not in (None, "success"):
+                continue
+            end = run.get("completed_at") or run.get("updated_at")
+            if run.get("created_at") and end:
+                samples.append(secs(run["created_at"], end))
+        samples = samples[:20]
+        merge.append({
+            "workflow": path,
+            "n": len(samples),
+            "median": med(samples),
+            "p90": p90(samples),
+        })
+
+    failures = []
+    for row in merge:
+        if not row["n"]:
+            continue
+        if row["median"] > MERGE_BUDGET_MIN:
+            failures.append(
+                f"merge->release median {row['median']:.1f} min > 15 ({row['workflow']})"
+            )
+        if row["p90"] > MERGE_BUDGET_MIN:
+            failures.append(
+                f"merge->release p90 {row['p90']:.1f} min > 15 ({row['workflow']})"
+            )
+    if jobs_n > JOB_BUDGET and jobs_file:
+        failures.append(f"PR check {jobs_n} jobs > 20 ({jobs_file})")
+    for path in sorted(superseded):
+        failures.append(f"superseded run still running ({path})")
+    for path in missing:
+        failures.append(f"missing concurrency cancel-in-progress ({path})")
+
+    return {
+        "repo": repo,
+        "ok": not failures,
+        "failures": failures,
+        "merge_to_release": merge,
+        "pr_check_jobs": {
+            "n": len(checks),
+            "max": jobs_n,
+            "median": jobs_median,
+            "workflow": jobs_file,
+        },
+        "queue_wait_minutes": {"n": len(queue), "median": med(queue), "p90": p90(queue)},
+        "superseded": sorted(superseded),
+        "missing_concurrency": missing,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("repo")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    if args.repo.count("/") != 1:
+        print(f"{args.repo}: unreadable (want OWNER/REPO)")
+        sys.exit(1)
+    try:
+        report = audit(args.repo)
+    except RuntimeError as err:
+        msg = safe_err(err)
+        report = {
+            "repo": args.repo,
+            "ok": False,
+            "error": msg,
+            "failures": [f"{args.repo}: unreadable ({msg})"],
+            "merge_to_release": [],
+            "pr_check_jobs": {"n": 0, "max": 0, "median": 0, "workflow": ""},
+            "queue_wait_minutes": {"n": 0, "median": 0, "p90": 0},
+            "superseded": [],
+            "missing_concurrency": [],
+        }
+    if args.json:
+        json.dump(report, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        for line in report["failures"]:
+            print(line)
+    sys.exit(0 if report["ok"] else 1)
+
+
+if __name__ == "__main__":
+    main()
