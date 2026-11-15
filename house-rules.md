@@ -12,7 +12,7 @@ valentin's lines:
 - orchestrators set their reviewers and verifiers up themselves on valentin's deepseek, codex and claude plans, keys included, in that order, and move on when one runs out. claude is allowed for workers and checks. other plans go first while claude usage is high, so orchestrators keep headroom. on deepseek, always flash, never pro. no need to ask anyone.
 - valentin decides money, keys, going public and deleting live data. ask him once, with your pick. a design pick is never his: build your own pick, he judges it live. a ticket labelled needs-design gets 2-3 figma variants (figma-design skill) shown to him first; no build starts before he has seen them.
 - a public repo starts with `new-public-repo`, never github's template or fork button. no commit carries a real email. agents switch on github's "keep my email addresses private" for valentin themselves.
-- github billing is valentin's. never ask him to fix it. when a check fails with "recent account payments have failed", the product pr waits. never verify it on this server or merge around the check. say it once on the ticket, then build the next unit. billing only blocks private repos; public repos run checks free. a tool repo with no client data goes public through `new-public-repo`.
+- github billing is valentin's. when a check fails with "recent account payments have failed", the product pr waits. never verify it on this server or merge around the check. say it once on the ticket, then build the next unit. billing only blocks private repos; public repos run checks free. a tool repo with no client data goes public through `new-public-repo`.
 
 what enforces each line (pstack /correct: a check beats a sentence; drop a line once its mistake can't happen):
 
@@ -26,7 +26,6 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | money, keys, public, deleting live data | nothing, judgment call |
 | no design pick in his blockers | `ticket-lint` refuses a Question that asks him to pick a look or option |
 | needs-design shown before build | nothing yet |
-| never ask him to fix github billing | `billing-claim-guard` stop hook sends the reply back |
 | no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
 | no real email in a public repo | `new-public-repo` refuses to push one; per repo, a ci check on commit emails |
 | no secrets anywhere | `secrets-guard` hook |
