@@ -348,16 +348,6 @@
    "notes": "cwd ~/projects/claude-cro."
   },
   {
-   "name": "inne",
-   "multibot": "inne Poteto",
-   "kind": "outside",
-   "role_skill": null,
-   "login": null,
-   "board": null,
-   "status": "unknown",
-   "notes": "Runs on the inne server. inne rules win."
-  },
-  {
    "name": "Funeralprints",
    "multibot": "Funeralprints",
    "kind": "outside",

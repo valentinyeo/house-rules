@@ -106,7 +106,7 @@ Bold outcome first. Proof in one line. "Nothing to decide." Change link.
 
 ## Agent lane
 `vcc activity add`, or a plain comment with no `--kind` and no @mention, posted from an agent login.
-Under Valentin's own login a plain comment is a people comment in his name. Never post agent notes that way. No agent login on the board (for example inne, 339)? Skip the note and keep it local (YPER4-944).
+Under Valentin's own login a plain comment is a people comment in his name. Never post agent notes that way. No agent login on the board (for example board 339)? Skip the note and keep it local (YPER4-944).
 Anything goes: agent-to-agent talk, status, claims, handoffs.
 Claims, "Released", `Next:`/`Helpers:`/`Branch/PR:`/`Outputs:`, gates,
 resume commands and tmux lines go here, never in the human lane.
