@@ -4,6 +4,7 @@ Valentin authorised this for every repo (2026-11-15): agents run it themselves a
 The value goes straight from the local login to `gh secret set`; it is never printed or written to a file.
 
 ci-key-set OWNER/REPO deepseek     OPENCODE_API_KEY from Pi's opencode-go login (OpenCode Go plan, DeepSeek Flash via Pi)
+ci-key-set OWNER/REPO claude       CLAUDE_CODE_OAUTH_TOKEN from 1Password "Claude runner OAuth token (1y)" (only for judging DeepSeek-authored PRs)
 ci-key-set OWNER/REPO --list       which plan secrets the repo already has
 ci-key-set --self-test
 """
@@ -13,6 +14,8 @@ import sys
 PI = "/home/valentin/.npm-global/bin/pi"
 PLANS = {
     "deepseek": ("OPENCODE_API_KEY", [PI, "auth", "print-api-key", "--provider", "opencode-go"]),
+    "claude": ("CLAUDE_CODE_OAUTH_TOKEN", ["/home/valentin/.local/bin/stack-key", "Claude runner OAuth token (1y)",
+                                          "CLAUDE_CODE_OAUTH_TOKEN"]),
 }
 
 
@@ -37,7 +40,7 @@ def set_plan(repo, plan):
 
 
 def self_test():
-    ok = set(PLANS) == {"deepseek"} and PLANS["deepseek"][0] == "OPENCODE_API_KEY" and "opencode-go" in PLANS["deepseek"][1]
+    ok = set(PLANS) == {"deepseek", "claude"} and PLANS["deepseek"][0] == "OPENCODE_API_KEY" and "opencode-go" in PLANS["deepseek"][1]
     print("ci-key-set self-test ok" if ok else "ci-key-set self-test FAILED")
     return 0 if ok else 1
 
