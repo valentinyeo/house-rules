@@ -222,6 +222,14 @@ def build_argv(family, level, brief):
     return [part.replace("{brief}", brief) for part in FAMILIES[family]["cmd"][level]]
 
 
+def claim_ticket(ticket):
+    """Move the ticket to Doing as this agent. The same command the hook calls."""
+    script = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ticket-board")
+    done = subprocess.run([sys.executable, script, "apply", "--event", "start", "--ticket", ticket])
+    if done.returncode != 0:
+        raise Refused(f"ticket {ticket} was not moved to Doing (exit {done.returncode})")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="spawn-worker",
@@ -232,6 +240,8 @@ def main(argv=None):
                         help="auto (default) or one of: " + ", ".join(TIE_ORDER))
     parser.add_argument("--dry-run", action="store_true",
                         help="print the choice and argv, start nothing")
+    parser.add_argument("--ticket", metavar="KEY",
+                        help="move this ticket to Doing and assign this agent before the worker starts")
     parser.add_argument("brief", metavar="BRIEF_FILE", help="file holding the worker's brief")
     args = parser.parse_args(argv)
 
@@ -255,6 +265,12 @@ def main(argv=None):
     if args.dry_run:
         print(cmd)
         return 0
+    if args.ticket:
+        try:
+            claim_ticket(args.ticket)
+        except Refused as exc:
+            print(f"spawn-worker: refused: {exc}", file=sys.stderr)
+            return 2
 
     try:
         os.execvp(cmd[0], cmd)

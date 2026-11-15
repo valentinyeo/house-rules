@@ -1,0 +1,43 @@
+name: ticket-board
+
+on:
+  workflow_call:
+    secrets:
+      HYPERTASK_TOKEN:
+        required: false
+  pull_request:
+    types: [opened, reopened, closed]
+  check_run:
+    types: [completed]
+  issue_comment:
+    types: [created]
+
+jobs:
+  move:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name != 'workflow_call'
+      - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_call'
+        with:
+          repository: valentinyeo/house-rules
+          ref: main
+          path: tool
+      - name: Move the ticket
+        env:
+          HYPERTASK_TOKEN: ${{ secrets.HYPERTASK_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${HYPERTASK_TOKEN}" ]; then
+            echo "HYPERTASK_TOKEN is not set. Board move skipped."
+            exit 0
+          fi
+          tool_dir="."
+          if [ -f tool/bin/ticket-board ]; then
+            tool_dir="tool"
+          fi
+          curl -fsSL https://raw.githubusercontent.com/hypertask-ai/cli/main/scripts/install.sh | sh
+          export PATH="${HOME}/.local/bin:${PATH}"
+          python3 "${tool_dir}/bin/ticket-board" apply-github
