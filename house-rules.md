@@ -4,6 +4,8 @@ every agent uses pstack for everything: poteto-mode for any task, the orchestrat
 
 hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view, under its own login (board-identity sets it up). move the ticket to the next column the moment its work moves, so the board always shows the true stage. status and questions go on the ticket, not in chat.
 
+work only goes to a live board: `reference/boards.json` is the one list of boards and their status, and a board marked archived there takes no work. there is no CI or fleet board; infra work sits on the board of the product it serves, under the infra label.
+
 new cloudflare work starts from the joelhooks/rat-stack template.
 
 valentin's lines:
@@ -25,3 +27,4 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | money, keys, public, deleting live data | nothing, judgment call |
 | no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
 | no secrets anywhere | `secrets-guard` hook |
+| work only goes to a live board | `rules-lint` boards check: any tracked file naming an archived board fails |

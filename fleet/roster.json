@@ -10,7 +10,7 @@
    "kind": "chief",
    "role_skill": "/hypertask-triage",
    "login": "Chief Of Staff",
-   "board": "15,2060,11514",
+   "board": "15,2060",
    "status": "live",
    "notes": "Poteto takes Chief Of Staff at the switch. Runs the factory only; no app contact. Owns board-health on every board. Reuses the Chief Of Staff login."
   },
@@ -35,9 +35,9 @@
    "kind": "lead",
    "role_skill": "/lead",
    "login": "Infra Lead",
-   "board": "11514",
+   "board": "15,2060",
    "status": "unknown",
-   "notes": "Tools expert. Owns no board: Fleet CI & Infra (11514) is owned by CI Boss (Valentin, 8 Nov)."
+   "notes": "Tools expert. Owns no board: infra work goes to the board of the product it serves, under the infra label (15 for Hypertask, 2060 for Software Factory)."
   },
   {
    "name": "CI Boss",
@@ -45,7 +45,7 @@
    "kind": "lead",
    "role_skill": "/lead",
    "login": "CI Boss",
-   "board": "11514",
+   "board": "15,2060",
    "status": "unknown",
    "notes": "No board note for 22h on blocking CI tickets (Big Boss Man, 2026-11-07). Check it is running."
   },
@@ -224,7 +224,7 @@
     "9": "dead",
     "10": "stale"
    },
-   "notes": "dead = empty shell; stale = Claude open, idle about 40h. Joins the shared pool. A runner picks only from boards whose member list holds its login (fleet/pick can_join, cached 1h; fleet/pick --check-access lists gaps). Runners 1-17 all sit on 15, 2060 and 11514 (fleet/pick --check-access, 2026-11-08)."
+   "notes": "dead = empty shell; stale = Claude open, idle about 40h. Joins the shared pool. A runner picks only from boards whose member list holds its login (fleet/pick can_join, cached 1h; fleet/pick --check-access lists gaps). Runners 1-17 all sit on 15 and 2060 (fleet/pick --check-access, 2026-11-08)."
   },
   {
    "name": "poteto-cursor-{n}",
@@ -240,7 +240,7 @@
    "kind": "runner-pool",
    "role_skill": "/setup-runner",
    "login": "CI Runner {n}",
-   "board": "11514",
+   "board": "15,2060",
    "status": "dead",
    "notes": "All 5 empty shells, idle 36h. CI/Infra lane capped at 4 in the shared pool."
   },
@@ -249,7 +249,7 @@
    "kind": "runner-pool",
    "role_skill": "/setup-runner",
    "login": "Infra Runner {n}",
-   "board": "11514",
+   "board": "15,2060",
    "status": "live"
   },
   {

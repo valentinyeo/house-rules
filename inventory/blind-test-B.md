@@ -22,7 +22,7 @@ Set 1: 20 cases written from the rules. Cases 1 to 10 are answered by the core. 
 | 12 DeepSeek, ticket tagged hard | `reference/brain-map.md` | pass | pass | pass | pass |
 | 13 WIP cap at 6 of 6 | `reference/runner-pipeline.md` | pass | pass | pass | pass |
 | 14 second ticket after 40 minutes | `reference/runner-pipeline.md` | pass | pass | pass | pass |
-| 15 board 11514 cap, 10 runners, 31 tickets | `reference/boards.md` | pass | pass | pass | pass |
+| 15 CI lane cap, 10 runners, 31 tickets | `reference/boards.json` | pass | pass | pass | pass |
 | 16 Claude at 65 percent, reset in 6 days | `reference/engines.md` | pass | pass | pass | pass |
 | 17 three empty runs | `reference/runner-pipeline.md` | pass | pass | pass | pass |
 | 18 card in Only Me + QA, flag at Everyone | `reference/flags.md` | pass | pass | pass | pass |

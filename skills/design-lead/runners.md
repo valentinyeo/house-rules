@@ -18,8 +18,8 @@ Use the existing Hypertask runners. No separate design runners.
 Done only with all of it.
 
 ## Runners, board and GitHub (from HT Product Lead, 2026-10-26)
-- Each lead keeps its own board: Product HTPR 15, Fleet CI & Infra HYCI 11514 (CI Boss), Support HEFE 10450, Growth MARK 2108, Finance YPER1 2462. Design has no board; its work stays on HTPR 15 under the Design label. Never move tickets to another board.
-- Runners pull 15, 11514, 10450 and 2108 (https://app.hypertask.ai/detail/project-4060/810). Never the finance board. Until that ships, HT Product Lead assigns a runner.
+- Each lead keeps its own board: Product HTPR 15, Support HEFE 10450, Growth MARK 2108, Finance YPER1 2462. Design and CI have no board: design work stays on HTPR 15 under the Design label, and infra work goes to the board of the product it serves (15 for Hypertask, 2060 for Software Factory) under the infra label. Never move tickets to another board.
+- Runners pull 15, 10450 and 2108 (https://app.hypertask.ai/detail/project-4060/810). Never the finance board. Until that ships, HT Product Lead assigns a runner.
 - Every ticket gets a reused Title Case label.
 - Runner blockers on your tickets come to HT Product Lead. Never message runners mid-ticket except to answer them.
 - hypertask-ai/hypertask has no automerge. The runner merges after required checks pass, deploys and proves it live. You check the ticket once later.

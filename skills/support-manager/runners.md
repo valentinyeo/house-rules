@@ -33,7 +33,7 @@ Core product (app.hypertask.ai, hypertask-ai/hypertask): ticket on board 15 for 
 
 
 ## Board and GitHub (from HT Product Lead, 2026-10-26)
-- Each lead keeps its own board: Product HTPR 15, Fleet CI & Infra HYCI 11514 (CI Boss), Support HEFE 10450, Growth MARK 2108, Finance YPER1 2462. Design has no board; its work stays on HTPR 15 under the Design label. Never move tickets to another board.
+- Each lead keeps its own board: Product HTPR 15, Support HEFE 10450, Growth MARK 2108, Finance YPER1 2462. Design and CI have no board: design work stays on HTPR 15 under the Design label, and infra work goes to the board of the product it serves (15 for Hypertask, 2060 for Software Factory) under the infra label. Never move tickets to another board.
 - Every ticket gets a reused Title Case label.
 - GitHub quota is shared and scarce. Never poll gh or Actions. At most one gh read per check-in.
 - Board writes only through vcc as your own agent identity. Never Valentin's token.

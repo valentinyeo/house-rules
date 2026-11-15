@@ -2,7 +2,7 @@
 """One ticket picker for every runner (YPER4-1371).
 
     fleet/pick <N> [--dry-run] [--json]    pick (and claim) one ticket for Runner N
-    fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 11514?
+    fleet/pick --check-access              does every Runner N login sit on boards 15 and 2060?
     fleet/pick --wip                       read only: wip: N of M, the units counted and the ones left out
     fleet/pick --replay-waits [DAYS]       offline: runs the wait gate would have held, from the run ledger
 
@@ -26,15 +26,15 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      run, not already holding a unit, able to do its brain, and a checks slot free when the ticket is checks work.
      A full checks lane, or a brain only a busy runner can do, does not fill the cap (HYCI-232). Then only the PR queue
      and new-work tickets with an open PR remain.
-      Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI & Infra (11514)
-     tickets that are Urgent or that an open ticket is BlockedBy still go out, to runners that can join 11514 (LANE_CAP applies).
-  Kept slot (HYCI-186, HYCI-386): while no other runner is on a Fleet CI & Infra (11514) ticket, this runner takes
+      Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, CI and infra
+     tickets (the infra label on board 15 or 2060) that are Urgent or that an open ticket is BlockedBy still go out (LANE_CAP applies).
+  Kept slot (HYCI-186, HYCI-386): while no other runner is on a CI or infra ticket, this runner takes
      one blocking ticket before its own app ticket, before orphans and before the PR queue. Blocking means an open app
      ticket (board 15 or 2060) waits on it, or it is an incident. A plain infra ticket does not. The WIP cap and LANE_CAP
      do not hold that one ticket. The stderr line starts with "kept slot:". Urgent app work runs when no blocker is open.
   c. Urgent new work on any board, then the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
-  e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 11514
+  e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060
   f. the rest of the CI or infra lane, same cap
 One runner holds one ticket until it is live. brain-extra-hard runs on the codex engine (Sol high) or the claude engine (Opus high); every other engine skips it.
 Second ticket (HYCI-431, 14 Nov): when every ticket a runner owns in a building column has waited 30+ minutes on something outside the
@@ -48,7 +48,7 @@ A ticket any runner ended IDLE on rests for every runner (runner-N.idle files an
 (updated after the IDLE end) or for SHORT_REST (2 hours) when it waits on nobody (no Valentin wait), else 3 days at most;
 a ticket with an open BlockedBy link is held by that link; a closed link does not lift a rest (the blocker's fix changes the ticket).
 A ticket with an open BlockedBy link, in Valentin Review or waiting on someone is never picked (fleet/park puts them there).
-That someone may be Valentin or the board lead: fleet/park --lead keeps the starting runner assigned while the lead resolves the wait. A ticket a lead or another agent holds is not new work on Fleet CI & Infra either, nor is one
+That someone may be Valentin or the board lead: fleet/park --lead keeps the starting runner assigned while the lead resolves the wait. A ticket a lead or another agent holds is not new work in the CI or infra lane either, nor is one
 waiting on an agent (HYCI-276: a lead-parked board alarm came back to four runners).
 Wait gate (13 Nov): a ticket whose last run ended WAIT_CHECK, or FAULT naming CI, a PR or a blocker, is also held from every lane
 that reads resting() (own, orphan, kept slot, board, PR queue, incident, the pipeline count) until what it waits on changes: the PR
@@ -149,8 +149,9 @@ SECOND = [None]  # this pick: {"keys": the runner's waiting tickets, "wait": sec
 CLAIM_TTL = 3 * 3600 + 600  # a run may last 3h (timeout in fleet/runner)
 FRESH_CLAIM = 120  # seconds: a claim younger than this has not started its run yet, so the log cannot show it
 INCIDENT_LABEL = "incident"
-# 11514: the release pipeline is broken (production deploys or production CI fail), so no fix can ship
-INCIDENT_BOARDS = ("15", "11514")
+# the release pipeline is broken (production deploys or production CI fail), so no fix can ship: an incident on the board
+# of the product it serves, 15 for Hypertask or 2060 for Software Factory
+INCIDENT_BOARDS = ("15", "2060")
 INCIDENT_DONE = {"done", "archive", "archived", "flag: everyone", "flag: only me + qa"}
 CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
@@ -182,12 +183,13 @@ ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without 
 BOARDS = {
     "15": (("Backlog", "Bugs", "Improvements", "Features"), ("In Progress", "AI Review", "QA")),
     "2060": (("Todo",), ("Doing", "AI Review")),
-    "11514": (("Backlog",), ("In Progress", "AI Review")),
 }
 BOARD_ORDER = {b: i for i, b in enumerate(BOARDS)}
-PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYCI": "11514"}
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060"}
 RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 CI_LABELS = {"ci", "hypertask ci"}
+# there is no CI or fleet board: infra work goes to the board of the product it serves, under this label
+INFRA_LABEL = "infra"
 BASE_SKIP = set()
 # 13 Nov, Valentin: "whatever is in there is not being touched by the runners". A ticket in the Not now column, on any board, is
 # parked by Valentin: no lane takes it, its open PR is not offered, and it does not count toward the pipeline. The pick columns
@@ -792,14 +794,14 @@ def free_for(t, me):
 
 
 def is_ci(t):
-    return bool(set(t["labels"]) & CI_LABELS) or t["board"] == "11514"
+    return bool(set(t["labels"]) & CI_LABELS) or INFRA_LABEL in t["labels"]
 
 
 def lane(t):
-    if t["board"] == "11514" and not set(t["labels"]) & CI_LABELS:
-        return "infra"
-    if is_ci(t):
+    if set(t["labels"]) & CI_LABELS:
         return "ci"
+    if INFRA_LABEL in t["labels"]:
+        return "infra"
     return {"15": "app", "2060": "sf"}[t["board"]]
 
 
@@ -1206,19 +1208,19 @@ def eligible_reason(t):
     nr = ready_reason(t)
     if nr:
         return nr
-    if t["board"] == "2060":
-        return sf_reason(t)
-    if t["board"] == "15" and not is_ci(t):
-        if labels & SKIP_APP:
-            return "label skip: " + ", ".join(sorted(labels & SKIP_APP))
-        agents = [h[0] for h in t["holders"] if h[1]]
-        return "held by agent " + ", ".join(agents) if agents else None
-    if t["board"] == "11514":
+    if in_lane(t):
         if labels & SKIP_INFRA:
             return "label skip: " + ", ".join(sorted(labels & SKIP_INFRA))
+        if t["board"] == "2060" and (t["subs"] or t["paid"]):
+            return "Software Factory skip: label, sub-tasks, paid or ticket list"
         agents = [h[0] for h in t["holders"] if h[1]]
         return "held by agent " + ", ".join(agents) if agents else None
-    return None
+    if t["board"] == "2060":
+        return sf_reason(t)
+    if labels & SKIP_APP:
+        return "label skip: " + ", ".join(sorted(labels & SKIP_APP))
+    agents = [h[0] for h in t["holders"] if h[1]]
+    return "held by agent " + ", ".join(agents) if agents else None
 
 
 def eligible_new(t):
@@ -2247,13 +2249,13 @@ PICKER = [0]  # the runner number this pick runs for
 
 
 def infra_closed(t):
-    """Features first (Valentin 13 Nov: "they are still only on infra"). A Fleet CI & Infra ticket is new work for this runner
+    """Features first (Valentin 13 Nov: "they are still only on infra"). A CI or infra ticket is new work for this runner
     only under the infra cap (HYCI-388: no factory stop any more).
     Incidents are outside both. A runner's own held ticket is not new work."""
-    if not t["key"].startswith("HYCI-") or INCIDENT_LABEL in t["labels"]:
+    if not in_lane(t) or INCIDENT_LABEL in t["labels"]:
         return None
     if infra_count(PICKER[0]) >= infra_cap():
-        return f"features first: {infra_cap()} runner(s) already on Fleet CI & Infra"
+        return f"features first: {infra_cap()} runner(s) already on CI or infra work"
     return None
 
 
@@ -2367,13 +2369,19 @@ def spare_blocker(t):
     return INCIDENT_LABEL in (t.get("labels") or []) or blocks_open_app(t)
 
 
+def on_ci_work(key):
+    """Is this ticket key CI or infra work? The lane is a label now, so the ticket has to be in this pick's snapshot."""
+    t = by_key(key)
+    return bool(t) and in_lane(t)
+
+
 def infra_count(n):
-    """Other runners running a Fleet CI & Infra ticket right now."""
-    return sum(1 for m in range(1, RUNNERS + 1) if m != n and (active_run(m) or "").startswith("HYCI-"))
+    """Other runners running a CI or infra ticket right now."""
+    return sum(1 for m in range(1, RUNNERS + 1) if m != n and on_ci_work(active_run(m) or ""))
 
 
 def infra_cap():
-    """Most runners on Fleet CI & Infra at once: 1 up to 5 live runners, else 2. Incidents are outside the cap.
+    """Most runners on CI or infra work at once: 1 up to 5 live runners, else 2. Incidents are outside the cap.
     Valentin 13 Nov: "the ratio should be heavily in favor of producing something productive. I don't mind one or two
     runners on infrastructure stuff"."""
     live = sum(1 for m in range(1, RUNNERS + 1) if live_runner(f"runner {m}"))
@@ -2387,7 +2395,7 @@ def other_on_blocker(n):
         if m == n:
             continue
         key = active_run(m)
-        if key and key.startswith("HYCI-"):
+        if key and on_ci_work(key):
             return key
     now_s = time.time()
     try:
@@ -2395,21 +2403,21 @@ def other_on_blocker(n):
             if path.name.startswith(".") or now_s - path.stat().st_mtime >= FRESH_CLAIM:
                 continue
             who, key = path.read_text().split("\t")[:2]
-            if who != str(n) and key.startswith("HYCI-"):
+            if who != str(n) and on_ci_work(key):
                 return key
     except OSError:
         pass
     for key, who in virtual_claims().items():
-        if who != str(n) and key.startswith("HYCI-"):
+        if who != str(n) and on_ci_work(key):
             return key
     return None
 
 
 def slot_candidates(n, me, skip):
-    """(candidates, log line or None). Candidates are Fleet CI & Infra (11514) tickets this runner may take."""
+    """(candidates, log line or None). Candidates are CI or infra tickets (the infra label on 15 or 2060) this runner may take."""
     cands, missed, waiting = [], False, False
     for t in SNAP["tickets"]:
-        if t["board"] != "11514":
+        if not in_lane(t):
             continue
         if t["waiting"] or "design-pass" in t["labels"] or skipped(t) or t["key"] in skip or repark_suppressed(t):
             continue
@@ -2434,7 +2442,7 @@ def slot_candidates(n, me, skip):
         elif building_col and (me in names(t) or (orphan(t) and orphan_ok(t))):
             cands.append(t)
     if cands:
-        cands.sort(key=lambda t: (t["prio"] != "Urgent", not blocks_known(t), rank(t), 0 if t["board"] == "11514" else 1, t["created"]))
+        cands.sort(key=lambda t: (t["prio"] != "Urgent", not blocks_known(t), rank(t), t["created"]))
         return cands, None
     if waiting:
         return [], "kept slot: blocker open; its runner is not on it"
@@ -2458,9 +2466,9 @@ def take_kept_slot(n, me, cands, dry):
 
 
 def ci_blockers(cands):
-    """Fleet CI & Infra tickets the WIP cap must not hold: Urgent ones, then ones an open ticket waits on (one relations read per
+    """CI or infra tickets the WIP cap must not hold: Urgent ones, then ones an open ticket waits on (one relations read per
     ticket, so only the top BLOCK_LOOKUPS non-Urgent are checked). They unblock the pipeline the cap is waiting on."""
-    ci = [t for t in cands if t["board"] == "11514"]
+    ci = [t for t in cands if in_lane(t)]
     urgent = [t for t in ci if t["prio"] == "Urgent"]
     rest = [t for t in ci if t["prio"] != "Urgent"][:BLOCK_LOOKUPS]
     return sorted(urgent + [t for t in rest if blocks_open(t)], key=lambda t: (t["prio"] != "Urgent", rank(t), t["created"]))
@@ -3112,7 +3120,7 @@ def choose(n, dry):
             log(empty)
     else:
         if held:
-            # one kept slot only: with a runner already on Fleet CI & Infra, the rest build app work. A second runner
+            # one kept slot only: with a runner already on CI or infra work, the rest build app work. A second runner
             # joins only for an incident or a ticket that blocks open app work (Valentin 13 Nov: "literally everything
             # is on infrastructure")
             full = infra_count(n) >= infra_cap()
@@ -3365,7 +3373,7 @@ def render(n, t, source):
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + (HERE / "briefs" / "park.txt").read_text().rstrip()
         label, model, effort = ("brain-light", *paced_models().get("park", ENGINES[ENGINE]["park"]))
     if source == "incident":
-        brief_file = HERE / "briefs" / ("release-stop.txt" if t["board"] == "11514" else "incident.txt")
+        brief_file = HERE / "briefs" / ("release-stop.txt" if t["board"] == "2060" else "incident.txt")
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
         label, model, effort = ("brain-hard", *INCIDENT_MODEL[INCIDENT_ENGINE])
     if source == "cross-qa":
@@ -3848,8 +3856,8 @@ def ticket_ready_self_test():
     global log, READY_OFF
     import tempfile
     assert TICKET_READY is not None, "ticket-ready did not load"
-    assert {b: tuple(c[0]) for b, c in BOARDS.items()} == {b: tuple(c) for b, c in TICKET_READY.COLUMNS.items()}, \
-        "ticket-ready reads the same new-work columns as the picker"
+    assert {b: tuple(c[0]) for b, c in BOARDS.items()}.items() <= {b: tuple(c) for b, c in TICKET_READY.COLUMNS.items()}.items(), \
+        "ticket-ready reads every new-work column the picker reads"
     good = ("<h2>Problem</h2><p>The board header hides the ticket count on small screens, so people cannot see how full a column is.</p>"
             "<h2>Fix</h2><p>Show the count next to the column name at every width.</p>"
             "<h2>Done when</h2><ul><li><p>The count shows on a phone-sized screen.</p></li></ul><h2>Decision</h2><p>None.</p>")
@@ -4266,11 +4274,11 @@ def self_test():
     saved_runners = RUNNERS
     globals()["RUNNERS"] = 5
     names = {"runner 1", "runner 2", "runner 4"}
-    check_all_members("11514", names)
+    check_all_members("15", names)
     rows = [json.loads(x) for x in (WATCH / "incidents.jsonl").read_text().splitlines()]
-    assert {(r["runner"], r["board"]) for r in rows} == {("runner 3", "11514"), ("runner 5", "11514")}, \
+    assert {(r["runner"], r["board"]) for r in rows} == {("runner 3", "15"), ("runner 5", "15")}, \
         "an hourly read reports each missing runner once"
-    check_all_members("11514", names)
+    check_all_members("15", names)
     assert len(rows) == len((WATCH / "incidents.jsonl").read_text().splitlines()), \
         "one incident an hour per runner and board"
     globals()["RUNNERS"] = saved_runners
@@ -4662,29 +4670,36 @@ def wip_self_test():
     RUNNERS, FREEZE = 3, STATE / "app-freeze"
     (STATE / "stop-3").write_text("pacer\n")
 
+    def fixture_board(key):
+        # HYCI is the archived CI board's prefix: its fixtures sit on board 15 under the infra label now
+        return "15" if key.startswith("HYCI-") else PREFIX_BOARD[key.split("-")[0]]
+
     def tk(key, section, *holders, labels=(), waiting=False):
-        return {"key": key, "idx": 1, "board": PREFIX_BOARD[key.split("-")[0]], "section": section, "title": "x",
-                "labels": list(labels), "prio": "Medium", "holders": [[h, True] for h in holders], "waiting": waiting,
+        return {"key": key, "idx": 1, "board": fixture_board(key), "section": section, "title": "x",
+                "labels": list(labels) + (["infra"] if key.startswith("HYCI-") else []), "prio": "Medium",
+                "holders": [[h, True] for h in holders], "waiting": waiting,
                 "subs": False, "paid": False, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"}
 
     def pr(num, key, draft=False):
         return {"number": num, "title": f"{key} x", "draft": draft, "branch": f"runner-1/{key.lower()}",
                 "updated": iso(0.2), "red": False}
 
-    assert slim({"ticketNumber": "HYCI-9", "section": "Backlog", "waitingOnUserId": 7}, "11514")["waiting"], \
+    assert slim({"ticketNumber": "HYCI-9", "section": "Backlog", "waitingOnUserId": 7,
+                 "labels": [{"name": "infra"}]}, "15")["waiting"], \
         "a wait on Valentin is not pool work"
-    assert slim({"ticketNumber": "HYCI-9", "section": "Backlog", "waitingOnAgentId": "lead-id"}, "11514")["waiting"], \
+    assert slim({"ticketNumber": "HYCI-9", "section": "Backlog", "waitingOnAgentId": "lead-id",
+                 "labels": [{"name": "infra"}]}, "15")["waiting"], \
         "a wait on the board lead is not pool work: fleet/park --lead sets it (HYCI-276)"
-    assert not slim({"ticketNumber": "HYCI-9", "section": "Backlog"}, "11514")["waiting"], \
+    assert not slim({"ticketNumber": "HYCI-9", "section": "Backlog", "labels": [{"name": "infra"}]}, "15")["waiting"], \
         "a ticket nobody waits on stays pool work"
     assert eligible_reason(tk("HYCI-9", "Backlog", "Chief Of Staff")) == "held by agent Chief Of Staff", \
-        "a 11514 ticket the fleet chief holds is not new work (board 15 makes the same call)"
-    assert eligible_reason(tk("HYCI-9", "Backlog")) is None, "an unheld 11514 ticket is still new work"
+        "an infra ticket the fleet chief holds is not new work (board 15 makes the same call)"
+    assert eligible_reason(tk("HYCI-9", "Backlog")) is None, "an unheld infra ticket is still new work"
 
     def need(key, text, section="Backlog", labels=(), prs=()):
         """eligible_reason for a ticket whose title/body says text, with the open PR list given (HYCI-355)."""
         t = slim({"ticketNumber": key, "section": section, "title": text, "labels": [{"name": l} for l in labels]},
-                 PREFIX_BOARD[key.split("-")[0]])
+                 fixture_board(key))
         global SNAP
         saved = SNAP
         SNAP = {"tickets": [t], "rel": {}, "prs": list(prs), "incidents": [], "open": {}}
@@ -4854,17 +4869,17 @@ def wip_self_test():
         assert (t["key"], source) == ("HTPR-40", "park"), "an own ticket that rests is parked before anything else"
         (STATE / "runner-1.idle").unlink()
         # a runner whose login the board never added is offered nothing from it (HYCI-159: ship-claim refused Runner 5)
-        set_members("11514", {"runner 1"})
+        set_members("15", {"runner 1"})
         SNAP = {"tickets": [tk("HYCI-1", "Backlog")], "rel": {"HYCI-1": [[], []]}, "prs": [], "incidents": [], "open": {}}
-        assert can_join(1, "11514") and not can_join(2, "11514") and can_join(2, "15")
+        assert can_join(1, "15") and not can_join(2, "15") and can_join(2, "2060")
         assert choose(1, True)[0]["key"] == "HYCI-1", "a member is offered the board's ticket"
         try:
             choose(2, True)
             raise AssertionError("offered a ticket on a board the runner is not a member of")
         except SystemExit as e:
             assert str(e).startswith("none:"), e
-        # cap hit, Fleet CI & Infra blocker offered: Urgent and open-BlockedBy tickets go out, a plain one and a non-member do not
-        set_members("11514", {"runner 1"})
+        # cap hit, an infra blocker offered: Urgent and open-BlockedBy tickets go out, a plain one and a non-member do not
+        set_members("15", {"runner 1"})
         full_wip = [tk("HTPR-50", "In Progress", "runner 2"), tk("HTPR-51", "AI Review", "runner 2"), tk("HTPR-52", "Bugs")]
         ci = [tk("HYCI-2", "Backlog"), tk("HYCI-3", "Backlog"), tk("HYCI-4", "Backlog")]
         ci[2]["prio"] = "Urgent"
@@ -4904,14 +4919,14 @@ def wip_self_test():
         (STATE / "runner-2.log").unlink()
         RUNNING.clear()
         SNAP["rel"]["HYCI-3"] = [[], ["HTPR-52"]]
-        set_members("11514", {"runner 2"})
+        set_members("15", {"runner 2"})
         try:
             choose(1, True)
-            raise AssertionError("cap hit: a non-member was offered a Fleet CI & Infra ticket")
+            raise AssertionError("cap hit: a non-member was offered an infra ticket")
         except SystemExit as e:
             assert "new work closed" in str(e), e
         # every runner that is picking while the others are on app work still gets the blocker
-        set_members("11514", {"runner 1", "runner 2"})
+        set_members("15", {"runner 1", "runner 2"})
         (STATE / "runner-2.log").write_text(f"{iso(0.05)} cursor: HTPR-50 composer-2.5 medium\n")
         RUNNING.clear()
         ci[2]["prio"] = "Urgent"
@@ -4926,7 +4941,7 @@ def wip_self_test():
         SNAP["prs"] = []
         SNAP["open"] = {}
         CHECKED[0] = 0
-        set_members("11514", {"runner 1", "runner 2"})
+        set_members("15", {"runner 1", "runner 2"})
         slot_logs.clear()
         got = choose(2, True)
         assert (got[0]["key"], got[1]) == ("HYCI-1", "ci-lane"), got

@@ -72,7 +72,7 @@ Disposition codes:
 | 89 | HARD: never ask him for a fact | a | core | `agent-identity-guard`, `ticket-lint` |
 | 90 | HARD: file Hypertask snag feedback | a | core | `agent-feedback` |
 | 91 | No column piles up | a | `reference/boards.md` | `pileup-watch` |
-| 92 | Fleet CI and Infra filing | a | `reference/boards.md` | `filing-gate` |
+| 92 | Infra ticket filing, on the product board under the infra label | a | `reference/boards.json` | `filing-gate` |
 | 93 | Keep the board clean, duplicates | a | `skills/hypertask-triage/` | `board-dupes` |
 | 94 | Fleet chiefs run triage until GREEN | a, b | `skills/hypertask-triage/` | `board-health`, `ticket-check` |
 | 95 | Self-maintenance board stays small | a | `reference/boards.md` | `pileup-watch` backlog cap |
@@ -98,7 +98,7 @@ Disposition codes:
 | 139 | No agent-to-agent messaging | d | core | none |
 | 140-141 | HARD: factory plan, one shared pool | e | `reference/roster.md` | `fleet/roster.json`, `fleet/pick` lanes |
 | 142 | Kept slot | a (cut in A) | `reference/runner-pipeline.md` | `fleet/pick`, `fleet-watch` |
-| 143-144 | CI tickets on board 11514; CI snag | a | `reference/boards.md` | `ci-unblock-waiters` |
+| 143-144 | CI tickets on the product board under the infra label; CI snag | a | `reference/boards.json` | `ci-unblock-waiters` |
 | 145 | Leads empower, never do runner work | b | `skills/lead/` | none |
 | 146-148 | Report blockers to own lead | d, c (duplicates) | core, one line | none |
 | 149 | `/runner-update` | b | `skills/runner-update/` | pacer |

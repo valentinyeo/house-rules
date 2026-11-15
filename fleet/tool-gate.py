@@ -6,7 +6,7 @@
 
 pick: when fleet/pick changes, run fleet/pick --self-test. Pass promotes the copy to
 ~/.local/state/fleet-pick/lkg/pick and records pick-lkg.sha under FLEET_RUNNER_STATE.
-Fail keeps the last copy, files one checks-board incident per bad sha, runners keep picking.
+Fail keeps the last copy, files one infra incident on board 2060 per bad sha, runners keep picking.
 """
 import hashlib
 import json
@@ -25,7 +25,8 @@ LKG_DIR = Path(os.environ.get("FLEET_PICK_LKG", Path.home() / ".local/state/flee
 LKG_PICK = LKG_DIR / "pick"
 RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", Path.home() / ".local/state/ht-or-runners"))
 FSW = Path(os.environ.get("FLEET_WATCH_STATE", Path.home() / ".local/state/fleet-switch"))
-CI_BOARD = "11514"
+# the picker is Valentin's own tool, so its incidents go to Software Factory under the infra label
+FACTORY_BOARD = "2060"
 
 
 def stamp():
@@ -88,8 +89,8 @@ def file_broken_picker_incident(sha, detail):
     path.write_text(body)
     title = f"Picker self-test failed; rolled back (sha {sha[:12]})"
     r = ci_vcc(
-        "task", "create", "--project", CI_BOARD, "--title", title, "--description-file", str(path),
-        "--priority", "urgent", "--labels", "CI,Hypertask CI,incident,brain-medium", "--section", "Backlog",
+        "task", "create", "--project", FACTORY_BOARD, "--title", title, "--description-file", str(path),
+        "--priority", "urgent", "--labels", "CI,Hypertask CI,infra,incident,brain-medium", "--section", "Todo",
     )
     if r.returncode == 0:
         json.dump({"sha": sha, "at": time.time()}, open(dedupe, "w"))
