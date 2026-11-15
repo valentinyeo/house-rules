@@ -75,4 +75,10 @@ if [ -d "$DIR/skills" ]; then
   done
 fi
 
+# vstack skills install from their own checkout. A missing checkout is fine.
+VSTACK_INSTALL=${VSTACK_INSTALL:-$HOME/.local/share/vstack/install}
+if [ -x "$VSTACK_INSTALL" ]; then
+  "$VSTACK_INSTALL"
+fi
+
 [ -x "$DIR/bin/rules-drift" ] && "$DIR/bin/rules-drift" >/dev/null 2>&1 || true

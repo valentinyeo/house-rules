@@ -25,3 +25,5 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | money, keys, public, deleting live data | nothing, judgment call |
 | no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
 | no secrets anywhere | `secrets-guard` hook |
+
+valentin-mode and responsive-mode live in vstack (https://github.com/valentinyeo/vstack). This server's extra setup is `reference/valentin-local.md`.
