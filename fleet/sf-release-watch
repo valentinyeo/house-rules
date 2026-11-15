@@ -21,10 +21,10 @@ green PR that stays unmerged for GREEN_STALL_S goes to the owner.
 The result is written to STATE/sf-release-wait.json. fleet/pick reads it and does not hand a ticket in state pr or release to
 a model (one_run_hold / sf_wait_rows): it makes no GitHub call of its own. A file older than 15 minutes holds nothing.
 
-HYCI-388 (14 Nov): Fleet CI & Infra (11514) tickets in In Progress or AI Review get the same hold when their PR lives in one of
-EXTRA_REPOS (house-rules, read with the default gh login: the runner App cannot see that private repo). Only an open PR counts:
-pending or green checks are state pr (a script waits: fleet/pr-merge merges a green one), anything else is attention. No release,
-no merge by this script. HYCI-404 ran again after its 30 blind minutes because
+HYCI-388 (14 Nov): infra tickets on 2060 (Doing, AI Review) and site tickets on 15 get the same hold when their PR lives in one of
+EXTRA_REPOS (house-rules and the sites, read with the default gh login: the runner App cannot see that private repo). Only an open PR
+counts: pending or green checks are state pr (a script waits: fleet/pr-merge merges a green one), anything else is attention. No
+release, no merge by this script. HYCI-404 ran again after its 30 blind minutes because
 only hypertask-ai/hypertask PRs were visible to the picker.
 
 The ticket key on the board is SOFT-2273 while the PR title and the release note say IGSH-2273. Both prefixes are board 2060,
@@ -47,15 +47,13 @@ BOARD = "2060"
 COLUMNS = ("Doing", "AI Review")
 # ticket label -> (GitHub repository, release tag prefix). Only apps whose release workflow runs on merge belong here.
 APPS = {"multiprompt": "valentinyeo/multiprompt", "wazig": "valentinyeo/postbox", "postbox": "valentinyeo/postbox"}
-# Fleet CI & Infra tickets whose PR is not in a Software Factory app repo (HYCI-388). SF_EXTRA_REPOS overrides, comma separated.
+# Infra and site tickets whose PR is not in a Software Factory app repo (HYCI-388). SF_EXTRA_REPOS overrides, comma separated.
 # HYCI-408 (14 Nov): HTPR-9133/9134/9136 (PRs in astro-rs) and HYCI-436 (PR in the multiprompt repo) were woken again and again to wait on
 # checks, because the picker saw no PR for them. astro-rs holds the hypertask.ai site PRs of board 15; multiprompt holds a CI ticket's PR.
 EXTRA_REPOS = [r for r in (os.environ.get("SF_EXTRA_REPOS") or "valentinyeo/house-rules,valentinyeo/astro-rs,hypertask-ai/astro-rs").split(",") if r]
-EXTRA_BOARD = "11514"
-EXTRA_COLUMNS = ("In Progress", "AI Review")
 # (board, columns, repos read for that board). A board 15 ticket is matched only against the PRs of its site repos here; the main repo
-# PRs of board 15 are the picker's own read (one_run_hold).
-EXTRA_SWEEPS = [(EXTRA_BOARD, EXTRA_COLUMNS, EXTRA_REPOS + ["valentinyeo/multiprompt"]),
+# PRs of board 15 are the picker's own read (one_run_hold). Infra work sits on 2060 under the infra label.
+EXTRA_SWEEPS = [("2060", ("Doing", "AI Review"), EXTRA_REPOS + ["valentinyeo/multiprompt"]),
                 ("15", ("In Progress", "AI Review", "QA"), [r for r in EXTRA_REPOS if "astro-rs" in r])]
 LOOKBACK_S = 24 * 3600  # a PR merged longer ago than this is not this ticket's release wait
 LOOKUP_CAP = 10  # tickets per repo per sweep looked up by number when no recent PR names them (HYCI-431)
@@ -128,7 +126,7 @@ def blocked_silent(pr, now):
 
 
 def classify_extra(key, prs, now=None):
-    """One Fleet CI & Infra ticket against the open PRs of its extra repos. Returns (state, detail, since): pr while checks are
+    """One extra-repo ticket against the open PRs of its extra repos. Returns (state, detail, since): pr while checks are
     pending or green (a script is waiting: fleet/pr-merge merges a green one), attention for every other open PR and for a green PR
     left unmerged for GREEN_STALL_S, none when no open PR names the ticket."""
     pat = re.compile(rf"\b{re.escape(key)}\b", re.I)
@@ -482,7 +480,7 @@ def self_test():
     hub = Fake([pr_merged, other], [old, new], [("SOFT-2273", 2273, {"multiprompt"}, "Doing")])
     doc, moved = sweep(hub, t(21, 43))
     assert moved == [] and not hub.done and doc["tickets"] == {}, (moved, doc)
-    # HYCI-388 (HYCI-404): a Fleet CI & Infra ticket with a house-rules PR whose checks run is held as a script's wait; every other state is a model's
+    # HYCI-388 (HYCI-404): an infra ticket with a house-rules PR whose checks run is held as a script's wait; every other state is a model's
     hy = {"number": 441, "title": "HYCI-404: runner keeps its ticket", "headRefName": "hyci-404-owner", "state": "OPEN", "isDraft": False, "mergedAt": None,
           "mergeCommit": None, "updatedAt": "2026-11-13T21:36:00Z", "statusCheckRollup": checks("SUCCESS", "RUN"), "reviewDecision": "",
           "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED"}

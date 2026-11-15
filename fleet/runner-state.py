@@ -116,8 +116,9 @@ def _sf_script_waits(ticket):
 
 
 # 14 Nov (HYCI-388, HTPR-8207 and HYCI-405): runs ended "RUNNER IDLE ci-blocked HYCI-420". The CI-snag rule links the app ticket BlockedBy the
-# Fleet CI & Infra ticket and ci-boss/bin/ci-unblock-waiters clears the wait when the fix ships, so that wait is the script's, not a runner's leave.
-CI_BLOCKED = re.compile(r"\bci-blocked\b[^.;]{0,20}\bHYCI-\d+", re.I)
+# infra ticket (its product's board, infra label) and ci-boss/bin/ci-unblock-waiters clears the wait when the fix ships, so that wait is
+# the script's, not a runner's leave.
+CI_BLOCKED = re.compile(r"\bci-blocked\b[^.;]{0,20}\b(?:HTPR|HYFA|IGSH|SOFT|HYCI)-\d+", re.I)
 
 
 # 14 Nov (HYCI-388, HYCI-390 run 2): the run merged its fix PR and ended "RUNNER IDLE checks pending" while the proof run on main was still going.
@@ -127,7 +128,7 @@ POST_MERGE = re.compile(r"\bpost-?merge\b|\bproof run\b|\b(?:runs?|checks?|ci) o
 
 
 def _wait_detail(line, ticket=""):
-    """Detail of a WAIT_CHECK ending. A wait on a named PR (review and checks running, the runner resumes to merge), on a ticket sf-release-watch holds, on a Fleet CI & Infra ticket (ci-unblock-waiters), or on the proof run after a merge (the QA run) is a script's wait, not a runner's leave."""
+    """Detail of a WAIT_CHECK ending. A wait on a named PR (review and checks running, the runner resumes to merge), on a ticket sf-release-watch holds, on an infra ticket (ci-unblock-waiters), or on the proof run after a merge (the QA run) is a script's wait, not a runner's leave."""
     text = line[:160]
     if PR_WAIT.search(line) or _sf_script_waits(ticket) or CI_BLOCKED.search(line) or POST_MERGE.search(line):
         return ("script owns: " + text)[:160]
@@ -505,7 +506,7 @@ def self_test():
     assert stall["park"] == ""
     wait = classify("RUNNER IDLE ci-blocked HYCI-117", 0, 400, "", 10, "HYCI-1")
     assert wait["state"] == "WAIT_CHECK" and wait["park"] == ""
-    assert wait["detail"].startswith("script owns"), "a wait on a Fleet CI & Infra ticket is ci-unblock-waiters' wait"
+    assert wait["detail"].startswith("script owns"), "a wait on an infra ticket is ci-unblock-waiters' wait"
     assert leave_verdict(wait["state"], wait["detail"])[0] == "skip", leave_verdict(wait["state"], wait["detail"])
     late = classify("RUNNER IDLE checks pending", 0, 400, "", WAIT_LIMIT, "HYCI-1")
     assert late["state"] == "FAULT" and late["park"] == "" and "6 h" in late["detail"]

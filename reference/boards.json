@@ -1,0 +1,23 @@
+{
+  "_doc": "Every Hypertask board id this repo names, and whether work may still go to it. scripts/rules-lint fails when any other tracked file names a board marked archived, so work never lands on a dead board. Infra work has no board of its own: it goes to the board of the product it serves, with the infra label (2060 for Valentin's own tools, 15 for Hypertask). A board id that appears in the repo and not here is a mistake: add the row with its status. An empty name means the repo records no name for that board.",
+  "boards": [
+    {"id": 15, "name": "Hypertask", "prefixes": ["HTPR", "HYFA"], "status": "live"},
+    {"id": 339, "name": "", "prefixes": [], "status": "live"},
+    {"id": 473, "name": "", "prefixes": [], "status": "live"},
+    {"id": 1215, "name": "", "prefixes": [], "status": "live"},
+    {"id": 2060, "name": "Software Factory", "prefixes": ["IGSH", "SOFT"], "status": "live"},
+    {"id": 2101, "name": "In-app Feedback", "prefixes": [], "status": "live"},
+    {"id": 2108, "name": "Hypertask Marketing", "prefixes": ["MARK"], "status": "live"},
+    {"id": 2128, "name": "", "prefixes": [], "status": "live"},
+    {"id": 2462, "name": "Hypertask Finance", "prefixes": ["YPER1"], "status": "live"},
+    {"id": 2467, "name": "", "prefixes": [], "status": "live"},
+    {"id": 4060, "name": "", "prefixes": [], "status": "live"},
+    {"id": 8525, "name": "Faceless Channels", "prefixes": [], "status": "live"},
+    {"id": 8783, "name": "Upwork Auto Applier", "prefixes": [], "status": "live"},
+    {"id": 10450, "name": "Help Feedback", "prefixes": ["HEFE"], "status": "live"},
+    {"id": 10958, "name": "", "prefixes": [], "status": "live"},
+    {"id": 11514, "name": "Fleet CI & Infra", "prefixes": ["HYCI"], "status": "archived"},
+    {"id": 11612, "name": "", "prefixes": [], "status": "live"},
+    {"id": 12322, "name": "Matt - EZYFIT and ClickShades", "prefixes": [], "status": "live"}
+  ]
+}

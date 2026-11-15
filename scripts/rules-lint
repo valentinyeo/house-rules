@@ -13,9 +13,14 @@ Checks:
   orphan       a reference/*.md file that house-rules.md and no skill points to
   words        house-rules.md over 1500 words (in --diff mode: growing past WORD_CEILING)
 
+Every tracked file, in both modes, also fails the boards check when it names a board that
+reference/boards.json marks archived, by id ("<id>", "project-<id>", "--project <id>") or by name.
+That registry is the one list of boards: infra work goes to the product board with the infra label.
+
 Exit 1 on any hit, with file:line. Reads only: never edits a file, starts no job.
 """
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -26,6 +31,8 @@ MAX_FILE_WORDS = 1500
 WORD_CEILING = MAX_FILE_WORDS  # in --diff mode the file may not grow past the cap
 MAX_DESC = 1024
 MAX_SKILL_LINES = 500
+BOARDS_FILE = "reference/boards.json"
+ARCHIVED_FIX = "use the product board with the infra label: 2060 for Valentin's own tools, 15 for Hypertask"
 
 DATE_RE = re.compile(r"\(20\d\d-|\bwhy:", re.I)
 CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
@@ -170,6 +177,44 @@ def added_lines(root, base, head):
     return res
 
 
+def archived_boards(root, head):
+    """The boards reference/boards.json marks archived, as [{id, name}]. No registry, no check."""
+    text = read(root, head, BOARDS_FILE)
+    if not text:
+        return []
+    try:
+        rows = json.loads(text)
+    except ValueError:
+        return []
+    rows = rows.get("boards") if isinstance(rows, dict) else rows
+    return [b for b in rows or [] if isinstance(b, dict) and str(b.get("status", "")).lower() == "archived"]
+
+
+def archived_hits(path, text, boards):
+    """(lineno, board) for each line that names an archived board as a board, by id or by name."""
+    out = []
+    for n, line in enumerate(text.split("\n"), 1):
+        for b in boards:
+            if re.search(r"(?<!\d)%s(?!\d)" % re.escape(str(b["id"])), line) \
+                    or (b.get("name") and re.search(re.escape(b["name"]), line, re.I)):
+                out.append((n, b))
+                break
+    return out
+
+
+def boards_problems(root, head, report):
+    """A tracked file that names an archived board sends work nowhere: refuse it. The registry itself is the one place it may appear."""
+    boards = archived_boards(root, head)
+    for path in tree(root, head) if boards else []:
+        if path == BOARDS_FILE:
+            continue
+        text = read(root, head, path)
+        if text is None or "\x00" in text:  # binary
+            continue
+        for n, b in archived_hits(path, text, boards):
+            report(path, n, "boards", "archived board %s (%s): %s" % (b["id"], b.get("name") or "no name", ARCHIVED_FIX))
+
+
 def run(root, files, base, head, out):
     hits = []
 
@@ -179,6 +224,7 @@ def run(root, files, base, head, out):
 
     wc = lambda t: len(t.split()) if t else 0
     structure_problems(root, head, report)
+    boards_problems(root, head, report)
     if base is None:
         paths = files or ["house-rules.md"] + [x for x in tree(root, head) if re.fullmatch(r"skills/[^/]+/SKILL\.md|reference/[^/]+\.md", x)]
         for p in paths:
@@ -211,6 +257,11 @@ def self_test():
     check("frontmatter ok", not frontmatter_problems("---\nname: a\ndescription: Use when b.\n---\nbody\n"))
     check("frontmatter no trigger", bool(frontmatter_problems("---\nname: a\ndescription: Does things.\n---\n")))
     check("frontmatter empty desc", bool(frontmatter_problems("---\nname: a\ndescription:\n---\n")))
+    dead = [{"id": 4242, "name": "Old Fleet Board"}]
+    check("clean line naming a live board", not archived_hits("fleet/x", "CI work goes to board 15 with the infra label.", dead))
+    check("archived board named as a board", archived_hits("fleet/x", "CI work goes to 4242.", dead) == [(1, dead[0])])
+    check("archived board in a project flag", bool(archived_hits("fleet/x", "vcc task create --project 4242", dead)))
+    check("archived board by name", bool(archived_hits("fleet/x", "the Old Fleet Board board", dead)))
 
     class Buf:
         def __init__(self):
@@ -256,6 +307,17 @@ def self_test():
         b = Buf()
         run(d, None, "HEAD~1", "HEAD", b)
         check("diff mode refuses file growing past cap", ": words:" in b.t)
+        put("reference/boards.json", json.dumps({"boards": [{"id": 4242, "name": "Old Fleet Board", "status": "archived"},
+                                                           {"id": 15, "name": "Hypertask", "status": "live"}]}))
+        put("fleet/x", "CI tickets go on board 4242 with the infra label.\n")
+        g("add", "-A"); g("commit", "-qm", "dead board")
+        b = Buf()
+        check("planted archived board refused", run(d, None, None, None, b) == 1 and "fleet/x:1: boards:" in b.t)
+        put("fleet/x", "CI tickets go on board 15 with the infra label.\n")
+        g("commit", "-qam", "clean board")
+        b = Buf()
+        run(d, None, None, None, b)
+        check("clean file naming a live board passes", "fleet/x" not in b.t)
     print("SELF-TEST " + ("ok" if ok else "FAILED"))
     return 0 if ok else 1
 

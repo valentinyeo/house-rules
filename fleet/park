@@ -18,7 +18,7 @@
     fleet/park --sweep [--apply] [--waits-on KEY=T1,T2 ...] [--valentin KEY[=COMMENT] ...]
     fleet/park --self-test
 
-Home column: board 15 Bugs, Features or Improvements by label then title tag; 2060 Todo; 11514 Backlog.
+Home column: board 15 Bugs, Features or Improvements by label then title tag; 2060 Todo.
 A runner calls it before it ends a run with `RUNNER IDLE`. It writes as the caller (SHIP_SESSION_NAME), never as Valentin.
 --sweep is the one-time cleanup through the same code: it reads the runner launcher logs, finds board 15 tickets still In
 Progress that a runner ended IDLE on, classifies each (open BlockedBy link, waiting on Valentin, no PR at all) and prints the
@@ -39,10 +39,9 @@ from ticket_owner import store
 HOME = Path.home()
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
 RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
-BUILDING = {"15": ("In Progress", "AI Review", "QA"), "2060": ("Doing", "AI Review"),
-            "11514": ("In Progress", "AI Review")}
-HOME_COLUMN = {"2060": "Todo", "11514": "Backlog"}
-TICKET = re.compile(r"^(HTPR|HYFA|IGSH|SOFT|HYCI)-[0-9]+$")
+BUILDING = {"15": ("In Progress", "AI Review", "QA"), "2060": ("Doing", "AI Review")}
+HOME_COLUMN = {"2060": "Todo"}
+TICKET = re.compile(r"^(HTPR|HYFA|IGSH|SOFT)-[0-9]+$")
 RUNNERISH = re.compile(r"^(?:runner \d+|ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 VALENTIN_REVIEW = "Valentin Review"
 
@@ -94,7 +93,7 @@ def blockers(key):
     return out
 
 
-PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYCI": "11514"}
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060"}
 
 
 def lead_for(key):
@@ -473,7 +472,7 @@ def sweep(apply, forced):
 def self_test():
     assert CHECK_WAIT.search("PR 3364 is pending hosted tests. Recheck after 11:45") and not CHECK_WAIT.search("QA FAIL: 8px corners")
     assert home_section(15, ["AI Cost", "Bug", "brain-hard"], "Own AI keys") == "Backlog"
-    assert home_section(2060, [], "x") == "Todo" and home_section(11514, [], "x") == "Backlog"
+    assert home_section(2060, [], "x") == "Todo"
     t = {"ticketNumber": "HTPR-1", "pullRequests": [], "waitingOnUserId": None, "blockerCommentId": None}
     assert classify(t, ["HTPR-2"], {}) == ("waits", ["HTPR-2"])
     assert classify(t, [], {}) == ("unstarted", None)
@@ -485,21 +484,17 @@ def self_test():
     assert co_holders(co, "RUNNER 6") == (["Runner 6"], ["Infra Runner 3"]), "the caller leaves, the owner stays"
     assert co_holders(co, "RUNNER 7") == ([], ["Infra Runner 3", "Runner 6"]), "a runner that is not assigned releases nothing"
     assert lead_for("HTPR-1") == ("HT Product Lead", "15")
-    assert lead_for("HYCI-1")[0] == "Chief Of Staff" and lead_for("IGSH-1")[0] == "Chief Of Staff"
+    assert lead_for("IGSH-1")[0] == "Chief Of Staff" and lead_for("SOFT-1")[0] == "Chief Of Staff"
     from unittest.mock import patch
 
     tasks = {
-        "HYCI-244": {"projectId": 11514, "sectionId": 32929, "status": "Normal"},
         "IGSH-3": {"projectId": 2060, "sectionId": 900, "status": "Normal"},
         "HTPR-4": {"projectId": 15, "sectionId": 29521, "status": "Normal"},
         "HTPR-5": {"projectId": 15, "sectionId": 4312, "status": "Normal"},
         "HTPR-6": {"projectId": 15, "sectionId": 29803, "status": "Normal"},
         "HTPR-7": {"projectId": 15, "sectionId": 30997, "status": "Normal"},
-        "HYCI-8": {"projectId": 11514, "sectionId": 32924, "status": "Normal"},
-        "HYCI-9": {"projectId": 11514, "status": "Archive"},
     }
     sections = {
-        "11514": [{"id": 32929, "name": "Done", "isDone": True}, {"id": 32924, "name": "In Progress"}],
         "2060": [{"id": 900, "name": "Released", "isDone": True}],
         "15": [{"id": n, "isDone": n != 30997} for n in (29521, 4312, 29803, 30997)],
     }
@@ -508,7 +503,7 @@ def self_test():
     relations += [
         {"relationType": "BlockedBy", "direction": "incoming", "otherTask": {"ticketNumber": "HTPR-200"}},
         {"relationType": "RelatedTo", "direction": "outgoing", "otherTask": {"ticketNumber": "HTPR-201"}},
-        {"relationType": "BlockedBy", "direction": "outgoing", "otherTask": {"ticketNumber": "HYCI-202", "status": "Archive"}},
+        {"relationType": "BlockedBy", "direction": "outgoing", "otherTask": {"ticketNumber": "HTPR-202", "status": "Archive"}},
     ]
 
     def fake_vcc(*args, **kwargs):
@@ -527,7 +522,7 @@ def self_test():
             patch(__name__ + ".vcc", side_effect=fake_vcc) as api, \
             patch(__name__ + ".note") as posted, patch(__name__ + ".record_event") as event, \
             patch(__name__ + ".preserve_owner", return_value={"runner": 4}):
-        assert blockers("HTPR-1") == ["HTPR-7", "HYCI-8"], "completed and incoming links must not block; Flag: Off must block"
+        assert blockers("HTPR-1") == ["HTPR-7"], "completed and incoming links must not block; Flag: Off must block"
         try:
             park_hand_back("HTPR-1", "finish the PR", ticket)
         except RuntimeError as error:
@@ -537,7 +532,7 @@ def self_test():
         assert not any(c.args[:2] == ("task", "unassign") for c in api.call_args_list)
         posted.assert_not_called()
         event.assert_not_called()
-        relations[:] = [r for r in relations if r["otherTask"]["ticketNumber"] not in ("HTPR-7", "HYCI-8")]
+        relations[:] = [r for r in relations if r["otherTask"]["ticketNumber"] != "HTPR-7"]
         result = park_hand_back("HTPR-1", "finish the PR", ticket)
         assert "Runner 4 retained" in result and "AI Review" in result
         assert not any(c.args[:2] == ("task", "unassign") for c in api.call_args_list)

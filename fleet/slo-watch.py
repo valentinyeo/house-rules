@@ -18,7 +18,9 @@ import time
 FSW = os.environ.get("FLEET_WATCH_STATE") or os.path.expanduser("~/.local/state/fleet-switch")
 S = os.environ.get("FLEET_WATCH_RUNNER_STATE") or os.path.expanduser("~/.local/state/ht-or-runners")
 ALLOC = os.environ.get("FLEET_PICK_ALLOCATION") or os.path.expanduser("~/.local/state/pacing/allocation.json")
-CI_BOARD = "11514"
+# the factory serves Valentin's own tools, so its SLO breaches go to Software Factory under the infra label
+FACTORY_BOARD = "2060"
+FACTORY_LABELS = "CI,Hypertask CI,infra,incident,brain-medium"
 NOW = time.time()
 DRY = "--dry-run" in sys.argv
 FILE_CI = "--file-ci" in sys.argv
@@ -82,7 +84,7 @@ def mark(klass):
     json.dump({"at": NOW}, open(dedupe_key(klass), "w"))
 
 
-def file_incident(title, body, labels, klass):
+def file_incident(title, body, klass):
     if deduped(klass):
         note(f"slo {klass}: open ticket covers it; +1 was recent")
         return False
@@ -96,8 +98,8 @@ def file_incident(title, body, labels, klass):
     path = f"{FSW}/slo-{klass}.html"
     os.makedirs(FSW, exist_ok=True)
     open(path, "w").write(body)
-    r = ci_vcc("task", "create", "--project", CI_BOARD, "--title", title, "--description-file", path,
-                "--priority", "urgent", "--labels", labels, "--section", "Backlog")
+    r = ci_vcc("task", "create", "--project", FACTORY_BOARD, "--title", title, "--description-file", path,
+                "--priority", "urgent", "--labels", FACTORY_LABELS, "--section", "Todo")
     note(f"slo {klass}: filed {title}" if r.returncode == 0 else f"slo {klass}: file failed {(r.stderr or r.stdout)[-120:]}")
     if r.returncode == 0:
         mark(klass)
@@ -124,7 +126,7 @@ def watch_missing_drill_review():
         "<h2>Done when</h2><ul><li>The required check shows green.</li></ul>"
         "<h2>Risk</h2><ul><li>None.</li></ul><h2>Decision</h2><p>None.</p>")
     title = "Green PR waits on a silent review"
-    if file_incident(title, body, "CI,Hypertask CI,incident,brain-medium", "missing-check"):
+    if file_incident(title, body, "missing-check"):
         if not DRY:
             rec["reported"] = True
             json.dump(rec, open(path, "w"))
@@ -206,7 +208,7 @@ def watch_missing_check():
             "<h2>Done when</h2><ul><li>Every required check is green.</li></ul>"
             "<h2>Risk</h2><ul><li>None.</li></ul><h2>Decision</h2><p>None.</p>")
         title = f"Green PR waits on missing check"
-        file_incident(title, body, "CI,Hypertask CI,incident,brain-medium", "missing-check")
+        file_incident(title, body, "missing-check")
         if not DRY:
             json.dump(rec, open(waitf, "w"))
         return f"slo missing-check: PR #{pr['number']} missing {miss}"
@@ -344,7 +346,7 @@ def watch_building_share():
         "<h2>Done when</h2><ul><li>Building share stays at or above 70 percent.</li></ul>"
         "<h2>Risk</h2><ul><li>False alarms when the pool is paused.</li></ul><h2>Decision</h2><p>None.</p>")
     title = f"Building share under 70 percent"
-    file_incident(title, body, "CI,Hypertask CI,incident,brain-medium", "building-share")
+    file_incident(title, body, "building-share")
     return f"slo building: {pct}% of {total} runners building"
 
 
@@ -363,7 +365,7 @@ def watch_pacer():
         "<h2>Risk</h2><ul><li>None.</li></ul><h2>Decision</h2><p>None.</p>")
     title = "Pacer numbers stale over one hour"
     note(f"pacer: allocation {'missing' if not at else int((NOW - at) // 60)}m old")
-    file_incident(title, body, "CI,Hypertask CI,incident,brain-medium", "pacer-stop")
+    file_incident(title, body, "pacer-stop")
     return "slo pacer: allocation stale"
 
 

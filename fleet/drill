@@ -9,9 +9,9 @@ Each drill injects one failure in a temp sandbox, records pass or fail with minu
 and tears the sandbox down. It never writes live pick state, live runner state, the
 live tmux pool, live tickets, or live pull requests.
 
-Names in fleet/drill-lists/armed open one checks-board ticket when they fail.
+Names in fleet/drill-lists/armed open one infra ticket on board 2060 when they fail.
 Practice drills stay off that list until a later ticket turns them green.
-The ticket does not use the Incident label: on the checks board that label means
+The ticket does not use the Incident label: there that label means
 the release line is down.
 
 Output: one JSON line per drill appended to ~/.local/state/fleet-drill/results.jsonl
@@ -296,10 +296,12 @@ def drill_cap_deadlock(ctx):
         (ctx.pick_state / "members.json").write_text(json.dumps(cache))
 
         def tk(key, section, prio="Medium", holders=()):
+            # HYCI is the archived CI board's prefix: its fixtures sit on board 15 under the infra label now
+            ci = key.startswith("HYCI-")
             return {
-                "key": key, "idx": 1, "board": pick.PREFIX_BOARD[key.split("-")[0]], "section": section,
-                "title": "x", "labels": [], "prio": prio, "holders": [[h, True] for h in holders],
-                "waiting": False, "subs": False, "paid": False,
+                "key": key, "idx": 1, "board": "15" if ci else pick.PREFIX_BOARD[key.split("-")[0]],
+                "section": section, "title": "x", "labels": ["infra"] if ci else [], "prio": prio,
+                "holders": [[h, True] for h in holders], "waiting": False, "subs": False, "paid": False,
                 "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
             }
 
@@ -378,11 +380,19 @@ def drill_board_access(ctx):
             return set(refreshed.get(board) or [])
 
         pick.fetch_members = fetch
-        joined = pick.can_join(3, "11514")
+        board = "15"
+        joined = pick.can_join(3, board)
         detected = time.time()
         incident_path = ctx.watch_state / "incidents.jsonl"
-        incident = incident_path.read_text() if incident_path.exists() else ""
-        named = "runner 3" in incident and "11514" in incident
+        lines = incident_path.read_text().splitlines() if incident_path.exists() else []
+        named = False
+        for line in lines:
+            try:
+                hit = json.loads(line)
+            except ValueError:
+                continue
+            if hit.get("runner") == "runner 3" and hit.get("board") == board:
+                named = True
         if joined and named:
             return row("board-access", start, detected, detected, True, "")
         parts = []
@@ -560,7 +570,7 @@ def file_alarm(items, dry, sample):
         print("drill-file-lint-ok")
         return 0
     listed = subprocess.run(
-        ["hypertask", "--json", "task", "list", "--project", "11514", "--search", "Factory drill failed", "--limit", "50"],
+        ["hypertask", "--json", "task", "list", "--project", "2060", "--search", "Factory drill failed", "--limit", "50"],
         capture_output=True, text=True,
     )
     if listed.returncode != 0:
@@ -592,9 +602,9 @@ def file_alarm(items, dry, sample):
         print(f"drill-file-noted {existing}")
         return 0
     created = subprocess.run(
-        ["vcc", "task", "create", "--project", "11514", "--title", "Factory drill failed",
+        ["vcc", "task", "create", "--project", "2060", "--title", "Factory drill failed",
          "--description-file", str(path), "--priority", "urgent",
-         "--labels", "CI,Hypertask CI,brain-medium", "--section", "Backlog"],
+         "--labels", "CI,Hypertask CI,infra,brain-medium", "--section", "Todo"],
         capture_output=True, text=True,
     )
     if created.returncode != 0:
