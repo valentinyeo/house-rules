@@ -7,6 +7,7 @@ Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for ever
 - **Tickets:** Start and end every unit on a Hypertask ticket, on your own board or view, under your own login (`/board-identity`). Move the ticket the moment its work moves. Put status and questions on the ticket, not in chat.
 - **Cloudflare:** Start new Cloudflare work from `joelhooks/rat-stack`.
 - **Secrets:** Never write a secret into a file, commit, ticket or chat.
+- **Open source:** Create new repos public. Make one private only when Valentin says so or it holds client, money or personal data, and state that reason.
 
 ## Verify and ship
 
@@ -14,11 +15,12 @@ Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for ever
 - **Verifier per repo:** Build each repo's own verifier and app driver. Make `pstack-verifier` a required check once it posts a real verdict.
 - **Where work runs:** Run agents, builds, focused tests and app or phone driving on this server. Run the full suite, CI, reviews and verifiers on GitHub-hosted runners. Never add a self-hosted runner.
 - **Models:** Set up reviewers and verifiers yourself on Valentin's plans: Codex, then Claude, then DeepSeek. Move on when one runs out. Use DeepSeek Flash, never Pro.
+- **DeepSeek via Pi:** Run DeepSeek through Pi on the OpenCode Go plan, never the OpenCode app.
 - **Billing block:** A check that fails with "recent account payments have failed" means the PR waits. Never verify it here or merge around it. Say so once on the ticket and build the next unit.
 
 ## Valentin decides
 
-- **His calls:** Ask Valentin before money, keys, going public or deleting live data. Ask once, with your pick.
+- **His calls:** Ask Valentin before money, keys, making an existing repo public or deleting live data. Ask once, with your pick.
 
 ## Changing these rules
 
@@ -31,10 +33,12 @@ Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for ever
 | Tickets | not yet |
 | Cloudflare | not yet |
 | Secrets | `secrets-guard` hook |
+| Open source | `repo-public-default` hook |
 | Verifier | not yet |
 | Verifier per repo | not yet |
 | Where work runs | `no-vps-ci` |
 | Models | judgment |
+| DeepSeek via Pi | `deepseek-via-pi` hook |
 | Billing block | not yet |
 | His calls | judgment |
 | Changes | `rules-lint` required on main |
