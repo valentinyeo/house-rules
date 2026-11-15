@@ -12,6 +12,15 @@ valentin's lines:
 - valentin decides money, keys, going public and deleting live data. ask him once, with your pick.
 - github billing is valentin's. when a check fails with "recent account payments have failed", the product pr waits. never verify it on this server or merge around the check. say it once on the ticket, then build the next unit.
 
-everything else is a check, not a rule:
-- no-vps-ci stops ci on this server
-- secrets-guard blocks secrets
+what enforces each line (pstack /correct: a check beats a sentence; drop a line once its mistake can't happen):
+
+| line | enforced by |
+| --- | --- |
+| pstack for everything | nothing, judgment call |
+| tickets, own login, true column | nothing yet |
+| rat-stack for new cloudflare work | nothing yet |
+| a pstack verifier on every pr | nothing yet; a required `pstack-verifier` check once the shared verifier workflow works |
+| no review, test or runner on this server | `bin/no-vps-tests` hook refuses test commands; `no-vps-ci` kills runners and review units every 5 minutes |
+| money, keys, public, deleting live data | nothing, judgment call |
+| billing: the pr waits | nothing yet |
+| no secrets anywhere | `secrets-guard` hook |
