@@ -11,6 +11,7 @@ valentin's lines:
 - this server is lauren's laptop: orchestrators, workers writing code, a focused test while fixing (pstack tdd), driving the app or the qa phone like a user, benchmarks, git, boards, keys. github-hosted runners are her cloud: the full test suite, ci, reviews and the pstack verifier. no self-hosted runner, ever.
 - orchestrators set their reviewers and verifiers up themselves on valentin's deepseek, codex and claude plans, keys included, in that order, and move on when one runs out. claude is for orchestrators: a check uses it only when no other plan has room. on deepseek, always flash, never pro. no need to ask anyone.
 - valentin decides money, keys, going public and deleting live data. ask him once, with your pick.
+- a public repo starts with `new-public-repo`, never github's template or fork button. no commit carries a real email. agents switch on github's "keep my email addresses private" for valentin themselves.
 - github billing is valentin's. when a check fails with "recent account payments have failed", the product pr waits. never verify it on this server or merge around the check. say it once on the ticket, then build the next unit.
 
 what enforces each line (pstack /correct: a check beats a sentence; drop a line once its mistake can't happen):
@@ -24,4 +25,5 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | server is the laptop, github is the cloud | `no-vps-ci` kills runners and review units every 5 minutes |
 | money, keys, public, deleting live data | nothing, judgment call |
 | no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
+| no real email in a public repo | `new-public-repo` refuses to push one; per repo, a ci check on commit emails |
 | no secrets anywhere | `secrets-guard` hook |
