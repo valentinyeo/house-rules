@@ -52,8 +52,8 @@ FAMILIES = {
     "grok": {
         "levels": {"normal", "hard"},
         "cmd": {
-            "normal": ["/home/valentin/.local/bin/grok", "-p", "{brief}"],
-            "hard": ["/home/valentin/.local/bin/grok", "-p", "{brief}"],
+            "normal": ["/home/valentin/.local/bin/cursor-agent", "-p", "-f", "--model", "grok-4.7", "{brief}"],
+            "hard": ["/home/valentin/.local/bin/cursor-agent", "-p", "-f", "--model", "grok-4.7", "{brief}"],
         },
     },
     "codex": {

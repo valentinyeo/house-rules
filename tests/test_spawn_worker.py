@@ -211,7 +211,7 @@ def test_families_table_matches_the_contract():
 
 def test_build_argv_substitutes_the_brief():
     argv = sw.build_argv("grok", "hard", "fix the bug")
-    assert argv == ["/home/valentin/.local/bin/grok", "-p", "fix the bug"]
+    assert argv == ["/home/valentin/.local/bin/cursor-agent", "-p", "-f", "--model", "grok-4.7", "fix the bug"]
 
 
 # --- CLI -------------------------------------------------------------------------
@@ -233,7 +233,7 @@ def test_cli_dry_run_prints_line_and_argv(tmp_path):
     done = run_cli(tmp_path, EXAMPLE, "--dry-run", "--level", "normal")
     assert "spawn-worker: grok normal" in done.stderr
     assert "usage unknown" in done.stderr
-    assert "/home/valentin/.local/bin/grok" in done.stdout
+    assert "/home/valentin/.local/bin/cursor-agent" in done.stdout
 
 
 def test_cli_refusal_exits_2(tmp_path):
@@ -276,6 +276,6 @@ def test_cli_exec_replaces_process_with_the_chosen_argv(tmp_path, monkeypatch, c
     calls = []
     monkeypatch.setattr(sw.os, "execvp", lambda prog, argv: calls.append((prog, argv)))
     assert sw.main(["--level", "normal", str(brief)]) == 0
-    assert calls == [("/home/valentin/.local/bin/grok",
-                      ["/home/valentin/.local/bin/grok", "-p", "fix the failing test"])]
+    assert calls == [("/home/valentin/.local/bin/cursor-agent",
+                      ["/home/valentin/.local/bin/cursor-agent", "-p", "-f", "--model", "grok-4.7", "fix the failing test"])]
     assert "spawn-worker: grok normal" in capsys.readouterr().err
