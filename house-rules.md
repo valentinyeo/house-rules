@@ -9,7 +9,7 @@ new cloudflare work starts from the joelhooks/rat-stack template.
 valentin's lines:
 - every review and verifier runs on github's free hosted runners. no orchestrator starts a reviewer or verifier on this server.
 - valentin decides money, keys, going public and deleting live data. ask him once, with your pick.
-- valentin's standing yes: when the claude or codex plan behind a repo's github ai review runs out, its orchestrator switches that repo's reviewer and key to the other plan, and to deepseek when both are out. no need to ask.
+- valentin's standing yes: each orchestrator sets up its repos' github reviewers and verifiers the way the pstack playbook asks, keys included. it picks codex first, then claude, then deepseek, and moves to the next when a plan runs out. no need to ask.
 - github billing is valentin's. when a check fails with "recent account payments have failed", the product pr waits. never verify it on this server or merge around the check. say it once on the ticket, then build the next unit.
 
 everything else is a check, not a rule:
