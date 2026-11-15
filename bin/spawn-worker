@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""spawn-worker: the only supported way to start a worker.
+
+Every worker start spends one subscription's quota. This script reads live plan usage
+(`token-ladder pools --json`) before it starts anything, so the choice cannot be skipped
+and cannot be guessed: Claude is kept for orchestrators, and work goes to the family
+that is furthest from its pace.
+
+  spawn-worker --level simple BRIEF        deepseek (the only simple-capable family)
+  spawn-worker --level normal BRIEF        lowest pace among the families that run normal
+  spawn-worker --level hard --family codex BRIEF   pin a family, refused if a rule blocks it
+  spawn-worker --dry-run ...               print the line and the argv, start nothing
+
+pace_ratio = share of the plan used / share of the window gone; over 1 means the plan is
+burning faster than even pace. Three knowledge tiers decide the ranking:
+
+  live numbers    ranked by pace_ratio, lowest first
+  reported unknown (a line with no numbers, e.g. grok today)  allowed, ranked after all
+                  known families, reason "usage unknown"
+  not reported at all (e.g. deepseek, which the reader does not track)  allowed, ranked
+                  last, reason "usage unknown"; never wins over a reported family
+
+Ties inside a tier follow TIE_ORDER. Claude is only a candidate for --family auto when
+no other family is ON or unknown (rule f), so a healthy Claude account never takes
+worker load.
+
+Exit 2 when a start is refused, with the reason on stderr. Exit 127 when the chosen
+command is not installed. Otherwise the worker replaces this process (exec).
+Read only: it never writes usage, config or state.
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+READER = os.environ.get("TOKEN_LADDER", "/home/valentin/.local/bin/token-ladder")
+READER_TIMEOUT = 60
+
+# One dict, family -> what it may run and how to run it. "{brief}" is replaced by the
+# brief file's text at exec time. Add a family here, nowhere else.
+FAMILIES = {
+    "deepseek": {
+        "levels": {"simple", "normal"},
+        "cmd": {
+            "simple": ["/home/valentin/.opencode/bin/opencode", "run", "-m",
+                       "opencode-go/deepseek-v4.1-flash", "{brief}"],
+            "normal": ["/home/valentin/.opencode/bin/opencode", "run", "-m",
+                       "opencode-go/deepseek-v4.1-flash", "{brief}"],
+        },
+    },
+    "grok": {
+        "levels": {"normal", "hard"},
+        "cmd": {
+            "normal": ["/home/valentin/.local/bin/grok", "-p", "{brief}"],
+            "hard": ["/home/valentin/.local/bin/grok", "-p", "{brief}"],
+        },
+    },
+    "codex": {
+        "levels": {"normal", "hard"},
+        "cmd": {
+            "normal": ["/home/valentin/.local/bin/hax", "-p", "--provider=codex",
+                       "--model=gpt-6.1-sol", "--effort=medium", "{brief}"],
+            "hard": ["/home/valentin/.local/bin/hax", "-p", "--provider=codex",
+                     "--model=gpt-6.1-sol", "--effort=high", "{brief}"],
+        },
+    },
+    "claude": {
+        "levels": {"normal", "hard"},
+        "cmd": {
+            "normal": ["claude", "-p", "--model", "sonnet", "{brief}"],
+            "hard": ["claude", "-p", "--model", "sonnet", "{brief}"],
+        },
+    },
+}
+
+LEVELS = ("simple", "normal", "hard")
+# Tie-break order for equal pace, cheapest and most expandable first.
+TIE_ORDER = ("deepseek", "grok", "codex", "claude")
+CLAUDE_MAX_USED = 80.0
+CLAUDE_MAX_PACE = 0.9
+
+
+class Refused(Exception):
+    """A start that a rule forbids. The message is the reason shown to the caller."""
+
+
+def numbers(pool):
+    """(used_pct, pace_ratio) for one family, or None when its usage is unknown."""
+    if not isinstance(pool, dict):
+        return None
+    used, pace = pool.get("used_pct"), pool.get("pace_ratio")
+    if used is None or pace is None:
+        return None
+    try:
+        return float(used), float(pace)
+    except (TypeError, ValueError):
+        return None
+
+
+def pool_state(pool):
+    if not isinstance(pool, dict):
+        return "unknown"
+    return str(pool.get("state", "unknown")).strip().upper()
+
+
+def verdict(family, pools, level):
+    """(allowed, reason) for one family at one level. Pure."""
+    if level not in FAMILIES[family]["levels"]:
+        return False, f"{family} does not run {level} work"
+    pool = pools.get(family)
+    nums = numbers(pool)
+
+    if pool_state(pool) == "OFF":
+        return False, f"{family} is OFF (plan exhausted or paused)"
+
+    if family == "claude":
+        # Rule b: Claude is the orchestrator's budget, not a worker's.
+        if nums is None:
+            return False, (f"claude usage unknown: cannot prove it is under "
+                           f"{CLAUDE_MAX_USED:.0f}% used at <= {CLAUDE_MAX_PACE} pace; "
+                           f"kept for orchestrators")
+        used, pace = nums
+        if used >= CLAUDE_MAX_USED:
+            return False, (f"claude at {used:.0f}% used (ceiling {CLAUDE_MAX_USED:.0f}%), "
+                           f"kept for orchestrators")
+        if pace > CLAUDE_MAX_PACE:
+            return False, (f"claude burning at pace {pace:.2f} (ceiling {CLAUDE_MAX_PACE}), "
+                           f"kept for orchestrators")
+        return True, f"claude at {used:.0f}% used, pace {pace:.2f} (under the worker ceiling)"
+
+    if nums is None:
+        return True, "usage unknown"
+    used, pace = nums
+    return True, f"{family} at {used:.0f}% used, pace {pace:.2f}"
+
+
+def tier(family, pools):
+    """0 = live numbers, 1 = the reader reports it without numbers, 2 = not reported."""
+    if family not in pools:
+        return 2
+    return 0 if numbers(pools.get(family)) is not None else 1
+
+
+def sort_key(family, pools):
+    """Known pace first, then reported-unknown, then unreported; TIE_ORDER inside a tier."""
+    nums = numbers(pools.get(family))
+    return (tier(family, pools), nums[1] if nums else 0.0, TIE_ORDER.index(family))
+
+
+def auto_candidates(pools, level):
+    """Families eligible for --family auto, in pick order.
+
+    Rule f: claude is only a candidate when no other family is ON or unknown, so a
+    healthy Claude account never absorbs worker load. A family with no line in the
+    reader's output is neither ON nor unknown, so it cannot hold Claude back.
+    """
+    allowed = [f for f in TIE_ORDER if verdict(f, pools, level)[0]]
+    non_claude = [f for f in allowed if f != "claude"]
+    reported = [f for f in non_claude if tier(f, pools) < 2]
+    return sorted(reported or allowed, key=lambda f: sort_key(f, pools))
+
+
+def choose(pools, level, family="auto"):
+    """Pick (family, reason) for this level, or raise Refused. Pure: no I/O."""
+    if level not in LEVELS:
+        raise Refused(f"unknown level {level!r} (use {', '.join(LEVELS)})")
+
+    family = (family or "auto").strip().lower()
+
+    if family == "auto":
+        candidates = auto_candidates(pools, level)
+        if not candidates:
+            raise Refused(f"no family is allowed for {level} work right now")
+        pick = candidates[0]
+        reason = verdict(pick, pools, level)[1]
+        if len(candidates) > 1:
+            reason += f"; lowest of {len(candidates)} allowed ({', '.join(candidates)})"
+        return pick, reason
+
+    if family not in FAMILIES:
+        raise Refused(f"unknown family {family!r} (use auto, {', '.join(TIE_ORDER)})")
+
+    allowed, reason = verdict(family, pools, level)
+    if allowed:
+        return family, reason
+
+    # Rule e: say why, and name the best family that would be allowed instead.
+    alternatives = auto_candidates(pools, level)
+    if alternatives:
+        best = alternatives[0]
+        tail = f"; best allowed alternative: {best} ({verdict(best, pools, level)[1]})"
+    else:
+        tail = "; no family is allowed for this level"
+    raise Refused(reason + tail)
+
+
+def read_pools():
+    """Live usage from token-ladder. Refuses with the reader's error, never guesses."""
+    try:
+        done = subprocess.run([READER, "pools", "--json"],
+                              capture_output=True, text=True, timeout=READER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise Refused(f"token-ladder pools timed out after {READER_TIMEOUT}s")
+    except OSError as exc:
+        raise Refused(f"cannot run token-ladder ({READER}): {exc.strerror or exc}")
+    if done.returncode != 0:
+        err = (done.stderr or done.stdout or "").strip().splitlines()
+        raise Refused(f"token-ladder pools failed (exit {done.returncode}): "
+                      f"{err[-1] if err else 'no output'}")
+    try:
+        pools = json.loads(done.stdout)
+    except ValueError as exc:
+        raise Refused(f"token-ladder pools returned invalid JSON: {exc}")
+    if not isinstance(pools, dict):
+        raise Refused("token-ladder pools did not return a JSON object")
+    return pools
+
+
+def build_argv(family, level, brief):
+    """The argv for this family and level, with {brief} replaced by the brief text."""
+    return [part.replace("{brief}", brief) for part in FAMILIES[family]["cmd"][level]]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="spawn-worker",
+        description="Start one worker, chosen by live plan usage. Claude stays for orchestrators.")
+    parser.add_argument("--level", required=True, choices=LEVELS,
+                        help="work size; decides which families are allowed")
+    parser.add_argument("--family", default="auto",
+                        help="auto (default) or one of: " + ", ".join(TIE_ORDER))
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the choice and argv, start nothing")
+    parser.add_argument("brief", metavar="BRIEF_FILE", help="file holding the worker's brief")
+    args = parser.parse_args(argv)
+
+    try:
+        try:
+            with open(args.brief, encoding="utf-8") as fh:
+                brief = fh.read()
+        except OSError as exc:
+            raise Refused(f"cannot read brief {args.brief}: {exc.strerror or exc}")
+        if not brief.strip():
+            raise Refused(f"brief {args.brief} is empty")
+
+        pools = read_pools()
+        family, reason = choose(pools, args.level, args.family)
+        cmd = build_argv(family, args.level, brief)
+    except Refused as exc:
+        print(f"spawn-worker: refused: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"spawn-worker: {family} {args.level} ({reason})", file=sys.stderr)
+    if args.dry_run:
+        print(cmd)
+        return 0
+
+    try:
+        os.execvp(cmd[0], cmd)
+    except OSError as exc:
+        print(f"spawn-worker: cannot start {cmd[0]}: {exc.strerror or exc}", file=sys.stderr)
+        return 127
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
