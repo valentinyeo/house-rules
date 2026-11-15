@@ -27,3 +27,5 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
 | no real email in a public repo | `new-public-repo` refuses to push one; per repo, a ci check on commit emails |
 | no secrets anywhere | `secrets-guard` hook |
+
+valentin-mode and responsive-mode live in vstack (https://github.com/valentinyeo/vstack). This server's extra setup is `reference/valentin-local.md`.
