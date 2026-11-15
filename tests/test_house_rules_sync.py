@@ -130,7 +130,7 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(git(self.shared, "rev-parse", "HEAD"), before)
         self.assertFalse((self.home / ".codex/AGENTS.md").exists())
 
-        head = self.push_upstream("house-rules.md", "rule one\n- Never do X.\n", "fix")
+        head = self.push_upstream("house-rules.md", "rule one\n- **Old:** Never do X.\n\n## Enforcement\n\n| Rule | Enforced by |\n| --- | --- |\n| Old | judgment |\n", "fix")
         r = self.run_sync()
 
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

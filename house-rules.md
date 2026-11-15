@@ -1,10 +1,10 @@
 # House rules
 
-Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for every task. These rules beat pstack. pstack beats every other rule and skill.
+Rules for every agent on Valentin's projects. Run `/pstack:poteto-mode` for every task; orchestrators use its Orchestrate playbook. These rules beat pstack. pstack beats every other rule and skill.
 
 ## Work
 
-- **Tickets:** Start and end every unit on a Hypertask ticket, on your own board or view, under your own login (`/board-identity`). Move the ticket the moment its work moves. Put status and questions on the ticket.
+- **Tickets:** Start and end every unit on a Hypertask ticket, on your own board or view, under your own login (`/board-identity`). Move the ticket the moment its work moves. Put status and questions on the ticket, not in chat.
 - **Cloudflare:** Start new Cloudflare work from `joelhooks/rat-stack`.
 - **Secrets:** Never write a secret into a file, commit, ticket or chat.
 
