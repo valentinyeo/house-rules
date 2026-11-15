@@ -22,5 +22,5 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | a pstack verifier on every pr | nothing yet; a required `pstack-verifier` check once the shared verifier workflow works |
 | no review, test or runner on this server | `bin/no-vps-tests` hook refuses test commands; `no-vps-ci` kills runners and review units every 5 minutes |
 | money, keys, public, deleting live data | nothing, judgment call |
-| billing: the pr waits | nothing yet |
+| no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
 | no secrets anywhere | `secrets-guard` hook |
