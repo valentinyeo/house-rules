@@ -1,20 +1,18 @@
-"""Tests for bin/spawn-worker: the only supported way to start a worker.
-
-The script is a file, not a module, so it is imported by path. choose() is pure, so every
-routing rule is tested without a network call or a worker start. CLI tests pass finished
-readings through PLAN_USAGE_FIXTURE.
-"""
+"""Routing and fixture-backed CLI tests for bin/spawn-worker."""
 import importlib.util
 import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
+import unittest
 from pathlib import Path
-
-import pytest
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "bin/spawn-worker"
+NOW = 1_800_000_000
 
 
 def load():
@@ -28,250 +26,303 @@ def load():
 sw = load()
 
 
-def pool(used=None, pace=None, state="ON"):
-    return {"used_pct": used, "pace_ratio": pace, "state": state}
-
-
-UNKNOWN = pool(None, None, "unknown")
-
-
-def pools(**families):
-    return dict(families)
-
-
-# The pool shape spawn-worker ranks on.
-EXAMPLE = json.loads("""
-{"claude": {"used_pct": 75.0, "hours_left": 15.4, "resets_at": 1794762000.1,
-            "state": "ON", "pace_ratio": 0.8257},
- "codex": {"used_pct": 100, "hours_left": 20.0, "resets_at": 1794778523,
-           "state": "OFF", "pace_ratio": 1.1351},
- "grok": {"used_pct": null, "hours_left": null, "resets_at": null, "state": "unknown"}}
-""")
-
-
-# --- rule a: OFF is refused -------------------------------------------------------
-
-def test_off_family_is_refused_for_auto():
-    p = pools(deepseek=UNKNOWN, grok=pool(10, 0.4), codex=pool(100, 1.2, "OFF"), claude=pool(20, 0.3))
-    assert sw.choose(p, "normal")[0] == "grok"
-
-
-def test_off_family_pinned_is_refused_with_reason():
-    p = pools(grok=pool(10, 0.4), codex=pool(99, 1.4, "OFF"), claude=pool(20, 0.3))
-    with pytest.raises(sw.Refused) as err:
-        sw.choose(p, "normal", "codex")
-    assert "OFF" in str(err.value)
-    assert "grok" in str(err.value)
-
-
-# --- rule b: Claude is kept for orchestrators -------------------------------------
-
-def test_claude_refused_over_80_pct():
-    p = pools(grok=UNKNOWN, claude=pool(85, 0.5))
-    with pytest.raises(sw.Refused) as err:
-        sw.choose(p, "normal", "claude")
-    assert "85% used" in str(err.value)
-    assert "orchestrators" in str(err.value)
-
-
-def test_claude_refused_over_pace_even_when_used_is_low():
-    p = pools(grok=UNKNOWN, claude=pool(40, 1.1))
-    with pytest.raises(sw.Refused) as err:
-        sw.choose(p, "normal", "claude")
-    assert "pace 1.10" in str(err.value)
-
-
-def test_claude_allowed_under_the_ceiling_when_pinned():
-    p = pools(grok=UNKNOWN, claude=pool(75, 0.8257))
-    family, reason = sw.choose(p, "normal", "claude")
-    assert family == "claude"
-    assert "75% used" in reason
-
-
-def test_claude_with_unknown_usage_cannot_be_proven_safe():
-    p = pools(grok=UNKNOWN, claude=UNKNOWN)
-    with pytest.raises(sw.Refused) as err:
-        sw.choose(p, "normal", "claude")
-    assert "usage unknown" in str(err.value)
-
-
-# --- rule c: unknown usage is allowed, ranked last --------------------------------
-
-def test_unknown_never_beats_a_known_healthy_family():
-    p = pools(grok=UNKNOWN, codex=pool(50, 0.7), claude=pool(10, 0.2))
-    assert sw.choose(p, "normal")[0] == "codex"
-
-
-def test_unknown_is_picked_when_nothing_else_is_allowed():
-    p = pools(grok=UNKNOWN, codex=pool(100, 1.5, "OFF"), claude=pool(95, 1.5))
-    family, reason = sw.choose(p, "normal")
-    assert family == "grok"
-    assert "usage unknown" in reason
-
-
-# --- rule d: lowest pace wins, TIE_ORDER settles ties -----------------------------
-
-def test_lowest_pace_wins():
-    p = pools(grok=pool(30, 1.2), codex=pool(20, 0.4), claude=pool(10, 0.2))
-    assert sw.choose(p, "normal")[0] == "codex"
-    p = pools(grok=pool(30, 0.3), codex=pool(20, 0.4), claude=pool(10, 0.2))
-    assert sw.choose(p, "normal")[0] == "grok"
-
-
-def test_tie_breaks_in_table_order():
-    p = pools(grok=pool(30, 0.5), codex=pool(20, 0.5), claude=pool(10, 0.5))
-    assert sw.choose(p, "normal")[0] == "grok"
-    p = pools(deepseek=pool(30, 0.5), grok=UNKNOWN, codex=UNKNOWN, claude=pool(10, 0.5))
-    assert sw.choose(p, "simple")[0] == "deepseek"
-
-
-# --- rule e: a refused pin names the best alternative -----------------------------
-
-def test_refused_pin_names_best_allowed_alternative():
-    p = pools(grok=pool(30, 1.4), codex=pool(20, 0.4), claude=pool(90, 1.2))
-    with pytest.raises(sw.Refused) as err:
-        sw.choose(p, "normal", "claude")
-    assert "best allowed alternative: codex" in str(err.value)
-
-
-def test_refused_level_names_alternative():
-    p = pools(deepseek=UNKNOWN, grok=pool(30, 0.4), codex=pool(20, 0.6), claude=pool(10, 0.2))
-    with pytest.raises(sw.Refused) as err:
-        sw.choose(p, "hard", "deepseek")
-    assert "does not run hard" in str(err.value)
-    assert "best allowed alternative: grok" in str(err.value)
-
-
-def test_nothing_allowed_is_refused():
-    p = pools(deepseek=pool(99, 1.5, "OFF"), grok=pool(99, 1.5, "OFF"),
-              codex=pool(99, 1.5, "OFF"), claude=pool(99, 1.5))
-    with pytest.raises(sw.Refused) as err:
-        sw.choose(p, "hard", "grok")
-    assert "no family is allowed" in str(err.value)
-
-
-def test_unknown_family_and_level_are_refused():
-    with pytest.raises(sw.Refused):
-        sw.choose(EXAMPLE, "normal", "gemini")
-    with pytest.raises(sw.Refused):
-        sw.choose(EXAMPLE, "trivial")
-
-
-# --- rule f: auto only hands work to Claude when nothing else is available --------
-
-def test_example_picks_grok_for_normal_and_deepseek_for_simple():
-    # claude is under the ceiling (75% < 80, 0.83 <= 0.9) yet must not take worker work
-    # while grok is unknown; codex is OFF.
-    assert sw.choose(EXAMPLE, "normal")[0] == "grok"
-    assert "usage unknown" in sw.choose(EXAMPLE, "normal")[1]
-    assert sw.choose(EXAMPLE, "simple")[0] == "deepseek"
-    assert sw.choose(EXAMPLE, "hard")[0] == "grok"
-
-
-def test_claude_never_wins_on_pace():
-    # Claude has by far the best pace of all; worker work still goes elsewhere.
-    p = pools(deepseek=pool(50, 0.6), grok=pool(50, 0.7), codex=pool(50, 0.8),
-              claude=pool(20, 0.1))
-    assert sw.choose(p, "normal")[0] == "deepseek"
-    assert sw.choose(p, "simple")[0] == "deepseek"
-    p = pools(deepseek=UNKNOWN, grok=pool(50, 0.7), codex=pool(50, 0.8), claude=pool(20, 0.1))
-    assert sw.choose(p, "normal")[0] == "grok"
-
-
-def test_claude_is_used_when_no_other_family_is_on_or_unknown():
-    # grok and codex are OFF, deepseek has no line at all: nothing is ON or unknown.
-    p = pools(grok=pool(100, 1.5, "OFF"), codex=pool(100, 1.5, "OFF"), claude=pool(30, 0.4))
-    assert sw.choose(p, "normal")[0] == "claude"
-    assert sw.choose(p, "hard")[0] == "claude"
-
-
-def test_a_reported_unknown_beats_an_unreported_family():
-    # The reader reports grok as unknown but has no line for deepseek.
-    p = pools(grok=UNKNOWN, codex=pool(100, 1.5, "OFF"), claude=pool(95, 1.5))
-    family, reason = sw.choose(p, "normal")
-    assert family == "grok"
-    assert "usage unknown" in reason
-
-
-# --- data shape ------------------------------------------------------------------
-
-def test_families_table_matches_the_contract():
-    expected = {
-        "deepseek": {"simple", "normal"},
-        "grok": {"normal", "hard"},
-        "codex": {"normal", "hard"},
-        "claude": {"normal", "hard"},
-    }
-    assert {f: sw.FAMILIES[f]["levels"] for f in expected} == expected
-    for family, spec in sw.FAMILIES.items():
-        for level in spec["levels"]:
-            assert "{brief}" in spec["cmd"][level], (family, level)
-    assert sw.FAMILIES["codex"]["cmd"]["hard"][-2] == "--effort=high"
-    assert sw.FAMILIES["codex"]["cmd"]["normal"][-2] == "--effort=medium"
-
-
-def test_build_argv_substitutes_the_brief():
-    argv = sw.build_argv("grok", "hard", "fix the bug")
-    assert argv == ["/home/valentin/.local/bin/cursor-agent", "-p", "-f", "--model", "grok-4.7", "fix the bug"]
-
-
-# --- CLI -------------------------------------------------------------------------
-
-def run_cli(tmp_path, pools_json, *args, exit_code=0):
-    fixture = tmp_path / "readings.json"
-    fixture.write_text(json.dumps(pools_json))
-    brief = tmp_path / "brief.md"
-    brief.write_text("fix the failing test")
-    env = {**os.environ, "PLAN_USAGE_FIXTURE": str(fixture)}
-    done = subprocess.run([sys.executable, str(SCRIPT), *args, str(brief)],
-                          capture_output=True, text=True, env=env)
-    assert done.returncode == exit_code, done.stdout + done.stderr
-    return done
-
-
-def test_cli_dry_run_prints_line_and_argv(tmp_path):
-    done = run_cli(tmp_path, EXAMPLE, "--dry-run", "--level", "normal")
-    assert "spawn-worker: grok normal" in done.stderr
-    assert "usage unknown" in done.stderr
-    assert "/home/valentin/.local/bin/cursor-agent" in done.stdout
-
-
-def test_cli_refusal_exits_2(tmp_path):
-    done = run_cli(tmp_path, EXAMPLE, "--dry-run", "--level", "hard", "--family", "codex",
-                   exit_code=2)
-    assert "refused" in done.stderr and "OFF" in done.stderr
-    assert done.stdout == ""
-
-
-def test_cli_reader_failure_refuses(tmp_path):
-    fixture = tmp_path / "readings.json"
-    fixture.write_text("{")
-    brief = tmp_path / "brief.md"
-    brief.write_text("work")
-    done = subprocess.run([sys.executable, str(SCRIPT), "--level", "normal", str(brief)],
-                          capture_output=True, text=True,
-                          env={**os.environ, "PLAN_USAGE_FIXTURE": str(fixture)})
-    assert done.returncode == 2
-    assert "not valid JSON" in done.stderr
-
-
-def test_cli_missing_brief_refuses(tmp_path):
-    done = subprocess.run([sys.executable, str(SCRIPT), "--level", "normal",
-                           str(tmp_path / "nope.md")],
-                          capture_output=True, text=True)
-    assert done.returncode == 2
-    assert "cannot read brief" in done.stderr
-
-
-def test_cli_exec_replaces_process_with_the_chosen_argv(tmp_path, monkeypatch, capsys):
-    fixture = tmp_path / "readings.json"
-    fixture.write_text(json.dumps(EXAMPLE))
-    brief = tmp_path / "brief.md"
-    brief.write_text("fix the failing test")
-    monkeypatch.setenv("PLAN_USAGE_FIXTURE", str(fixture))
-    calls = []
-    monkeypatch.setattr(sw.os, "execvp", lambda prog, argv: calls.append((prog, argv)))
-    assert sw.main(["--level", "normal", str(brief)]) == 0
-    assert calls == [("/home/valentin/.local/bin/cursor-agent",
-                      ["/home/valentin/.local/bin/cursor-agent", "-p", "-f", "--model", "grok-4.7", "fix the failing test"])]
-    assert "spawn-worker: grok normal" in capsys.readouterr().err
+def pool(used=None, hours=None, state="ON", pace=None):
+    return {"used_pct": used, "resets_at": NOW + hours * 3600 if hours is not None else None,
+            "hours_left": hours, "pace_ratio": pace, "state": state}
+
+
+UNKNOWN = pool(state="unknown")
+EXAMPLE = {"claude": pool(85, 48), "codex": pool(100, 20, "OFF"), "grok": UNKNOWN}
+
+
+class RoutingTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = patch("time.time", return_value=NOW)
+        self.clock.start()
+        self.addCleanup(self.clock.stop)
+
+    def test_off_family_is_refused_for_auto(self):
+        p = {"deepseek": UNKNOWN, "grok": pool(10, 48),
+             "codex": pool(100, 12, "OFF"), "claude": pool(85, 48)}
+        self.assertEqual(sw.choose(p, "normal")[0], "grok")
+
+    def test_off_pin_names_reason_and_alternative(self):
+        p = {"grok": pool(10, 48), "codex": pool(99, 12, "OFF")}
+        with self.assertRaisesRegex(sw.Refused, "OFF.*best allowed alternative: grok"):
+            sw.choose(p, "normal", "codex")
+
+    def test_claude_spare_room_beats_unknown_grok(self):
+        p = {"grok": UNKNOWN, "claude": pool(3, 48)}
+        self.assertEqual(sw.choose(p, "normal")[0], "claude")
+        self.assertTrue(sw.claude_allowed(p))
+
+    def test_claude_at_85_percent_is_refused(self):
+        for hours in (48, 12):
+            with self.subTest(hours=hours):
+                p = {"grok": UNKNOWN, "claude": pool(85, hours)}
+                self.assertFalse(sw.claude_allowed(p))
+                with self.assertRaisesRegex(sw.Refused, "85% used.*orchestrators"):
+                    sw.choose(p, "normal", "claude")
+                self.assertEqual(sw.choose(p, "normal")[0], "grok")
+
+    def test_claude_at_50_percent_12_hours_before_reset_is_allowed(self):
+        p = {"grok": UNKNOWN, "claude": pool(50, 12)}
+        self.assertTrue(sw.claude_allowed(p))
+        self.assertEqual(sw.choose(p, "normal")[0], "claude")
+
+    def test_claude_reserve_tracks_elapsed_week(self):
+        p = {"claude": pool(40, 120)}
+        self.assertFalse(sw.claude_allowed(p))
+        with self.assertRaisesRegex(sw.Refused, "orchestrators"):
+            sw.choose(p, "normal", "claude")
+        p["claude"] = pool(40, 48)
+        self.assertTrue(sw.claude_allowed(p))
+
+    def test_claude_reserve_boundary_is_strict(self):
+        self.assertTrue(sw.claude_allowed({"claude": pool(39.9, 84)}))
+        self.assertFalse(sw.claude_allowed({"claude": pool(40, 84)}))
+        self.assertFalse(sw.claude_allowed({"claude": pool(0, 168)}))
+
+    def test_claude_last_day_exception_and_boundaries(self):
+        self.assertTrue(sw.claude_allowed({"claude": pool(69.9, 23.9)}))
+        self.assertTrue(sw.claude_allowed({"claude": pool(70, 23.9)}))
+        self.assertFalse(sw.claude_allowed({"claude": pool(76, 24)}))
+
+    def test_claude_unknown_usage_is_refused(self):
+        for reading in (UNKNOWN, pool(3), pool(None, 48)):
+            with self.subTest(reading=reading):
+                p = {"claude": reading}
+                self.assertFalse(sw.claude_allowed(p))
+                with self.assertRaisesRegex(sw.Refused, "usage unknown"):
+                    sw.choose(p, "normal", "claude")
+
+    def test_invalid_numbers_cannot_prove_claude_room(self):
+        for field, value in (("used_pct", "bad"), ("used_pct", -1), ("used_pct", 101),
+                             ("used_pct", float("nan")), ("resets_at", float("inf"))):
+            with self.subTest(field=field, value=value):
+                reading = {**pool(3, 48), field: value}
+                self.assertFalse(sw.claude_allowed({"claude": reading}))
+                self.assertEqual(sw.choose({"claude": reading, "grok": UNKNOWN}, "normal")[0], "grok")
+
+    def test_claude_off_is_refused_even_with_room(self):
+        p = {"claude": pool(3, 48, "OFF")}
+        self.assertFalse(sw.claude_allowed(p))
+        with self.assertRaisesRegex(sw.Refused, "OFF"):
+            sw.choose(p, "normal", "claude")
+
+    def test_highest_expiring_room_wins_not_lowest_pace(self):
+        p = {"grok": pool(30, 12, pace=1.2), "codex": pool(20, 48, pace=0.4),
+             "claude": pool(85, 48)}
+        self.assertEqual(sw.choose(p, "normal")[0], "grok")
+        p["codex"] = pool(20, 6, pace=1.4)
+        self.assertEqual(sw.choose(p, "normal")[0], "codex")
+
+    def test_known_usage_needs_reset_but_not_pace(self):
+        self.assertEqual(sw.choose({"grok": UNKNOWN, "codex": pool(50, 48)}, "normal")[0], "codex")
+        p = {"grok": pool(20, pace=0.1), "codex": pool(50, 48)}
+        self.assertEqual(sw.choose(p, "normal")[0], "codex")
+
+    def test_rank_uses_reset_timestamp_not_stale_hours_left(self):
+        p = {"grok": pool(20, 48), "codex": pool(20, 12)}
+        p["grok"]["hours_left"] = 1
+        p["codex"]["hours_left"] = 100
+        self.assertEqual(sw.choose(p, "normal")[0], "codex")
+
+    def test_score_denominator_is_at_least_one_hour(self):
+        p = {"grok": pool(50, 0), "codex": pool(20, 0.5)}
+        self.assertEqual(sw.choose(p, "normal")[0], "codex")
+        p["grok"] = pool(50, -1)
+        self.assertEqual(sw.choose(p, "normal")[0], "codex")
+
+    def test_equal_scores_follow_table_order(self):
+        p = {"grok": pool(60, 24), "codex": pool(20, 48), "claude": pool(85, 48)}
+        self.assertEqual(sw.choose(p, "normal")[0], "grok")
+        p["deepseek"] = pool(60, 24)
+        self.assertEqual(sw.choose(p, "normal")[0], "deepseek")
+
+    def test_reported_unknown_beats_unreported_family(self):
+        family, reason = sw.choose(EXAMPLE, "normal")
+        self.assertEqual(family, "grok")
+        self.assertIn("usage unknown", reason)
+        self.assertEqual(sw.choose(EXAMPLE, "simple")[0], "deepseek")
+
+    def test_unknown_never_beats_known_healthy_family(self):
+        p = {"grok": UNKNOWN, "codex": pool(50, 48), "claude": pool(85, 48)}
+        self.assertEqual(sw.choose(p, "normal")[0], "codex")
+
+    def test_claude_competes_with_known_families(self):
+        p = {"deepseek": pool(50, 168), "grok": pool(50, 120),
+             "codex": pool(50, 96), "claude": pool(3, 48)}
+        self.assertEqual(sw.choose(p, "normal")[0], "claude")
+        self.assertEqual(sw.choose(p, "hard")[0], "claude")
+        self.assertEqual(sw.choose(p, "simple")[0], "claude")
+
+    def test_metered_never_beats_on_codex(self):
+        p = {"codex": pool(20, 48), "deepseek-api": pool(0, 1)}
+        self.assertEqual(sw.choose(p, "normal")[0], "codex")
+        with self.assertRaisesRegex(sw.Refused, "subscription.*codex"):
+            sw.choose(p, "normal", "deepseek-api")
+
+    def test_unknown_subscription_blocks_metered(self):
+        p = {"grok": UNKNOWN, "deepseek-api": pool(0, 1)}
+        self.assertEqual(sw.choose(p, "normal")[0], "grok")
+        with self.assertRaisesRegex(sw.Refused, "subscription"):
+            sw.choose(p, "normal", "deepseek-api")
+
+    def test_unreported_subscription_blocks_metered(self):
+        p = {"grok": pool(100, 48, "OFF"), "codex": pool(100, 48, "OFF"),
+             "claude": pool(85, 48)}
+        self.assertEqual(sw.choose(p, "normal")[0], "deepseek")
+
+    def test_all_subscriptions_off_uses_deepseek_api(self):
+        p = {family: pool(100, 48, "OFF") for family in ("deepseek", "grok", "codex", "claude")}
+        self.assertEqual(sw.choose(p, "normal")[0], "deepseek-api")
+        self.assertEqual(sw.choose(p, "simple")[0], "deepseek-api")
+        self.assertEqual(sw.choose(p, "normal", "deepseek-api")[0], "deepseek-api")
+
+    def test_no_suitable_family_is_refused(self):
+        p = {family: pool(100, 48, "OFF") for family in ("deepseek", "grok", "codex", "claude", "deepseek-api")}
+        with self.assertRaisesRegex(sw.Refused, "no family is allowed"):
+            sw.choose(p, "normal")
+        with self.assertRaisesRegex(sw.Refused, "no family is allowed"):
+            sw.choose(p, "hard", "grok")
+
+    def test_refused_level_names_best_suitable_alternative(self):
+        p = {"deepseek": UNKNOWN, "grok": pool(30, 24), "codex": pool(20, 48), "claude": pool(85, 48)}
+        with self.assertRaisesRegex(sw.Refused, "does not run hard.*best allowed alternative: grok"):
+            sw.choose(p, "hard", "deepseek")
+
+    def test_unknown_family_and_level_are_refused(self):
+        with self.assertRaises(sw.Refused):
+            sw.choose(EXAMPLE, "normal", "gemini")
+        with self.assertRaises(sw.Refused):
+            sw.choose(EXAMPLE, "trivial")
+
+    def test_build_argv_uses_requested_models(self):
+        self.assertEqual(sw.build_argv("grok", "hard", "fix the bug"),
+                         ["/home/valentin/.local/bin/cursor-agent", "-p", "-f", "--model", "grok-4.7", "fix the bug"])
+        for level, model in (("simple", "haiku"), ("normal", "sonnet"), ("hard", "sonnet")):
+            self.assertEqual(sw.build_argv("claude", level, "fix"), ["claude", "-p", "--model", model, "fix"])
+        for level in ("simple", "normal"):
+            self.assertEqual(sw.build_argv("deepseek-api", level, "fix"),
+                             ["/home/valentin/.npm-global/bin/pi", "-p", "--provider", "deepseek",
+                              "--model", "deepseek-v4.1-flash", "--thinking", "medium", "fix"])
+        self.assertIn("--effort=high", sw.build_argv("codex", "hard", "fix"))
+        self.assertIn("--effort=medium", sw.build_argv("codex", "normal", "fix"))
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp = Path(directory.name)
+        self.fixture = self.tmp / "readings.json"
+        self.brief = self.tmp / "brief.md"
+        self.brief.write_text("fix the failing test")
+
+    def run_cli(self, readings, *args, exit_code=0, brief=True):
+        self.fixture.write_text(json.dumps(readings))
+        cmd = [sys.executable, str(SCRIPT), *args]
+        if brief:
+            cmd.append(str(self.brief))
+        done = subprocess.run(cmd, capture_output=True, text=True,
+                              env={**os.environ, "PLAN_USAGE_FIXTURE": str(self.fixture)})
+        self.assertEqual(done.returncode, exit_code, done.stdout + done.stderr)
+        return done
+
+    def test_dry_run_prints_line_and_argv(self):
+        done = self.run_cli(EXAMPLE, "--dry-run", "--level", "normal")
+        self.assertIn("spawn-worker: grok normal", done.stderr)
+        self.assertIn("usage unknown", done.stderr)
+        self.assertIn("/home/valentin/.local/bin/cursor-agent", done.stdout)
+
+    def test_refusal_exits_2(self):
+        done = self.run_cli(EXAMPLE, "--dry-run", "--level", "hard", "--family", "codex", exit_code=2)
+        self.assertIn("refused", done.stderr)
+        self.assertIn("OFF", done.stderr)
+        self.assertEqual(done.stdout, "")
+
+    def test_rank_needs_no_brief_or_level(self):
+        done = self.run_cli(EXAMPLE, "--rank", brief=False)
+        self.assertIn("1. grok", done.stdout)
+        self.assertIn("usage unknown", done.stdout)
+        self.assertIn("codex", done.stdout)
+        self.assertIn("OFF", done.stdout)
+        self.assertIn("orchestrators", done.stdout)
+        self.assertIn("deepseek-api", done.stdout)
+        self.assertIn("subscription", done.stdout)
+        self.assertEqual(done.stderr, "")
+
+    def test_rank_matches_choice_and_reports_score(self):
+        self.clock = patch("time.time", return_value=NOW)
+        self.clock.start()
+        self.addCleanup(self.clock.stop)
+        p = {"grok": UNKNOWN, "claude": pool(3, 48)}
+        self.fixture.write_text(json.dumps(p))
+        with patch.dict(os.environ, {"PLAN_USAGE_FIXTURE": str(self.fixture)}), \
+                patch("sys.stdout") as stdout, patch.object(sw.os, "execvp") as execute:
+            self.assertEqual(sw.main(["--rank", "--level", "normal"]), 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn("1. claude", output)
+        self.assertIn("97% room", output)
+        self.assertIn("48.0h", output)
+        self.assertIn("2.021", output)
+        self.assertEqual(sw.choose(p, "normal")[0], "claude")
+        execute.assert_not_called()
+
+    def test_rank_and_dry_run_choose_claude_with_expiring_room(self):
+        p = {"claude": {"used_pct": 3, "resets_at": time.time() + 48 * 3600, "state": "ON"},
+             "grok": UNKNOWN}
+        ranked = self.run_cli(p, "--rank", "--level", "normal", brief=False)
+        self.assertTrue(ranked.stdout.startswith("1. claude [subscription]"))
+        chosen = self.run_cli(p, "--dry-run", "--level", "normal")
+        self.assertIn("spawn-worker: claude normal", chosen.stderr)
+        self.assertIn("'sonnet'", chosen.stdout)
+
+    def test_rank_all_refused_still_exits_zero(self):
+        p = {family: pool(100, 48, "OFF") for family in ("deepseek", "grok", "codex", "claude", "deepseek-api")}
+        done = self.run_cli(p, "--rank", "--level", "normal", brief=False)
+        self.assertIn("refused", done.stdout)
+        self.assertNotIn("1. ", done.stdout)
+
+    def test_rank_simple_shows_unsuitable_families(self):
+        done = self.run_cli(EXAMPLE, "--rank", "--level", "simple", brief=False)
+        self.assertIn("1. deepseek", done.stdout)
+        self.assertIn("does not run simple", done.stdout)
+
+    def test_reader_failure_refuses(self):
+        self.fixture.write_text("{")
+        done = subprocess.run([sys.executable, str(SCRIPT), "--level", "normal", str(self.brief)],
+                              capture_output=True, text=True,
+                              env={**os.environ, "PLAN_USAGE_FIXTURE": str(self.fixture)})
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("not valid JSON", done.stderr)
+
+    def test_missing_brief_refuses(self):
+        self.brief.unlink()
+        done = self.run_cli(EXAMPLE, "--level", "normal", exit_code=2)
+        self.assertIn("cannot read brief", done.stderr)
+
+    def test_start_requires_level_and_brief(self):
+        for args in (("--level", "normal"), ()):
+            with self.subTest(args=args):
+                done = self.run_cli(EXAMPLE, *args, exit_code=2, brief=False)
+                self.assertIn("required", done.stderr)
+
+    def test_empty_brief_refuses(self):
+        self.brief.write_text(" ")
+        done = self.run_cli(EXAMPLE, "--level", "normal", exit_code=2)
+        self.assertIn("empty", done.stderr)
+
+    def test_exec_replaces_process_with_chosen_argv(self):
+        self.fixture.write_text(json.dumps(EXAMPLE))
+        with patch.dict(os.environ, {"PLAN_USAGE_FIXTURE": str(self.fixture)}), \
+                patch.object(sw.os, "execvp") as execute, patch("sys.stderr"):
+            self.assertEqual(sw.main(["--level", "normal", str(self.brief)]), 0)
+        execute.assert_called_once_with(
+            "/home/valentin/.local/bin/cursor-agent",
+            ["/home/valentin/.local/bin/cursor-agent", "-p", "-f", "--model", "grok-4.7", "fix the failing test"])
+
+
+if __name__ == "__main__":
+    unittest.main()

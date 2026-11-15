@@ -10,7 +10,7 @@ Spawn-worker ranks on this shape and nothing else:
     state        "ON", "WARN", "OFF", or "unknown"
 
 "unknown" means there are no numbers. Pace is None when under 10% of the window
-has elapsed, and spawn-worker then treats the family as unknown. OFF is 95%
+has elapsed; spawn-worker ranks by used_pct and resets_at, not pace. OFF is 95%
 used on either window. WARN is 80% used, or used running ahead of the window
 once 80% of it has elapsed.
 

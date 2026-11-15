@@ -1,46 +1,49 @@
 #!/usr/bin/env python3
 """spawn-worker: the only supported way to start a worker.
 
-Every worker start spends one subscription's quota. This script reads live plan usage
-in-process (plan_usage.pools) before it starts anything, so the choice cannot be skipped
-and cannot be guessed: Claude is kept for orchestrators, and work goes to the family
-that is furthest from its pace.
+Read live plan usage in-process before choosing a family. Subscriptions precede
+metered APIs. Within subscriptions, known usage ranks by expiring room, highest
+first: (100 - used_pct) / max(hours_to_reset, 1). Reported unknown usage follows
+known usage; unreported families rank last. TIE_ORDER settles equal scores.
+Claude competes normally when its orchestrator reserve permits worker use.
 
-  spawn-worker --level simple BRIEF        deepseek (the only simple-capable family)
-  spawn-worker --level normal BRIEF        lowest pace among the families that run normal
-  spawn-worker --level hard --family codex BRIEF   pin a family, refused if a rule blocks it
-  spawn-worker --dry-run ...               print the line and the argv, start nothing
+  spawn-worker --level simple BRIEF        choose a simple-capable family
+  spawn-worker --level normal BRIEF        choose the most expiring room
+  spawn-worker --level hard --family codex BRIEF   pin a family, subject to rules
+  spawn-worker --dry-run ...               print the choice and argv, start nothing
+  spawn-worker --rank [--level normal]     print ranking and refusal reasons
 
-pace_ratio = share of the plan used / share of the window gone; over 1 means the plan is
-burning faster than even pace. Three knowledge tiers decide the ranking:
-
-  live numbers    ranked by pace_ratio, lowest first
-  reported unknown (a line with no numbers, e.g. grok today)  allowed, ranked after all
-                  known families, reason "usage unknown"
-  not reported at all (e.g. deepseek, which the reader does not track)  allowed, ranked
-                  last, reason "usage unknown"; never wins over a reported family
-
-Ties inside a tier follow TIE_ORDER. Claude is only a candidate for --family auto when
-no other family is ON or unknown (rule f), so a healthy Claude account never takes
-worker load.
-
-Exit 2 when a start is refused, with the reason on stderr. Exit 127 when the chosen
-command is not installed. Otherwise the worker replaces this process (exec).
-Read only: it never writes usage, config or state.
+Exit 2 when a start is refused, with the reason on stderr. Exit 127 when the
+chosen command is not installed. Otherwise the worker replaces this process.
+Read only: never writes usage, config or state.
 """
 import argparse
+import math
 import os
 import sys
+import time
 
 _BIN = os.path.dirname(os.path.realpath(__file__))
 if _BIN not in sys.path:
     sys.path.insert(0, _BIN)
 import plan_usage
 
+# Claude's orchestrator reserve follows its weekly budget.
+CLAUDE_WINDOW_HOURS = 7 * 24
+# Keep ten percentage points beyond elapsed-week usage for orchestrators.
+CLAUDE_ORCHESTRATOR_RESERVE_PCT = 10.0
+# Spend spare Claude room during the final day before it expires.
+CLAUDE_EXPIRING_HOURS = 24.0
+# The final-day allowance still leaves thirty percent for orchestrators.
+CLAUDE_EXPIRING_MAX_USED_PCT = 70.0
+# A reset less than an hour away must not divide the score by zero.
+MIN_RESET_HOURS = 1.0
+
 # One dict, family -> what it may run and how to run it. "{brief}" is replaced by the
 # brief file's text at exec time. Add a family here, nowhere else.
 FAMILIES = {
     "deepseek": {
+        "tier": "subscription",
         "levels": {"simple", "normal"},
         "cmd": {
             "simple": ["/home/valentin/.npm-global/bin/pi", "-p", "--provider", "opencode-go",
@@ -50,6 +53,7 @@ FAMILIES = {
         },
     },
     "grok": {
+        "tier": "subscription",
         "levels": {"normal", "hard"},
         "cmd": {
             "normal": ["/home/valentin/.local/bin/cursor-agent", "-p", "-f", "--model", "grok-4.7", "{brief}"],
@@ -57,6 +61,7 @@ FAMILIES = {
         },
     },
     "codex": {
+        "tier": "subscription",
         "levels": {"normal", "hard"},
         "cmd": {
             "normal": ["/home/valentin/.local/bin/hax", "-p", "--provider=codex",
@@ -66,36 +71,47 @@ FAMILIES = {
         },
     },
     "claude": {
-        "levels": {"normal", "hard"},
+        "tier": "subscription",
+        "levels": {"simple", "normal", "hard"},
         "cmd": {
+            "simple": ["claude", "-p", "--model", "haiku", "{brief}"],
             "normal": ["claude", "-p", "--model", "sonnet", "{brief}"],
             "hard": ["claude", "-p", "--model", "sonnet", "{brief}"],
+        },
+    },
+    "deepseek-api": {
+        "tier": "metered",
+        "levels": {"simple", "normal"},
+        "cmd": {
+            "simple": ["/home/valentin/.npm-global/bin/pi", "-p", "--provider", "deepseek",
+                       "--model", "deepseek-v4.1-flash", "--thinking", "medium", "{brief}"],
+            "normal": ["/home/valentin/.npm-global/bin/pi", "-p", "--provider", "deepseek",
+                       "--model", "deepseek-v4.1-flash", "--thinking", "medium", "{brief}"],
         },
     },
 }
 
 LEVELS = ("simple", "normal", "hard")
-# Tie-break order for equal pace, cheapest and most expandable first.
-TIE_ORDER = ("deepseek", "grok", "codex", "claude")
-CLAUDE_MAX_USED = 80.0
-CLAUDE_MAX_PACE = 0.9
+# Equal scores keep the existing family preference.
+TIE_ORDER = ("deepseek", "grok", "codex", "claude", "deepseek-api")
 
 
 class Refused(Exception):
     """A start that a rule forbids. The message is the reason shown to the caller."""
 
 
-def numbers(pool):
-    """(used_pct, pace_ratio) for one family, or None when its usage is unknown."""
+def numbers(pool, now=None):
+    """(used_pct, hours_to_reset), or None when either reading is unknown."""
     if not isinstance(pool, dict):
         return None
-    used, pace = pool.get("used_pct"), pool.get("pace_ratio")
-    if used is None or pace is None:
-        return None
     try:
-        return float(used), float(pace)
+        used, reset = float(pool.get("used_pct")), float(pool.get("resets_at"))
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(used) or not 0 <= used <= 100 or not math.isfinite(reset):
+        return None
+    now = time.time() if now is None else now
+    return used, max(0.0, (reset - now) / 3600)
 
 
 def pool_state(pool):
@@ -104,92 +120,100 @@ def pool_state(pool):
     return str(pool.get("state", "unknown")).strip().upper()
 
 
-def verdict(family, pools, level):
-    """(allowed, reason) for one family at one level. Pure."""
+def claude_allowed(pools, now=None):
+    """Whether Claude has worker room after the orchestrator reserve."""
+    pool = pools.get("claude")
+    nums = numbers(pool, now)
+    if pool_state(pool) == "OFF" or nums is None:
+        return False
+    used, hours = nums
+    elapsed = max(0.0, min(1.0, 1 - hours / CLAUDE_WINDOW_HOURS))
+    return (used < elapsed * 100 - CLAUDE_ORCHESTRATOR_RESERVE_PCT or
+            (hours < CLAUDE_EXPIRING_HOURS and used < CLAUDE_EXPIRING_MAX_USED_PCT))
+
+
+def verdict(family, pools, level, now=None):
+    """(allowed, reason) for one family at one level."""
+    now = time.time() if now is None else now
     if level not in FAMILIES[family]["levels"]:
         return False, f"{family} does not run {level} work"
     pool = pools.get(family)
-    nums = numbers(pool)
+    nums = numbers(pool, now)
 
     if pool_state(pool) == "OFF":
         return False, f"{family} is OFF (plan exhausted or paused)"
 
-    if family == "claude":
-        # Rule b: Claude is the orchestrator's budget, not a worker's.
+    if family == "claude" and not claude_allowed(pools, now):
         if nums is None:
-            return False, (f"claude usage unknown: cannot prove it is under "
-                           f"{CLAUDE_MAX_USED:.0f}% used at <= {CLAUDE_MAX_PACE} pace; "
-                           f"kept for orchestrators")
-        used, pace = nums
-        if used >= CLAUDE_MAX_USED:
-            return False, (f"claude at {used:.0f}% used (ceiling {CLAUDE_MAX_USED:.0f}%), "
-                           f"kept for orchestrators")
-        if pace > CLAUDE_MAX_PACE:
-            return False, (f"claude burning at pace {pace:.2f} (ceiling {CLAUDE_MAX_PACE}), "
-                           f"kept for orchestrators")
-        return True, f"claude at {used:.0f}% used, pace {pace:.2f} (under the worker ceiling)"
+            return False, "claude usage unknown: cannot prove worker room; kept for orchestrators"
+        return False, (f"claude at {nums[0]:.0f}% used, {nums[1]:.1f}h to reset; "
+                       "kept for orchestrators (worker reserve not met)")
+
+    if FAMILIES[family]["tier"] == "metered":
+        subscriptions = [f for f in TIE_ORDER if FAMILIES[f]["tier"] == "subscription"
+                         and verdict(f, pools, level, now)[0]]
+        if subscriptions:
+            return False, f"subscription families still allowed: {', '.join(subscriptions)}"
 
     if nums is None:
         return True, "usage unknown"
-    used, pace = nums
-    return True, f"{family} at {used:.0f}% used, pace {pace:.2f}"
+    used, hours = nums
+    room = 100 - used
+    score = room / max(hours, MIN_RESET_HOURS)
+    return True, f"{family} at {used:.0f}% used, {room:.0f}% room, {hours:.1f}h to reset, score {score:.3f}"
 
 
-def tier(family, pools):
+def tier(family, pools, now=None):
     """0 = live numbers, 1 = the reader reports it without numbers, 2 = not reported."""
     if family not in pools:
         return 2
-    return 0 if numbers(pools.get(family)) is not None else 1
+    return 0 if numbers(pools.get(family), now) is not None else 1
 
 
-def sort_key(family, pools):
-    """Known pace first, then reported-unknown, then unreported; TIE_ORDER inside a tier."""
-    nums = numbers(pools.get(family))
-    return (tier(family, pools), nums[1] if nums else 0.0, TIE_ORDER.index(family))
+def sort_key(family, pools, now=None):
+    """Subscriptions first, then knowledge tier, descending expiring room and tie order."""
+    nums = numbers(pools.get(family), now)
+    score = (100 - nums[0]) / max(nums[1], MIN_RESET_HOURS) if nums else 0.0
+    return (FAMILIES[family]["tier"] == "metered", tier(family, pools, now),
+            -score, TIE_ORDER.index(family))
 
 
-def auto_candidates(pools, level):
-    """Families eligible for --family auto, in pick order.
-
-    Rule f: claude is only a candidate when no other family is ON or unknown, so a
-    healthy Claude account never absorbs worker load. A family with no line in the
-    reader's output is neither ON nor unknown, so it cannot hold Claude back.
-    """
-    allowed = [f for f in TIE_ORDER if verdict(f, pools, level)[0]]
-    non_claude = [f for f in allowed if f != "claude"]
-    reported = [f for f in non_claude if tier(f, pools) < 2]
-    return sorted(reported or allowed, key=lambda f: sort_key(f, pools))
+def auto_candidates(pools, level, now=None):
+    """Families eligible for --family auto, in pick order."""
+    now = time.time() if now is None else now
+    allowed = [f for f in TIE_ORDER if verdict(f, pools, level, now)[0]]
+    return sorted(allowed, key=lambda f: sort_key(f, pools, now))
 
 
-def choose(pools, level, family="auto"):
-    """Pick (family, reason) for this level, or raise Refused. Pure: no I/O."""
+def choose(pools, level, family="auto", now=None):
+    """Pick (family, reason) for this level, or raise Refused. No I/O."""
+    now = time.time() if now is None else now
     if level not in LEVELS:
         raise Refused(f"unknown level {level!r} (use {', '.join(LEVELS)})")
 
     family = (family or "auto").strip().lower()
 
     if family == "auto":
-        candidates = auto_candidates(pools, level)
+        candidates = auto_candidates(pools, level, now)
         if not candidates:
             raise Refused(f"no family is allowed for {level} work right now")
         pick = candidates[0]
-        reason = verdict(pick, pools, level)[1]
+        reason = verdict(pick, pools, level, now)[1]
         if len(candidates) > 1:
-            reason += f"; lowest of {len(candidates)} allowed ({', '.join(candidates)})"
+            reason += f"; first of {len(candidates)} allowed ({', '.join(candidates)})"
         return pick, reason
 
     if family not in FAMILIES:
         raise Refused(f"unknown family {family!r} (use auto, {', '.join(TIE_ORDER)})")
 
-    allowed, reason = verdict(family, pools, level)
+    allowed, reason = verdict(family, pools, level, now)
     if allowed:
         return family, reason
 
-    # Rule e: say why, and name the best family that would be allowed instead.
-    alternatives = auto_candidates(pools, level)
+    alternatives = auto_candidates(pools, level, now)
     if alternatives:
         best = alternatives[0]
-        tail = f"; best allowed alternative: {best} ({verdict(best, pools, level)[1]})"
+        tail = f"; best allowed alternative: {best} ({verdict(best, pools, level, now)[1]})"
     else:
         tail = "; no family is allowed for this level"
     raise Refused(reason + tail)
@@ -214,17 +238,33 @@ def build_argv(family, level, brief):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="spawn-worker",
-        description="Start one worker, chosen by live plan usage. Claude stays for orchestrators.")
-    parser.add_argument("--level", required=True, choices=LEVELS,
-                        help="work size; decides which families are allowed")
+        description="Choose workers by expiring room, subscriptions before metered APIs.")
+    parser.add_argument("--level", choices=LEVELS,
+                        help="work size; required for starts, defaults to normal for --rank")
     parser.add_argument("--family", default="auto",
                         help="auto (default) or one of: " + ", ".join(TIE_ORDER))
     parser.add_argument("--dry-run", action="store_true",
                         help="print the choice and argv, start nothing")
-    parser.add_argument("brief", metavar="BRIEF_FILE", help="file holding the worker's brief")
+    parser.add_argument("--rank", action="store_true",
+                        help="print ranking with reasons, start nothing")
+    parser.add_argument("brief", nargs="?", metavar="BRIEF_FILE", help="file holding the worker's brief")
     args = parser.parse_args(argv)
+    if not args.rank and (args.level is None or args.brief is None):
+        parser.error("--level and BRIEF_FILE are required unless --rank is used")
+    level = args.level or "normal"
 
     try:
+        if args.rank:
+            pools = read_pools()
+            now = time.time()
+            candidates = auto_candidates(pools, level, now)
+            for rank, family in enumerate(candidates, 1):
+                print(f"{rank}. {family} [{FAMILIES[family]['tier']}]: {verdict(family, pools, level, now)[1]}")
+            for family in TIE_ORDER:
+                if family not in candidates:
+                    print(f"- {family} [{FAMILIES[family]['tier']}] refused: {verdict(family, pools, level, now)[1]}")
+            return 0
+
         try:
             with open(args.brief, encoding="utf-8") as fh:
                 brief = fh.read()
@@ -234,13 +274,13 @@ def main(argv=None):
             raise Refused(f"brief {args.brief} is empty")
 
         pools = read_pools()
-        family, reason = choose(pools, args.level, args.family)
-        cmd = build_argv(family, args.level, brief)
+        family, reason = choose(pools, level, args.family)
+        cmd = build_argv(family, level, brief)
     except Refused as exc:
         print(f"spawn-worker: refused: {exc}", file=sys.stderr)
         return 2
 
-    print(f"spawn-worker: {family} {args.level} ({reason})", file=sys.stderr)
+    print(f"spawn-worker: {family} {level} ({reason})", file=sys.stderr)
     if args.dry_run:
         print(cmd)
         return 0
