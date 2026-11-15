@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# The one supported way to start a public GitHub repo. GitHub's template and fork buttons stamp the account's
+# real email on the first commit, so this creates the repo empty and pushes a first commit made here.
+#   new-public-repo OWNER/NAME DIR     create the repo and push DIR's history
+#   new-public-repo --check DIR [RANGE] only check commit emails in DIR (exit 1 on a real address)
+#   new-public-repo --self-test
+set -euo pipefail
+
+allowed() {
+  case "$1" in
+    *@users.noreply.github.com|noreply@github.com|noreply@anthropic.com) return 0 ;;
+  esac
+  return 1
+}
+
+check_range() {
+  local dir=$1 range=${2:---all} bad=0 sha who mail
+  while IFS=$'\t' read -r sha who mail; do
+    [ -z "$mail" ] && continue
+    if ! allowed "$mail"; then
+      echo "REAL EMAIL: commit ${sha:0:8} $who uses an address at ${mail##*@}. Fix: git config user.email <id>+<login>@users.noreply.github.com, then recommit." >&2
+      bad=1
+    fi
+  done < <(
+    git -C "$dir" log "$range" --format='%H%x09author%x09%ae%n%H%x09committer%x09%ce'
+    git -C "$dir" log "$range" --format='%H%x09%(trailers:key=Co-authored-by,valueonly,separator=%x1f)' |
+      awk -F'\t' '$2!=""{n=split($2,a,"\x1f"); for(i=1;i<=n;i++){m=a[i]; sub(/^.*</,"",m); sub(/>.*$/,"",m); print $1"\tco-author\t"m}}'
+  )
+  return $bad
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  bad=0
+  for m in 1+a@users.noreply.github.com noreply@github.com noreply@anthropic.com; do
+    allowed "$m" && echo "ok allow $m" || { echo "FAIL should allow $m"; bad=1; }
+  done
+  for m in someone@example.com a@users.noreply.github.com.example.org noreply@example.com; do
+    allowed "$m" && { echo "FAIL should refuse $m"; bad=1; } || echo "ok refuse $m"
+  done
+  t=$(mktemp -d); git -C "$t" init -q
+  git -C "$t" -c user.name=T -c user.email=someone@example.com -c core.hooksPath=/dev/null commit -q --allow-empty -m first
+  check_range "$t" 2>/dev/null && { echo "FAIL should refuse a real author"; bad=1; } || echo "ok refuse real author commit"
+  rm -rf "$t"; t=$(mktemp -d); git -C "$t" init -q
+  git -C "$t" -c user.name=T -c user.email=1+t@users.noreply.github.com -c core.hooksPath=/dev/null commit -q --allow-empty -m first
+  check_range "$t" && echo "ok allow no-reply commit" || { echo "FAIL should allow a no-reply author"; bad=1; }
+  rm -rf "$t"
+  exit $bad
+fi
+
+if [ "${1:-}" = "--check" ]; then
+  check_range "${2:?usage: new-public-repo --check DIR [RANGE]}" "${3:---all}"
+  exit $?
+fi
+
+repo=${1:?usage: new-public-repo OWNER/NAME DIR}
+dir=${2:?usage: new-public-repo OWNER/NAME DIR}
+login=$(gh api user --jq .login)
+id=$(gh api user --jq .id)
+git -C "$dir" config user.email "$id+$login@users.noreply.github.com"
+git -C "$dir" rev-parse -q --verify HEAD >/dev/null || { echo "No commit in $dir yet. Commit first; the identity is now set to the no-reply address." >&2; exit 1; }
+check_range "$dir" || { echo "Refused: fix the commits above before anything is pushed." >&2; exit 1; }
+gh repo create "$repo" --public --disable-wiki >/dev/null
+git -C "$dir" remote remove origin 2>/dev/null || true
+git -C "$dir" remote add origin "https://github.com/$repo.git"
+git -C "$dir" push -u origin HEAD
+echo "created https://github.com/$repo with no real email in its history"
