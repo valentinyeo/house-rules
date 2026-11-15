@@ -261,7 +261,6 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(proc.stdout.splitlines(), [
             "missing concurrency cancel-in-progress (.github/workflows/build.yml)",
             "missing concurrency cancel-in-progress (.github/workflows/ci.yml)",
-            "missing concurrency cancel-in-progress (.github/workflows/lint.yml)",
         ])
 
 

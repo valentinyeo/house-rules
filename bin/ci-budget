@@ -154,13 +154,13 @@ def cancels_in_progress(text):
     if not found:
         return False
     if inline:
-        return bool(re.search(r"cancel-in-progress:\s*['\"]?true['\"]?\b", inline))
+        return bool(re.search(r"cancel-in-progress:\s*(['\"]?true['\"]?\b|\$\{\{[^}]*pull_request)", inline))
     for line in body:
         stripped = line.split("#", 1)[0].strip()
         if not stripped.startswith("cancel-in-progress:"):
             continue
         value = stripped.split(":", 1)[1].strip().strip("'\"")
-        return value == "true"
+        return value == "true" or ("${{" in value and "pull_request" in value)
     return False
 
 
