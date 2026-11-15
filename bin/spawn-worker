@@ -43,10 +43,10 @@ FAMILIES = {
     "deepseek": {
         "levels": {"simple", "normal"},
         "cmd": {
-            "simple": ["/home/valentin/.opencode/bin/opencode", "run", "-m",
-                       "opencode-go/deepseek-v4.1-flash", "{brief}"],
-            "normal": ["/home/valentin/.opencode/bin/opencode", "run", "-m",
-                       "opencode-go/deepseek-v4.1-flash", "{brief}"],
+            "simple": ["/home/valentin/.npm-global/bin/pi", "-p", "--provider", "opencode-go",
+                       "--model", "deepseek-v4.1-flash", "--thinking", "medium", "{brief}"],
+            "normal": ["/home/valentin/.npm-global/bin/pi", "-p", "--provider", "opencode-go",
+                       "--model", "deepseek-v4.1-flash", "--thinking", "medium", "{brief}"],
         },
     },
     "grok": {
