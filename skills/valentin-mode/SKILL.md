@@ -30,7 +30,7 @@ Run `/pstack:poteto-mode` for the task and follow `/house-rules`. This skill add
 | normal | most code | Grok 4.7, Codex Sol medium or Sonnet: the one with the most room |
 | hard | cross-cutting design, subtle bugs, security, money | Codex Sol high or Grok 4.7 |
 
-- **Claude:** Keep it for orchestrators. A worker uses Claude only when no other plan has room. Codex and Grok sessions never delegate to Claude.
+- **Claude:** Workers may use Claude. Other plans go first while Claude usage is high, so orchestrators keep headroom. Codex and Grok sessions never delegate to Claude.
 - **Grok:** Use it until it runs out. Its usage has no reader; a worker that fails on a limit means Grok is out, so move that work to the next plan.
 - **DeepSeek:** Always Flash, never Pro. Fast mode stays off on every model.
 - **Commands:**
