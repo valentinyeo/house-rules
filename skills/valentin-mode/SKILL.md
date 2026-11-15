@@ -6,7 +6,7 @@ description: >-
 
 # Valentin mode
 
-Run `/pstack:poteto-mode` for the task and follow `/house-rules`. This skill adds how Valentin works. Where it disagrees with poteto-mode, this skill wins.
+Run `/pstack:poteto-mode` for the task and follow `/house-rules`. This skill adds how Valentin works.
 
 ## Talking to the user
 
@@ -15,7 +15,7 @@ Run `/pstack:poteto-mode` for the task and follow `/house-rules`. This skill add
 - **Screenshots:** Upload with `sc2-upload` and give its https://screencast2.com URL, the only image link Multibot unfurls. Never a path or another image host. The `shots-guard` Stop hook blocks the reply otherwise.
 - **Shape:** Write every reply the `/i-have-adhd` way: next action first, numbered steps, wins visible, one next action at the end.
 - **Question first:** A question for the user is the first line, with your pick. Never below the first paragraph, which overrides `/i-have-adhd` rule 4. The `ask-first-guard` Stop hook blocks the reply otherwise.
-- **Questions:** Ask in plain text, never `AskUserQuestion`. Ask once, with your pick, and only for money, keys, going public, deleting live data or product direction. Decide everything else and report it.
+- **Questions:** Put the question on the ticket, and in chat as the first line, in plain text, never `AskUserQuestion`. Ask once, with your pick, and only for money, keys, making an existing repo public, deleting live data or product direction. Decide everything else and report it.
 - **Pace:** Follow `/responsive-mode`. Answer each message within a minute; long work runs in the background.
 
 ## Orchestrating
@@ -38,7 +38,7 @@ Run `/pstack:poteto-mode` for the task and follow `/house-rules`. This skill add
   - DeepSeek: `pi -p --provider opencode-go --model deepseek-v4.1-flash --thinking medium "$(cat brief.txt)"`. Never the OpenCode app; the `deepseek-via-pi` hook blocks it.
   - Codex: `hax -p --provider=codex --model=gpt-6.1-sol --effort=medium "$(cat brief.txt)"`
 - **Briefs:** Put each brief in a file and pass it with `"$(cat file)"`; the secrets guard blocks some inline prompts. Open each brief with the user's goal.
-- **Own the result:** Read each worker's diff and run its checks yourself before you report it.
+- **Own the result:** Read each worker's diff and run its focused check yourself before you report it. The full suite runs on GitHub.
 
 ## Verifying
 
