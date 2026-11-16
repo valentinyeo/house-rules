@@ -180,9 +180,10 @@ def last_loop_fire(transcript_sid, tail=3_000_000):
                 continue
             try:
                 fired = datetime.fromisoformat(json.loads(line)["timestamp"].replace("Z", "+00:00")).timestamp()
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, AttributeError):
                 continue
-            return min(fired, time.time())
+            if fired <= time.time() + 60:
+                return fired
     return None
 
 
@@ -206,42 +207,48 @@ IDENTITY_MESSAGE = ("Your Hypertask board login does not match your Multibot nam
                     "Run /board-identity now for a login named exactly \"{name}\", then use it for every board write.")
 
 
-def identity_gap(name, sessions=SESSIONS):
+def identity_gap(name, sessions=SESSIONS, exists=Path.is_file):
     """None when the chat has a board login named after its Multibot name, else the token file it lacks. Pure but for one stat."""
     if not name:
         return "a Multibot name (the tab has none)"
     token = sessions / (re.sub(r"^-+|-+$", "", re.sub(r"[^a-z0-9]+", "-", name.lower())) + "-agent-token")
-    return None if token.is_file() else str(token)
+    return None if exists(token) else str(token)
 
 
 def loop_watch(chats, panes, state, now):
+    """At most one message per chat per tick: the loop ask and the identity ask go out together, and a chat solo-wake
+    woke this tick gets nothing more until the next one."""
     for row in roster.rows():
-        if row.get("kind") not in LOOP_KINDS or not (row.get("tmux") or row.get("multibot")):
+        if row.get("kind") not in LOOP_KINDS:
+            continue
+        if not (row.get("tmux") or row.get("multibot")):
+            log(f"{row['name']} loop: skip, roster row names no chat (no tmux, no multibot); Chief Of Staff: fix the row")
             continue
         session = session_of(row, chats, panes)
         if session and session["via"] == "live":
             session["transcript"] = chats[session["key"]].get("transcript") or session["sid"]
         fire = last_loop_fire(session["transcript"]) if session and session.get("transcript") else None
-        key = "loop:" + row["name"]
+        key, ikey = "loop:" + row["name"], "identity:" + row["name"]
         nudges = [] if fire and now - fire < LOOP_GAP else [t for t in state.get(key, []) if not fire or t > fire]
+        state[key] = nudges
         verdict, why = loop_verdict(session, fire, nudges, now)
-        who = f"{row['name']} loop"
-        name = chats.get(session["key"], {}).get("name") if session and session["via"] == "live" else None
-        gap = identity_gap(name) if session and session["via"] == "live" else None
-        ikey = "identity:" + row["name"]
-        if gap and verdict != "skip" and not DRY_RUN and now - state.get(ikey, 0) >= COOLDOWN and session["state"] in ("idle", "stopped"):
-            ok, detail = send(session, IDENTITY_MESSAGE.format(name=name, token=gap))
-            state[ikey] = now if ok else state.get(ikey, 0)
-            log(f"{row['name']} identity: {'asked to fix' if ok else 'message failed'}, missing {gap}")
-        elif gap:
-            log(f"{row['name']} identity: {'would ask to fix' if DRY_RUN else 'gap'}, missing {gap}")
-        if verdict != "arm" or DRY_RUN:
-            state[key] = nudges
-            log(f"{who}: {'would arm' if verdict == 'arm' else verdict}, {why}")
+        live = session is not None and session["via"] == "live"
+        name = chats.get(session["key"], {}).get("name") if live else None
+        gap = identity_gap(name) if live else None
+        ask_identity = bool(gap) and session["state"] in ("idle", "stopped") and now - state.get(ikey, 0) >= COOLDOWN
+        log(f"{row['name']} loop: {'would arm' if verdict == 'arm' else verdict}, {why}")
+        if gap:
+            log(f"{row['name']} identity: gap, missing {gap}")
+        parts = ([LOOP_MESSAGE] if verdict == "arm" else []) + \
+                ([IDENTITY_MESSAGE.format(name=name, token=gap)] if ask_identity else [])
+        if not parts or DRY_RUN or state.get(row["name"]) == now:
             continue
-        ok, detail = send(session, LOOP_MESSAGE)
-        state[key] = nudges + ([now] if ok else [])
-        log(f"{who}: {'asked to arm' if ok else 'arm message failed for'} {session['key']} ({detail})")
+        ok, detail = send(session, " ".join(parts))
+        if ok and verdict == "arm":
+            state[key] = nudges + [now]
+        if ok and ask_identity:
+            state[ikey] = now
+        log(f"{row['name']}: {'sent' if ok else 'send failed'} {len(parts)} ask(s) to {session['key']} ({detail})")
     if not DRY_RUN:
         STATE.write_text(json.dumps(state))
 
@@ -386,12 +393,10 @@ def self_test():
     assert loop_verdict(live, None, [now - 90 * 60, now - 40 * 60], now)[0] == "escalate", "two ignored asks escalate"
     assert loop_verdict(None, None, [], now)[0] == "skip"
     assert "Drain check" in LOOP_MESSAGE and "/loop" in LOOP_MESSAGE
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        (Path(d) / "ht-product-lead-agent-token").write_text("x")
-        assert identity_gap("HT Product Lead", Path(d)) is None, "a login named after the Multibot name is in sync"
-        assert identity_gap("Matt Live Stream", Path(d)), "a chat without its own login must be told (16 Nov audit)"
-        assert identity_gap(None, Path(d)), "a tab with no name has no identity"
+    have = {SESSIONS / "ht-product-lead-agent-token"}
+    assert identity_gap("HT Product Lead", exists=lambda t: t in have) is None, "a login named after the Multibot name is in sync"
+    assert identity_gap("Matt Live Stream", exists=lambda t: t in have), "a chat without its own login must be told (16 Nov audit)"
+    assert identity_gap(None), "a tab with no name has no identity"
     print("solo-wake self-test ok")
 
 
