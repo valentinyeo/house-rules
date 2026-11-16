@@ -132,6 +132,13 @@ def hook():
         ident.setdefault("harness", "claude")
         e = roster.write_announce(entry_for(ident, {}, roster.static_rows(), previous(ident)))
         h = hint(e)
+        try:
+            budget = subprocess.run([str(Path(ME).with_name("checks-budget")), "--cached", ident["cwd"]],
+                                    capture_output=True, text=True, timeout=2, check=True).stdout.strip()
+            if budget:
+                h = "\n".join(part for part in (h, budget) if part)
+        except Exception:
+            pass
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": h}}) if h else "{}")
     except Exception as err:  # a hook must never break a session start
         print("{}")
@@ -171,6 +178,32 @@ def self_test():
     got = roster.announced()
     assert len(got) == 1 and got[0]["kind"] == "solo-dev" and got[0]["seen"] == "2", "upsert must be idempotent"
     assert headless(pid=1, depth=1) is False, "init is not a print-mode run"
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    for roster_hint in (None, "Roster hint"):
+        for result in ("CHECKS OVER BUDGET: owner/repo", "", subprocess.TimeoutExpired("checks-budget", 2),
+                       FileNotFoundError("checks-budget"), subprocess.CalledProcessError(1, "checks-budget")):
+            output = io.StringIO()
+            with patch.dict(os.environ, {"MULTIPROMPT_TAB": "test-budget"}), \
+                    patch.object(sys, "stdin", io.StringIO('{}')), \
+                    patch.dict(globals(), ident_now=lambda env, data: {"cwd": "/tmp/repo", "tmux": "test-budget"},
+                               previous=lambda ident: {}, hint=lambda entry: roster_hint), \
+                    patch.object(roster, "static_rows", return_value=[]), \
+                    patch.object(roster, "write_announce", side_effect=lambda entry: entry), \
+                    patch.object(subprocess, "run") as run, contextlib.redirect_stdout(output):
+                if isinstance(result, Exception):
+                    run.side_effect = result
+                else:
+                    run.return_value = subprocess.CompletedProcess([], 0, result)
+                hook()
+                run.assert_called_once_with([str(Path(ME).with_name("checks-budget")), "--cached", "/tmp/repo"],
+                                            capture_output=True, text=True, timeout=2, check=True)
+            got = json.loads(output.getvalue())
+            expected = "\n".join(part for part in (roster_hint, result if isinstance(result, str) else "") if part)
+            assert got == ({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": expected}}
+                           if expected else {}), got
     print("roster-announce self-test ok")
 
 

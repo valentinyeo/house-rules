@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+from collections.abc import Mapping
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import textwrap
+import time
+import traceback
+import urllib.parse
+
+
+def concurrency_policy(concurrency):
+    if not isinstance(concurrency, Mapping):
+        return False
+    group = concurrency.get("group")
+    valid_group = isinstance(group, (str, int, float, bool)) and str(group).strip() not in {"", "null", "~"}
+    value = concurrency.get("cancel-in-progress")
+    if isinstance(value, str):
+        value = value.strip()
+        if re.fullmatch(r"\$\{\{\s*false\s*\}\}", value, re.I):
+            return False
+        if "${{" in value:
+            if not re.fullmatch(r"\$\{\{\s*github\.event_name\s*==\s*(['\"])pull_request\1\s*\}\}", value, re.I):
+                return None
+            return bool(valid_group)
+        value = value.lower() == "true"
+    return bool(valid_group and value is True)
+
+
+def workflow_policy(source, name="", path="", default_branch="main"):
+    try:
+        import yaml
+        workflow = yaml.safe_load(textwrap.dedent(source))
+    except TimeoutError:
+        raise
+    except Exception:
+        return False, None
+    if not isinstance(workflow, Mapping):
+        return False, None
+    concurrency = concurrency_policy(workflow.get("concurrency"))
+    if re.search(r"release|deploy|publish", name + " " + path + " " + str(workflow.get("name", "")), re.I):
+        return False, concurrency
+    events = workflow.get("on", workflow.get(True, {}))
+    if isinstance(events, str):
+        events = {events: None}
+    elif isinstance(events, list):
+        events = {event: None for event in events if isinstance(event, str)}
+    elif not isinstance(events, Mapping):
+        events = {}
+    triggered = bool({"pull_request", "pull_request_target"} & events.keys())
+    if "push" in events:
+        push = events["push"]
+        push = push if isinstance(push, Mapping) else {}
+        if "branches" in push:
+            branches = push["branches"]
+            names = branches if isinstance(branches, list) else [branches] if branches is not None else []
+            triggered |= not names or any(value != default_branch and not str(value).startswith("!") for value in names)
+        elif "tags" not in push:
+            triggered = True
+    jobs = workflow.get("jobs")
+    jobs = jobs if isinstance(jobs, Mapping) else {}
+    job_policies = [concurrency_policy(job.get("concurrency") if isinstance(job, Mapping) else None)
+                    for job in jobs.values()]
+    if concurrency is None or any(policy is None for policy in job_policies):
+        return triggered, None
+    return triggered, concurrency or (bool(jobs) and all(job_policies))
+
+
+def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=False, default_branch="main"):
+    problems = []
+    maximum = max((jobs[str(run["id"])] for run in pr_runs
+                   if run["event"] in {"pull_request", "pull_request_target"}
+                   and str(run["id"]) in jobs), default=None)
+    if maximum is not None and maximum > 20:
+        problems.append(f"max PR run {maximum} jobs > 20")
+    releases = {workflow["id"] for workflow in workflows
+                if re.search(r"release|deploy|publish", workflow["name"] + " " + workflow["path"], re.I)}
+    successful = sorted((run for run in branch_runs if run.get("conclusion") == "success"
+                         and run["workflow_id"] in releases and run["head_sha"] in merged_at),
+                        key=lambda run: run["created_at"], reverse=True)[:5]
+    durations = [(datetime.datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00")) -
+                  datetime.datetime.fromisoformat(merged_at[run["head_sha"]].replace("Z", "+00:00"))).total_seconds() / 60
+                 for run in successful]
+    slowest = max(durations, default=None)
+    if slowest is not None and slowest > 15:
+        problems.append(f"slowest merge-to-release {slowest:.1f} min of last {len(durations)} > 15")
+    policies = [workflow_policy(workflow["source"], workflow["name"], workflow["path"], default_branch)
+                for workflow in workflows]
+    checked = sum(triggered and valid is not None for triggered, valid in policies)
+    missing = sum(triggered and valid is False for triggered, valid in policies)
+    if debug:
+        for workflow, (triggered, valid) in zip(workflows, policies):
+            if valid is None:
+                print(f"checks-budget: unchecked expression: {workflow['path']}", file=sys.stderr)
+        ship_minutes = f"{slowest:.1f}" if slowest is not None else "unavailable"
+        print(f"checks-budget: {repo}: max jobs={maximum if maximum is not None else 'unavailable'}; slowest ship minutes={ship_minutes}; "
+              f"workflows missing cancel-in-progress={missing}/{checked}", file=sys.stderr)
+    if missing:
+        problems.append(f"{missing}/{checked} workflows lack concurrency group with cancel-in-progress true")
+    if not problems:
+        return ""
+    return (f"CHECKS OVER BUDGET: {repo}: {', '.join(problems)}. "
+            "Fix the checks before new feature work (valentin-mode Checks).")
+
+
+def github_repo(origin):
+    match = re.fullmatch(r"(?:https?://(?:[^/@]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])([^/]+/[^/]+?)(?:\.git)?/?", origin)
+    return match[1] if match else None
+
+
+def cached_repo(path, refresh=False, debug=False):
+    origin = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], check=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=1).stdout.strip()
+    repo = github_repo(origin)
+    if not repo:
+        return ""
+    cache = Path(os.environ.get("CHECKS_BUDGET_CACHE", str(Path.home() / ".cache/checks-budget"))) / (repo.replace("/", "__") + ".txt")
+    if refresh:
+        output = inspect_repo(path, debug=debug)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(output + "\n" if output else "", encoding="utf-8")
+            temporary.replace(cache)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return ""
+    try:
+        if time.time() - cache.stat().st_mtime < 6 * 60 * 60:
+            return cache.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        pass
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--refresh-cache", str(Path(path).resolve())],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True)
+    return ""
+
+
+def inspect_repo(path, debug=False):
+    deadline = time.monotonic() + 19.5
+
+    def command(args):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        return subprocess.run(args, check=True, stdout=subprocess.PIPE,
+                              stderr=None if debug else subprocess.DEVNULL, text=True, timeout=min(remaining, 4),
+                              env={**os.environ, "GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat"}).stdout
+
+    origin = command(["git", "-C", path, "remote", "get-url", "origin"]).strip()
+    repo = github_repo(origin)
+    if not repo:
+        return ""
+
+    def api(endpoint, collection=None):
+        url = f"repos/{repo}/{endpoint}".rstrip("/")
+        items = []
+        page = 1
+        while deadline - time.monotonic() > 0.25:
+            target = url if collection is None else f"{url}&page={page}"
+            try:
+                data = json.loads(command(["gh", "api", "--hostname", "github.com", target]))
+            except (subprocess.SubprocessError, OSError, ValueError, TimeoutError) as error:
+                if debug:
+                    print(f"checks-budget: {target}: {type(error).__name__}: {error}", file=sys.stderr)
+                return None if collection is None else items
+            if collection is None:
+                return data
+            batch = data[collection] if collection else data
+            items.extend(batch)
+            if len(batch) < 100:
+                return items
+            page += 1
+        return None if collection is None else items
+
+    workflows = []
+    workflow_directory = Path(path) / ".github/workflows"
+    for workflow_path in sorted(workflow_directory.glob("*")):
+        if workflow_path.suffix not in {".yml", ".yaml"}:
+            continue
+        try:
+            source = workflow_path.read_text(encoding="utf-8")
+        except TimeoutError:
+            raise
+        except (OSError, UnicodeError) as error:
+            if debug:
+                print(f"checks-budget: {workflow_path}: {type(error).__name__}: {error}", file=sys.stderr)
+            continue
+        workflows.append({"id": None, "name": workflow_path.stem,
+                          "path": f".github/workflows/{workflow_path.name}", "source": source})
+    local_workflows = {workflow["path"]: workflow for workflow in workflows}
+    for workflow in api("actions/workflows?per_page=100", collection="workflows"):
+        if workflow.get("state") == "active" and workflow["path"] in local_workflows:
+            local_workflows[workflow["path"]].update(workflow)
+    pr_runs = (api("actions/runs?event=pull_request&status=completed&per_page=5") or {}).get("workflow_runs", [])
+    target_runs = (api("actions/runs?event=pull_request_target&status=completed&per_page=5") or {}).get("workflow_runs", [])
+    pr_runs = sorted(pr_runs + target_runs, key=lambda run: run["created_at"], reverse=True)[:5]
+    jobs = {}
+    for run in pr_runs:
+        measurement = api(f"actions/runs/{run['id']}/jobs?per_page=1")
+        if measurement is not None:
+            jobs[str(run["id"])] = measurement["total_count"]
+    branch = (api("") or {}).get("default_branch")
+    branch_runs = []
+    if branch:
+        branch_query = urllib.parse.urlencode({"branch": branch, "status": "completed", "per_page": 100})
+        branch_runs = (api(f"actions/runs?{branch_query}") or {}).get("workflow_runs", [])
+    releases = {workflow["id"] for workflow in workflows
+                if re.search(r"release|deploy|publish", workflow["name"] + " " + workflow["path"], re.I)}
+    branch_runs = sorted((run for run in branch_runs if run["workflow_id"] in releases and run.get("conclusion") == "success"),
+                         key=lambda run: run["created_at"], reverse=True)[:5]
+    merged_at = {}
+    for sha in dict.fromkeys(run["head_sha"] for run in branch_runs):
+        pulls = api(f"commits/{sha}/pulls?per_page=100", collection="")
+        times = [pull["merged_at"] for pull in pulls if pull.get("merged_at")
+                 and pull.get("merge_commit_sha") == sha and pull["base"]["ref"] == branch]
+        if times:
+            merged_at[sha] = min(times)
+    return report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=debug, default_branch=branch)
+
+
+def self_test():
+    import contextlib
+    import io
+    import tempfile
+    from unittest.mock import patch
+
+    fixture = json.loads('''{
+      "pr_runs": [{"id": 1, "event": "pull_request"}],
+      "jobs": {"1": 21},
+      "branch_runs": [{"event": "push", "head_sha": "merged", "workflow_id": 7,
+        "conclusion": "success", "updated_at": "2026-11-16T12:16:00Z", "created_at": "2026-11-16T12:00:00Z"}],
+      "merged_at": {"merged": "2026-11-16T12:00:00Z"},
+      "workflows": [{"id": 7, "name": "Release", "path": ".github/workflows/release.yml",
+        "source": "on: [push, pull_request]\\nconcurrency:\\n  group: release-${{ github.ref }}\\n  cancel-in-progress: true\\njobs: {}\\n"}]
+    }''')
+    def check(data):
+        return report("owner/repo", data["pr_runs"], data["jobs"],
+                      data["branch_runs"], data["merged_at"], data["workflows"])
+    def gh245(args, **kwargs):
+        assert "--slurp" not in args and "--paginate" not in args, args
+        if args[0] == "git":
+            return subprocess.CompletedProcess(args, 0, "git@github.com:owner/repo.git\n")
+        endpoint = args[-1].removeprefix("repos/owner/repo/")
+        responses = {
+            "repos/owner/repo": {"default_branch": "main"},
+            "actions/runs?branch=main&status=completed&per_page=100": {"workflow_runs": fixture["branch_runs"]},
+            "actions/runs?event=pull_request&status=completed&per_page=5": {
+                "workflow_runs": [dict(fixture["pr_runs"][0], created_at="2026-11-16T12:00:00Z")]},
+            "actions/runs?event=pull_request_target&status=completed&per_page=5": {"workflow_runs": []},
+            "actions/runs/1/jobs?per_page=1": {"total_count": fixture["jobs"]["1"]},
+            "actions/workflows?per_page=100&page=1": {"workflows": [dict(fixture["workflows"][0], state="active")]},
+            "commits/merged/pulls?per_page=100&page=1": [{
+                "merged_at": fixture["merged_at"]["merged"], "merge_commit_sha": "merged", "base": {"ref": "main"}}],
+        }
+        if multiple_pages and endpoint == "actions/workflows?per_page=100&page=1":
+            data = {"workflows": [{"state": "disabled_manually"}] * 100}
+        elif multiple_pages and endpoint == "actions/workflows?per_page=100&page=2":
+            data = responses["actions/workflows?per_page=100&page=1"]
+        elif multiple_pages and endpoint == "commits/merged/pulls?per_page=100&page=1":
+            data = [{"merged_at": None}] * 100
+        elif multiple_pages and endpoint == "commits/merged/pulls?per_page=100&page=2":
+            data = responses["commits/merged/pulls?per_page=100&page=1"]
+        else:
+            data = responses[endpoint]
+        return subprocess.CompletedProcess(args, 0, json.dumps(data))
+
+    directory = tempfile.TemporaryDirectory()
+    fixture_path = Path(directory.name)
+    (fixture_path / ".github/workflows").mkdir(parents=True)
+    source_path = fixture_path / ".github/workflows/release.yml"
+    source_path.write_text(fixture["workflows"][0]["source"])
+    output = check(fixture)
+    multiple_pages = False
+    with patch.object(subprocess, "run", side_effect=gh245):
+        assert inspect_repo(str(fixture_path)) == output
+    multiple_pages = True
+    with patch.object(subprocess, "run", side_effect=gh245):
+        assert inspect_repo(str(fixture_path)) == output
+    assert output.startswith("CHECKS OVER BUDGET: owner/repo:"), output
+    assert "21 jobs" in output and "slowest merge-to-release 16.0 min of last 1" in output, output
+    fixture["jobs"]["1"] = 20
+    fixture["branch_runs"][0]["updated_at"] = "2026-11-16T12:15:00Z"
+    assert check(fixture) == ""
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=gh245), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    assert "slowest ship minutes=15.0" in stderr.getvalue(), stderr.getvalue()
+    assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue(), stderr.getvalue()
+    source_path.unlink()
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=gh245), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue(), stderr.getvalue()
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    source_path.write_text(fixture["workflows"][0]["source"])
+    def failing_api(args, **kwargs):
+        if "actions/runs/1/jobs" in args[-1]:
+            raise subprocess.CalledProcessError(1, args)
+        return gh245(args, **kwargs)
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=failing_api), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "CalledProcessError" in stderr.getvalue(), stderr.getvalue()
+    assert "max jobs=unavailable" in stderr.getvalue(), stderr.getvalue()
+    assert "slowest ship minutes=15.0" in stderr.getvalue(), stderr.getvalue()
+    calls = []
+    def capped_api(args, **kwargs):
+        endpoint = args[-1]
+        calls.append(endpoint)
+        if "event=pull_request&" in endpoint:
+            runs = [dict(fixture["pr_runs"][0], id=index,
+                         created_at=f"2026-11-16T12:00:{index:02d}Z") for index in range(8)]
+            return subprocess.CompletedProcess(args, 0, json.dumps({"workflow_runs": runs}))
+        if "actions/runs?branch=" in endpoint:
+            runs = [dict(fixture["branch_runs"][0], head_sha=f"merge{index}",
+                         created_at=f"2026-11-16T12:00:{index:02d}Z") for index in range(8)]
+            return subprocess.CompletedProcess(args, 0, json.dumps({"workflow_runs": runs}))
+        if "/jobs?" in endpoint:
+            return subprocess.CompletedProcess(args, 0, json.dumps({"total_count": 20}))
+        if "/commits/merge" in endpoint:
+            sha = endpoint.split("/commits/")[1].split("/")[0]
+            return subprocess.CompletedProcess(args, 0, json.dumps([{
+                "merged_at": fixture["merged_at"]["merged"],
+                "merge_commit_sha": sha, "base": {"ref": "main"}}]))
+        return gh245(args, **kwargs)
+    with patch.object(subprocess, "run", side_effect=capped_api):
+        assert inspect_repo(str(fixture_path)) == ""
+    assert len([call for call in calls if "/jobs?" in call]) == 5, calls
+    assert not any(f"/runs/{index}/jobs?" in call for index in range(3) for call in calls), calls
+    assert len([call for call in calls if "/commits/" in call]) == 5, calls
+    assert not any(f"/commits/merge{index}/" in call for index in range(3) for call in calls), calls
+    def one_failed_job_api(args, **kwargs):
+        if "/runs/7/jobs?" in args[-1]:
+            raise subprocess.CalledProcessError(1, args)
+        return capped_api(args, **kwargs)
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=one_failed_job_api), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "CalledProcessError" in stderr.getvalue(), stderr.getvalue()
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    clock = [0]
+    def timed_out_api(args, **kwargs):
+        if "/runs/6/jobs?" in args[-1]:
+            clock[0] = 19.3
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        assert clock[0] == 0, args
+        return capped_api(args, **kwargs)
+    stderr = io.StringIO()
+    with patch.object(time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(subprocess, "run", side_effect=timed_out_api), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "TimeoutExpired" in stderr.getvalue(), stderr.getvalue()
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue(), stderr.getvalue()
+    def failed_workflows_api(args, **kwargs):
+        if "actions/workflows?" in args[-1]:
+            raise subprocess.CalledProcessError(1, args)
+        return gh245(args, **kwargs)
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=failed_workflows_api), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue(), stderr.getvalue()
+    fixture["workflows"][0].update(name="CI", path=".github/workflows/ci.yml", source="on: push\njobs: {}\n")
+    assert "1/1 workflows" in check(fixture)
+    assert workflow_policy("on: push\nconcurrency: {group: '${{ github.ref }}', cancel-in-progress: true}\n") == (True, True)
+    assert workflow_policy('"on":\n  pull_request:\n    branches: [main]\nconcurrency:\n  group: ci\n  cancel-in-progress: false\n') == (True, False)
+    assert workflow_policy("on: workflow_dispatch\n") == (False, False)
+    assert workflow_policy("on: push\n# concurrency: {group: ci, cancel-in-progress: true}\n") == (True, False)
+    assert workflow_policy("on: push\njobs:\n  test:\n    concurrency:\n      group: test\n      cancel-in-progress: true\n") == (True, True)
+    assert workflow_policy("on:\n  workflow_dispatch:\n  push:\n    branches: [main]\nconcurrency:\n  cancel-in-progress: true\n  group: ci\n") == (False, True)
+    assert workflow_policy("on:\n  - push\n  - pull_request\n") == (True, False)
+    fixture["branch_runs"] += [dict(fixture["branch_runs"][0], updated_at="2026-11-16T12:40:00Z")]
+    fixture["workflows"][0].update(name="Release", path=".github/workflows/release.yml", source="on: workflow_dispatch\n")
+    assert "slowest merge-to-release 40.0 min of last 2" in check(fixture)
+    fixture["workflows"] = []
+    assert check(fixture) == ""
+    fixture["jobs"]["1"] = 21
+    fixture["pr_runs"][0]["event"] = "push"
+    assert check(fixture) == ""
+    policy_cases = [
+        ("on: pull_request\njobs:\n  lint:\n    concurrency:\n      group: lint-${{ github.ref }}\n      cancel-in-progress: true\n  test:\n    concurrency:\n      group: test-${{ github.ref }}\n      cancel-in-progress: ${{ false }}\n", (True, False)),
+        ("on: pull_request\njobs:\n  lint:\n    concurrency: {group: lint, cancel-in-progress: true}\n  test:\n    runs-on: ubuntu-latest\n", (True, False)),
+        ("on: pull_request\nconcurrency:\n  group: ci\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\njobs:\n  test:\n    runs-on: ubuntu-latest\n", (True, True)),
+        ("on: pull_request\nconcurrency:\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n", (True, False)),
+        ("name: Deploy production\non: pull_request\n", (False, False)),
+        ("on: pull_request\nconcurrency: {group: deploy, cancel-in-progress: false}\n", (True, False)),
+        ("on:\n  push:\n    branches: [main]\n", (False, False)),
+        ("on:\n  push:\n    branches:\n      - main\n", (False, False)),
+        ("on: {push: {branches: [main]}}\n", (False, False)),
+        ("on:\n  push:\n    branches: [main, feature/**]\n", (True, False)),
+        ("on:\n  push:\n    branches-ignore: [main]\n", (True, False)),
+        ("on:\n  push:\n    tags: ['v*']\n", (False, False)),
+        ("on:\n  pull_request_target:\n  push:\n    branches: [main]\n", (True, False)),
+    ]
+    for source, expected in policy_cases:
+        assert workflow_policy(source) == expected, (source, workflow_policy(source), expected)
+    expression_cases = [
+        ("true", True),
+        ('"true"', True),
+        ("false", False),
+        ("${{ false }}", False),
+        ("${{FaLsE}}", False),
+        ("${{   FALSE   }}", False),
+        ("${{ github.event_name == 'pull_request ' }}", None),
+        ("${{ github.event_name == 'pull_ request' }}", None),
+        ("${{ false && github.ref }}", None),
+        ("${{ contains(github.event_name, 'push') }}", None),
+        ("${{ github.event_name != 'pull_request' }}", None),
+        ("${{ github.event_name == 'pull_request' || github.event_name == 'push' }}", None),
+        ("${{ github.event_name == 'push' }}", None),
+        ('${{github.event_name=="workflow_dispatch"}}', None),
+        ("${{ GITHUB.EVENT_NAME == 'PUSH' }}", None),
+        ("${{ github.event_name == 'pull_request' }}", True),
+        ('${{ GITHUB.EVENT_NAME == "PULL_REQUEST" }}', True),
+        ("${{ github.event_name == 'pull_request_target' }}", None),
+        ("${{ github.event_name != 'push' }}", None),
+        ("${{ !contains(github.ref, 'release/') }}", None),
+        ("${{ true }}", None),
+    ]
+    expression_workflows = []
+    for index, (expression, valid) in enumerate(expression_cases):
+        for concurrency_source in [
+                f"concurrency:\n  group: ci\n  cancel-in-progress: {expression}\n",
+                f"jobs:\n  test:\n    concurrency:\n      group: ci\n      cancel-in-progress: {expression}\n"]:
+            source = "on: pull_request\n" + concurrency_source
+            assert workflow_policy(source) == (True, valid), (expression, workflow_policy(source))
+            expression_workflows.append(dict(id=index, name="CI", path=f"ci-{len(expression_workflows)}.yml", source=source))
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        output = report("owner/repo", [], {}, [], {}, expression_workflows, debug=True)
+    checked = 2 * sum(valid is not None for expression, valid in expression_cases)
+    missing = 2 * sum(valid is False for expression, valid in expression_cases)
+    assert f"{missing}/{checked} workflows" in output, output
+    for workflow in expression_workflows:
+        unknown = workflow_policy(workflow["source"])[1] is None
+        assert (f"unchecked expression: {workflow['path']}\n" in stderr.getvalue()) == unknown
+    for style in [">-", "|"]:
+        for expression, valid in [
+                ("${{ github.event_name == 'pull_request' }}", True),
+                ("${{ github.event_name == 'push' }}", None)]:
+            concurrency_source = f"concurrency:\n  group: ci\n  cancel-in-progress: {style}\n    {expression}\n"
+            for scope in ["workflow", "job"]:
+                source = "on: pull_request\n" + (concurrency_source if scope == "workflow" else
+                         "jobs:\n  test:\n" + textwrap.indent(concurrency_source, "    "))
+                assert workflow_policy(source) == (True, valid), (source, workflow_policy(source))
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    output = report("owner/repo", [], {}, [], {}, [dict(
+                        id=1, name="CI", path="block.yml", source=source)], debug=True)
+                assert output == "", output
+                assert f"workflows missing cancel-in-progress=0/{int(valid is True)}" in stderr.getvalue()
+                assert ("unchecked expression: block.yml" in stderr.getvalue()) == (valid is None)
+    for source in ["on: [pull_request\n", "- pull_request\n", "null\n", ""]:
+        assert workflow_policy(source) == (False, None), source
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            assert report("owner/repo", [], {}, [], {}, [dict(
+                id=1, name="CI", path="invalid.yml", source=source)], debug=True) == ""
+        assert "unchecked expression: invalid.yml" in stderr.getvalue()
+        assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue()
+    with patch.dict(sys.modules, {"yaml": None}):
+        assert workflow_policy("on: pull_request\n") == (False, None)
+    with patch("yaml.safe_load", side_effect=ValueError("invalid YAML")):
+        assert workflow_policy("on: pull_request\n") == (False, None)
+    assert workflow_policy("on: pull_request\nconcurrency: ci\n") == (True, False)
+    assert workflow_policy("on: pull_request\njobs:\n  test:\n    concurrency: ci\n") == (True, False)
+    print("checks-budget YAML regression tests: PASS (folded and literal scalars, workflow and job concurrency, unchecked YAML, missing parser)")
+    assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: true, group: ci}\n") == (True, True)
+    assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: false, group: ci}\n") == (True, False)
+    assert workflow_policy("on:\n  push:\n    tags-ignore: ['v*']\n") == (True, False)
+    assert workflow_policy("on: push\n", path=".github/workflows/publish.yml")[0] is False
+    assert workflow_policy("on: push\n", name="Release production")[0] is False
+    assert workflow_policy("on:\n  push:\n    branches: [trunk]\n", default_branch="trunk")[0] is False
+    print("checks-budget policy regression tests: PASS (all jobs, mixed jobs, expressions, deploy exemptions, default branches)")
+    release = [{"id": 7, "name": "Release", "path": "release.yml", "source": "on: push\n"}]
+    def ship_report(minutes, conclusions=None):
+        runs = [dict(workflow_id=7, head_sha="merged", conclusion=(conclusions or ["success"] * len(minutes))[index],
+                     updated_at=f"2026-11-16T12:{minute:02d}:00Z", created_at=f"2026-11-16T12:00:{59-index:02d}Z")
+                for index, minute in enumerate(minutes)]
+        return report("owner/repo", [], {}, runs, {"merged": "2026-11-16T12:00:00Z"}, release)
+    assert "slowest merge-to-release 16.0 min of last 3" in ship_report([16, 1, 2])
+    assert "slowest merge-to-release 16.0 min of last 3" in ship_report([1, 16, 2])
+    assert "slowest merge-to-release 21.0 min of last 3" in ship_report([1, 20, 21])
+    assert "slowest merge-to-release 16.0 min of last 5" in ship_report([1, 16, 2, 3, 4])
+    assert ship_report([1, 2, 3, 4, 5, 16]) == ""
+    assert ship_report([40, 50, 1], ["failure", "cancelled", "success"]) == ""
+    assert ship_report([40], ["failure"]) == ""
+    assert ship_report([15]) == ""
+    print("checks-budget ship-time regression tests: PASS (successful releases, slowest of five, fifteen-minute boundary)")
+    fixture["workflows"] = [dict(release[0], path=".github/workflows/release.yml")]
+    fixture["pr_runs"][0]["event"] = "pull_request"
+    fixture["jobs"]["1"] = 20
+    calls.clear()
+    def failed_releases_api(args, **kwargs):
+        if "actions/runs?branch=" in args[-1]:
+            runs = [dict(workflow_id=7, head_sha=f"merge{index}", conclusion="success" if index < 3 else "failure",
+                         updated_at="2026-11-16T12:15:00Z", created_at=f"2026-11-16T12:00:{index:02d}Z")
+                    for index in range(8)]
+            return subprocess.CompletedProcess(args, 0, json.dumps({"workflow_runs": runs}))
+        return capped_api(args, **kwargs)
+    with patch.object(subprocess, "run", side_effect=failed_releases_api):
+        assert inspect_repo(str(fixture_path)) == ""
+    assert len([call for call in calls if "/commits/" in call]) == 3, calls
+    assert not any(f"/commits/merge{index}/" in call for index in range(3, 8) for call in calls), calls
+    print("checks-budget release sampling regression tests: PASS (success filter before five-run cap)")
+    with tempfile.TemporaryDirectory() as cache_directory, patch.dict(os.environ, {"CHECKS_BUDGET_CACHE": cache_directory}), \
+            patch.object(subprocess, "run", side_effect=gh245), patch.object(subprocess, "Popen") as spawn:
+        cache = Path(cache_directory) / "owner__repo.txt"
+        assert cached_repo(str(fixture_path)) == ""
+        args, kwargs = spawn.call_args
+        assert "--refresh-cache" in args[0] and str(fixture_path) in args[0], args
+        assert kwargs["start_new_session"] is True
+        assert kwargs["stdin"] == kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
+        spawn.reset_mock()
+        cache.write_text("CHECKS OVER BUDGET: owner/repo: cached\n")
+        assert cached_repo(str(fixture_path)) == "CHECKS OVER BUDGET: owner/repo: cached"
+        spawn.assert_not_called()
+        cache.write_text("")
+        assert cached_repo(str(fixture_path)) == ""
+        spawn.assert_not_called()
+        now = time.time()
+        os.utime(cache, (now - 6 * 3600 + 1, now - 6 * 3600 + 1))
+        with patch.object(time, "time", return_value=now):
+            assert cached_repo(str(fixture_path)) == ""
+        spawn.assert_not_called()
+        cache.write_text("stale warning")
+        os.utime(cache, (now - 6 * 3600, now - 6 * 3600))
+        with patch.object(time, "time", return_value=now):
+            assert cached_repo(str(fixture_path)) == ""
+        spawn.assert_called_once()
+        with patch.dict(globals(), inspect_repo=lambda path, debug=False: "fresh warning"):
+            assert cached_repo(str(fixture_path), refresh=True) == ""
+        assert cache.read_text() == "fresh warning\n"
+        with patch.dict(globals(), inspect_repo=lambda path, debug=False: ""):
+            assert cached_repo(str(fixture_path), refresh=True) == ""
+        assert cache.read_text() == ""
+        assert list(Path(cache_directory).glob("*.tmp")) == []
+    print("checks-budget cache regression tests: PASS (missing, fresh, empty, six-hour boundary, detached refresh, atomic rewrite)")
+    directory.cleanup()
+    print("checks-budget self-test: PASS (over, under, boundaries, missing concurrency, workflow forms, no release, gh 2.45 pages, debug metrics, missing workflow, failing API, five-run limits, partial deadline)")
+
+
+def timeout(signum, frame):
+    raise TimeoutError
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    debug = "--debug" in args
+    args = [arg for arg in args if arg != "--debug"]
+    signal.signal(signal.SIGALRM, timeout)
+    signal.setitimer(signal.ITIMER_REAL, 20)
+    try:
+        if args == ["--self-test"]:
+            self_test()
+        elif args and args[0] in {"--cached", "--refresh-cache"} and len(args) <= 2:
+            output = cached_repo(args[1] if len(args) == 2 else os.getcwd(),
+                                 refresh=args[0] == "--refresh-cache", debug=debug)
+            if output:
+                print(output)
+        elif len(args) <= 1:
+            output = inspect_repo(args[0] if args else os.getcwd(), debug=debug)
+            if output:
+                print(output)
+    except Exception as error:
+        if debug:
+            traceback.print_exc()
+        if args == ["--self-test"]:
+            print(f"checks-budget self-test: FAIL ({error})")
+            sys.exit(1)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
