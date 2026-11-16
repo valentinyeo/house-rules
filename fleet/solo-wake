@@ -141,6 +141,17 @@ def tmux_transcript(name, cwd):
         except (OSError, ValueError):
             continue
         if isinstance(session, dict) and isinstance(session.get("tmux"), str) and session["tmux"].split(":")[0] == name:
+            if not isinstance(session.get("sessionId"), str):
+                continue
+            pid = session.get("pid")
+            if type(pid) is not int or pid <= 0:
+                continue
+            try:
+                os.kill(pid, 0)
+            except PermissionError:
+                pass
+            except (ProcessLookupError, OverflowError):
+                continue
             sessions.append(session)
     newest = max(sessions, key=lambda s: s.get("updatedAt", 0), default=None)
     return newest["sessionId"] if newest else newest_transcript(cwd)
@@ -439,7 +450,10 @@ def self_test():
         sessions = Path(home) / ".claude/sessions"
         sessions.mkdir()
         session = sessions / "1.json"
-        session.write_text(json.dumps({"tmux": "postbox:@1.%1", "sessionId": "older", "updatedAt": now}))
+        session.write_text(json.dumps({"tmux": "postbox:@1.%1", "sessionId": "older", "pid": os.getpid(), "updatedAt": now}))
+        dead_session = sessions / "2.json"
+        dead_session.write_text(json.dumps({"tmux": "postbox:@1.%1", "sessionId": "newest", "pid": 2**22 + 12345,
+                                            "updatedAt": now + 1}))
         os.utime(older, (now - 60, now - 60))
         os.utime(newest, (now, now))
         logs = []
@@ -448,6 +462,13 @@ def self_test():
                 patch.object(roster, "rows", return_value=[{"name": "postbox", "kind": "solo-dev", "multibot": "Postbox"}]):
             loop_watch({}, panes, {}, now)
             assert "postbox loop: ok, loop fired 10 min ago" in logs, f"recent tmux scheduled turn must count as a fire: {logs}"
+            dead_session.unlink()
+            missing_session = sessions / "3.json"
+            missing_session.write_text(json.dumps({"tmux": "postbox:@1.%1", "pid": os.getpid(), "updatedAt": now + 2}))
+            logs.clear()
+            loop_watch({}, panes, {}, now)
+            assert "postbox loop: ok, loop fired 10 min ago" in logs, f"missing sessionId must be skipped: {logs}"
+            missing_session.unlink()
             session.unlink()
             os.utime(older, (now + 1, now + 1))
             logs.clear()
