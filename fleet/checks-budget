@@ -14,37 +14,60 @@ import traceback
 import urllib.parse
 
 
-def workflow_policy(source):
+def yaml_blocks(source):
+    source = textwrap.dedent(source).strip("\n")
+    matches = list(re.finditer(r"(?m)^['\"]?([\w-]+)['\"]?[ \t]*:[ \t]*(.*)$", source))
+    return {match[1]: textwrap.dedent(source[match.start(2):
+            matches[index + 1].start() if index + 1 < len(matches) else len(source)]).strip()
+            for index, match in enumerate(matches)}
+
+
+def concurrency_policy(source):
+    group = re.search(r"(?:^|[\n,{])\s*['\"]?group['\"]?\s*:\s*([^\n,]+)", source)
+    cancel = re.search(r"(?:^|[\n,{])\s*['\"]?cancel-in-progress['\"]?\s*:\s*(['\"]?)(true|false|\$\{\{.*?\}\})\1[ \t]*(?:[,}\n]|$)", source, re.S)
+    value = cancel[2] if cancel else ""
+    valid_group = group and group[1].strip().strip("'\"") not in {"", "null", "~"}
+    return bool(valid_group and (value == "true" or value.startswith("${{"))), value == "false"
+
+
+def workflow_policy(source, name="", path="", default_branch="main"):
     source = "\n".join(re.sub(r"('(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\")|#.*",
                               lambda match: match[1] or "", line)
                        for line in textwrap.dedent(source).splitlines())
-    blocks = {}
-    matches = list(re.finditer(r"(?m)^['\"]?([\w-]+)['\"]?[ \t]*:[ \t]*(.*)$", source))
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
-        blocks[match[1]] = textwrap.dedent(source[match.start(2):end]).strip()
+    blocks = yaml_blocks(source)
+    concurrency, exempt = concurrency_policy(blocks.get("concurrency", ""))
+    if exempt or re.search(r"release|deploy|publish", name + " " + path + " " + blocks.get("name", ""), re.I):
+        return False, concurrency
     events = blocks.get("on", "")
-    triggered = bool(re.fullmatch(r"['\"]?(push|pull_request|pull_request_target)['\"]?", events))
-    if events.startswith("["):
-        triggered = bool(re.search(r"\b(push|pull_request|pull_request_target)\b", events))
-    elif re.search(r"(?m)^\s*-\s*['\"]?(push|pull_request|pull_request_target)['\"]?\s*$", events):
-        triggered = True
-    elif events.startswith("{"):
-        triggered = bool(re.search(r"(?:^|[,{])\s*['\"]?(push|pull_request|pull_request_target)['\"]?\s*:", events))
-    elif "\n" in events or events.endswith(":"):
-        keys = list(re.finditer(r"(?m)^( *)(?:['\"]?)([\w-]+)['\"]?:", events))
-        if keys:
-            indent = min(len(match[1]) for match in keys)
-            triggered = any(len(match[1]) == indent and match[2] in
-                            {"push", "pull_request", "pull_request_target"} for match in keys)
-    concurrency = blocks.get("concurrency", "")
-    group = re.search(r"(?:^|[\n,{])\s*['\"]?group['\"]?\s*:\s*([^\n,]+)", concurrency)
-    cancel = re.search(r"(?:^|[\n,{])\s*['\"]?cancel-in-progress['\"]?\s*:\s*true[ \t]*(?:[,}\n]|$)", concurrency)
-    valid_group = group and group[1].strip().strip("'\"") not in {"", "null", "~"}
-    return triggered, bool(valid_group and cancel)
+    event_blocks = yaml_blocks(events)
+    if events.startswith("{"):
+        triggered = bool(re.search(r"[,{]\s*['\"]?(pull_request|pull_request_target)['\"]?\s*:", events))
+        push = re.search(r"[,{]\s*['\"]?push['\"]?\s*:", events)
+        push_source = events[push.end():] if push else ""
+    elif event_blocks:
+        triggered = bool({"pull_request", "pull_request_target"} & event_blocks.keys())
+        push = "push" in event_blocks
+        push_source = event_blocks.get("push", "")
+    else:
+        triggered = bool(re.search(r"\b(pull_request|pull_request_target)\b", events))
+        push = bool(re.search(r"\bpush\b", events))
+        push_source = ""
+    if push:
+        branches = re.search(r"(?:^|[\n,{])\s*['\"]?branches['\"]?\s*:\s*(\[[^]]*\]|[^\n}]+(?:\n[ \t]+-[^\n]+)*)", push_source)
+        tags_only = bool(re.search(r"(?:^|[\n,{])\s*['\"]?tags['\"]?\s*:", push_source))
+        if branches:
+            names = [value.strip().strip("'\"") for value in re.split(r"[,\n]", branches[1].strip().strip("[]"))]
+            names = [value.removeprefix("- ").strip().strip("'\"") for value in names if value.strip()]
+            triggered |= not names or any(value != default_branch and not value.startswith("!") for value in names)
+        elif not tags_only:
+            triggered = True
+    jobs = yaml_blocks(blocks.get("jobs", ""))
+    valid_jobs = bool(jobs) and all(concurrency_policy(yaml_blocks(job).get("concurrency", ""))[0]
+                                   for job in jobs.values())
+    return triggered, concurrency or valid_jobs
 
 
-def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=False):
+def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=False, default_branch="main"):
     problems = []
     maximum = max((jobs[str(run["id"])] for run in pr_runs
                    if run["event"] in {"pull_request", "pull_request_target"}
@@ -53,13 +76,19 @@ def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=False):
         problems.append(f"max PR run {maximum} jobs > 20")
     releases = {workflow["id"] for workflow in workflows
                 if re.search(r"release|deploy|publish", workflow["name"] + " " + workflow["path"], re.I)}
+    successful = sorted((run for run in branch_runs if run.get("conclusion") == "success"
+                         and run["workflow_id"] in releases and run["head_sha"] in merged_at),
+                        key=lambda run: run["created_at"], reverse=True)
     durations = [(datetime.datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00")) -
                   datetime.datetime.fromisoformat(merged_at[run["head_sha"]].replace("Z", "+00:00"))).total_seconds() / 60
-                 for run in branch_runs if run["workflow_id"] in releases and run["head_sha"] in merged_at]
+                 for run in successful]
     median = statistics.median(durations) if durations else None
     if median is not None and median > 15:
         problems.append(f"median merge-to-release {median:.1f} minutes > 15")
-    policies = [workflow_policy(workflow["source"]) for workflow in workflows]
+    if durations and durations[0] > 15:
+        problems.append(f"newest merge-to-release {durations[0]:.1f} minutes > 15")
+    policies = [workflow_policy(workflow["source"], workflow["name"], workflow["path"], default_branch)
+                for workflow in workflows]
     checked = sum(triggered for triggered, valid in policies)
     missing = sum(triggered and not valid for triggered, valid in policies)
     if debug:
@@ -74,6 +103,39 @@ def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=False):
             "Fix the checks before new feature work (valentin-mode Checks).")
 
 
+def github_repo(origin):
+    match = re.fullmatch(r"(?:https?://(?:[^/@]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])([^/]+/[^/]+?)(?:\.git)?/?", origin)
+    return match[1] if match else None
+
+
+def cached_repo(path, refresh=False, debug=False):
+    origin = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], check=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=1).stdout.strip()
+    repo = github_repo(origin)
+    if not repo:
+        return ""
+    cache = Path(os.environ.get("CHECKS_BUDGET_CACHE", str(Path.home() / ".cache/checks-budget"))) / (repo.replace("/", "__") + ".txt")
+    if refresh:
+        output = inspect_repo(path, debug=debug)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(output + "\n" if output else "", encoding="utf-8")
+            temporary.replace(cache)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return ""
+    try:
+        if time.time() - cache.stat().st_mtime < 6 * 60 * 60:
+            return cache.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        pass
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--refresh-cache", str(Path(path).resolve())],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True)
+    return ""
+
+
 def inspect_repo(path, debug=False):
     deadline = time.monotonic() + 19.5
 
@@ -86,10 +148,9 @@ def inspect_repo(path, debug=False):
                               env={**os.environ, "GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat"}).stdout
 
     origin = command(["git", "-C", path, "remote", "get-url", "origin"]).strip()
-    match = re.fullmatch(r"(?:https?://(?:[^/@]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])([^/]+/[^/]+?)(?:\.git)?/?", origin)
-    if not match:
+    repo = github_repo(origin)
+    if not repo:
         return ""
-    repo = match[1]
 
     def api(endpoint, collection=None):
         url = f"repos/{repo}/{endpoint}".rstrip("/")
@@ -144,7 +205,7 @@ def inspect_repo(path, debug=False):
         branch_runs = (api(f"actions/runs?{branch_query}") or {}).get("workflow_runs", [])
     releases = {workflow["id"] for workflow in workflows
                 if re.search(r"release|deploy|publish", workflow["name"] + " " + workflow["path"], re.I)}
-    branch_runs = sorted((run for run in branch_runs if run["workflow_id"] in releases),
+    branch_runs = sorted((run for run in branch_runs if run["workflow_id"] in releases and run.get("conclusion") == "success"),
                          key=lambda run: run["created_at"], reverse=True)[:5]
     merged_at = {}
     for sha in dict.fromkeys(run["head_sha"] for run in branch_runs):
@@ -153,7 +214,7 @@ def inspect_repo(path, debug=False):
                  and pull.get("merge_commit_sha") == sha and pull["base"]["ref"] == branch]
         if times:
             merged_at[sha] = min(times)
-    return report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=debug)
+    return report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=debug, default_branch=branch)
 
 
 def self_test():
@@ -166,7 +227,7 @@ def self_test():
       "pr_runs": [{"id": 1, "event": "pull_request"}],
       "jobs": {"1": 21},
       "branch_runs": [{"event": "push", "head_sha": "merged", "workflow_id": 7,
-        "updated_at": "2026-11-16T12:16:00Z", "created_at": "2026-11-16T12:00:00Z"}],
+        "conclusion": "success", "updated_at": "2026-11-16T12:16:00Z", "created_at": "2026-11-16T12:00:00Z"}],
       "merged_at": {"merged": "2026-11-16T12:00:00Z"},
       "workflows": [{"id": 7, "name": "Release", "path": ".github/workflows/release.yml",
         "source": "on: [push, pull_request]\\nconcurrency:\\n  group: release-${{ github.ref }}\\n  cancel-in-progress: true\\njobs: {}\\n"}]
@@ -224,7 +285,7 @@ def self_test():
         assert inspect_repo(str(fixture_path), debug=True) == ""
     assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
     assert "median ship minutes=15.0" in stderr.getvalue(), stderr.getvalue()
-    assert "workflows missing cancel-in-progress=0/1" in stderr.getvalue(), stderr.getvalue()
+    assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue(), stderr.getvalue()
     source_path.unlink()
     stderr = io.StringIO()
     with patch.object(subprocess, "run", side_effect=gh245), contextlib.redirect_stderr(stderr):
@@ -290,7 +351,7 @@ def self_test():
         assert inspect_repo(str(fixture_path), debug=True) == ""
     assert "TimeoutExpired" in stderr.getvalue(), stderr.getvalue()
     assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
-    assert "workflows missing cancel-in-progress=0/1" in stderr.getvalue(), stderr.getvalue()
+    assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue(), stderr.getvalue()
     def failed_workflows_api(args, **kwargs):
         if "actions/workflows?" in args[-1]:
             raise subprocess.CalledProcessError(1, args)
@@ -299,24 +360,111 @@ def self_test():
     with patch.object(subprocess, "run", side_effect=failed_workflows_api), contextlib.redirect_stderr(stderr):
         assert inspect_repo(str(fixture_path), debug=True) == ""
     assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
-    assert "workflows missing cancel-in-progress=0/1" in stderr.getvalue(), stderr.getvalue()
-    fixture["workflows"][0]["source"] = "on: push\njobs: {}\n"
+    assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue(), stderr.getvalue()
+    fixture["workflows"][0].update(name="CI", path=".github/workflows/ci.yml", source="on: push\njobs: {}\n")
     assert "1/1 workflows" in check(fixture)
     assert workflow_policy("on: push\nconcurrency: {group: '${{ github.ref }}', cancel-in-progress: true}\n") == (True, True)
-    assert workflow_policy('"on":\n  pull_request:\n    branches: [main]\nconcurrency:\n  group: ci\n  cancel-in-progress: false\n') == (True, False)
+    assert workflow_policy('"on":\n  pull_request:\n    branches: [main]\nconcurrency:\n  group: ci\n  cancel-in-progress: false\n') == (False, False)
     assert workflow_policy("on: workflow_dispatch\n") == (False, False)
     assert workflow_policy("on: push\n# concurrency: {group: ci, cancel-in-progress: true}\n") == (True, False)
-    assert workflow_policy("on: push\njobs:\n  test:\n    concurrency:\n      group: test\n      cancel-in-progress: true\n") == (True, False)
-    assert workflow_policy("on:\n  workflow_dispatch:\n  push:\n    branches: [main]\nconcurrency:\n  cancel-in-progress: true\n  group: ci\n") == (True, True)
+    assert workflow_policy("on: push\njobs:\n  test:\n    concurrency:\n      group: test\n      cancel-in-progress: true\n") == (True, True)
+    assert workflow_policy("on:\n  workflow_dispatch:\n  push:\n    branches: [main]\nconcurrency:\n  cancel-in-progress: true\n  group: ci\n") == (False, True)
     assert workflow_policy("on:\n  - push\n  - pull_request\n") == (True, False)
     fixture["branch_runs"] += [dict(fixture["branch_runs"][0], updated_at="2026-11-16T12:40:00Z")]
-    fixture["workflows"][0]["source"] = "on: workflow_dispatch\n"
+    fixture["workflows"][0].update(name="Release", path=".github/workflows/release.yml", source="on: workflow_dispatch\n")
     assert "27.5 minutes" in check(fixture)
     fixture["workflows"] = []
     assert check(fixture) == ""
     fixture["jobs"]["1"] = 21
     fixture["pr_runs"][0]["event"] = "push"
     assert check(fixture) == ""
+    policy_cases = [
+        ("on: pull_request\njobs:\n  lint:\n    concurrency:\n      group: lint-${{ github.ref }}\n      cancel-in-progress: true\n  test:\n    concurrency:\n      group: test-${{ github.ref }}\n      cancel-in-progress: ${{ false }}\n", (True, True)),
+        ("on: pull_request\njobs:\n  lint:\n    concurrency: {group: lint, cancel-in-progress: true}\n  test:\n    runs-on: ubuntu-latest\n", (True, False)),
+        ("on: pull_request\nconcurrency:\n  group: ci\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\njobs:\n  test:\n    runs-on: ubuntu-latest\n", (True, True)),
+        ("on: pull_request\nconcurrency:\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n", (True, False)),
+        ("name: Deploy production\non: pull_request\n", (False, False)),
+        ("on: pull_request\nconcurrency: {group: deploy, cancel-in-progress: false}\n", (False, False)),
+        ("on:\n  push:\n    branches: [main]\n", (False, False)),
+        ("on:\n  push:\n    branches:\n      - main\n", (False, False)),
+        ("on: {push: {branches: [main]}}\n", (False, False)),
+        ("on:\n  push:\n    branches: [main, feature/**]\n", (True, False)),
+        ("on:\n  push:\n    branches-ignore: [main]\n", (True, False)),
+        ("on:\n  push:\n    tags: ['v*']\n", (False, False)),
+        ("on:\n  pull_request_target:\n  push:\n    branches: [main]\n", (True, False)),
+    ]
+    for source, expected in policy_cases:
+        assert workflow_policy(source) == expected, (source, workflow_policy(source), expected)
+    assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: true, group: ci}\n") == (True, True)
+    assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: false, group: ci}\n") == (False, False)
+    assert workflow_policy("on:\n  push:\n    tags-ignore: ['v*']\n") == (True, False)
+    assert workflow_policy("on: push\n", path=".github/workflows/publish.yml")[0] is False
+    assert workflow_policy("on: push\n", name="Release production")[0] is False
+    assert workflow_policy("on:\n  push:\n    branches: [trunk]\n", default_branch="trunk")[0] is False
+    print("checks-budget policy regression tests: PASS (all jobs, mixed jobs, expressions, deploy exemptions, default branches)")
+    release = [{"id": 7, "name": "Release", "path": "release.yml", "source": "on: push\n"}]
+    def ship_report(minutes, conclusions=None):
+        runs = [dict(workflow_id=7, head_sha="merged", conclusion=(conclusions or ["success"] * len(minutes))[index],
+                     updated_at=f"2026-11-16T12:{minute:02d}:00Z", created_at=f"2026-11-16T12:00:{59-index:02d}Z")
+                for index, minute in enumerate(minutes)]
+        return report("owner/repo", [], {}, runs, {"merged": "2026-11-16T12:00:00Z"}, release)
+    assert "newest merge-to-release 16.0" in ship_report([16, 1, 2])
+    assert "median merge-to-release" not in ship_report([16, 1, 2])
+    assert "median merge-to-release 20.0" in ship_report([1, 20, 21])
+    assert "newest merge-to-release" not in ship_report([1, 20, 21])
+    assert ship_report([40, 50, 1], ["failure", "cancelled", "success"]) == ""
+    assert ship_report([40], ["failure"]) == ""
+    assert ship_report([15]) == ""
+    print("checks-budget ship-time regression tests: PASS (successful releases, newest, median, fifteen-minute boundary)")
+    fixture["workflows"] = [dict(release[0], path=".github/workflows/release.yml")]
+    fixture["pr_runs"][0]["event"] = "pull_request"
+    fixture["jobs"]["1"] = 20
+    calls.clear()
+    def failed_releases_api(args, **kwargs):
+        if "actions/runs?branch=" in args[-1]:
+            runs = [dict(workflow_id=7, head_sha=f"merge{index}", conclusion="success" if index < 3 else "failure",
+                         updated_at="2026-11-16T12:15:00Z", created_at=f"2026-11-16T12:00:{index:02d}Z")
+                    for index in range(8)]
+            return subprocess.CompletedProcess(args, 0, json.dumps({"workflow_runs": runs}))
+        return capped_api(args, **kwargs)
+    with patch.object(subprocess, "run", side_effect=failed_releases_api):
+        assert inspect_repo(str(fixture_path)) == ""
+    assert len([call for call in calls if "/commits/" in call]) == 3, calls
+    assert not any(f"/commits/merge{index}/" in call for index in range(3, 8) for call in calls), calls
+    print("checks-budget release sampling regression tests: PASS (success filter before five-run cap)")
+    with tempfile.TemporaryDirectory() as cache_directory, patch.dict(os.environ, {"CHECKS_BUDGET_CACHE": cache_directory}), \
+            patch.object(subprocess, "run", side_effect=gh245), patch.object(subprocess, "Popen") as spawn:
+        cache = Path(cache_directory) / "owner__repo.txt"
+        assert cached_repo(str(fixture_path)) == ""
+        args, kwargs = spawn.call_args
+        assert "--refresh-cache" in args[0] and str(fixture_path) in args[0], args
+        assert kwargs["start_new_session"] is True
+        assert kwargs["stdin"] == kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
+        spawn.reset_mock()
+        cache.write_text("CHECKS OVER BUDGET: owner/repo: cached\n")
+        assert cached_repo(str(fixture_path)) == "CHECKS OVER BUDGET: owner/repo: cached"
+        spawn.assert_not_called()
+        cache.write_text("")
+        assert cached_repo(str(fixture_path)) == ""
+        spawn.assert_not_called()
+        now = time.time()
+        os.utime(cache, (now - 6 * 3600 + 1, now - 6 * 3600 + 1))
+        with patch.object(time, "time", return_value=now):
+            assert cached_repo(str(fixture_path)) == ""
+        spawn.assert_not_called()
+        cache.write_text("stale warning")
+        os.utime(cache, (now - 6 * 3600, now - 6 * 3600))
+        with patch.object(time, "time", return_value=now):
+            assert cached_repo(str(fixture_path)) == ""
+        spawn.assert_called_once()
+        with patch.dict(globals(), inspect_repo=lambda path, debug=False: "fresh warning"):
+            assert cached_repo(str(fixture_path), refresh=True) == ""
+        assert cache.read_text() == "fresh warning\n"
+        with patch.dict(globals(), inspect_repo=lambda path, debug=False: ""):
+            assert cached_repo(str(fixture_path), refresh=True) == ""
+        assert cache.read_text() == ""
+        assert list(Path(cache_directory).glob("*.tmp")) == []
+    print("checks-budget cache regression tests: PASS (missing, fresh, empty, six-hour boundary, detached refresh, atomic rewrite)")
     directory.cleanup()
     print("checks-budget self-test: PASS (over, under, boundaries, missing concurrency, workflow forms, no release, gh 2.45 pages, debug metrics, missing workflow, failing API, five-run limits, partial deadline)")
 
@@ -334,6 +482,11 @@ if __name__ == "__main__":
     try:
         if args == ["--self-test"]:
             self_test()
+        elif args and args[0] in {"--cached", "--refresh-cache"} and len(args) <= 2:
+            output = cached_repo(args[1] if len(args) == 2 else os.getcwd(),
+                                 refresh=args[0] == "--refresh-cache", debug=debug)
+            if output:
+                print(output)
         elif len(args) <= 1:
             output = inspect_repo(args[0] if args else os.getcwd(), debug=debug)
             if output:
@@ -343,5 +496,6 @@ if __name__ == "__main__":
             traceback.print_exc()
         if args == ["--self-test"]:
             print(f"checks-budget self-test: FAIL ({error})")
+            sys.exit(1)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
