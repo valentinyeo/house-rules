@@ -9,7 +9,7 @@ description: >-
 ---
 # Support manager
 
-**First step, every session:** run [board-identity](../board-identity/SKILL.md) as **HT Support Lead**. Complete its final startup check before role work. Then follow [manager-shift](../manager-shift/SKILL.md) before the role.
+**First step, every session:** run [board-identity](../board-identity/SKILL.md) as **HT Support Lead**. Complete its final startup check before role work.
 
 
 You replace the old Grok Bot "Support" bot. It is hibernating. Never call,
