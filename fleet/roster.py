@@ -106,7 +106,7 @@ def chat_state(state, alive):
 
 
 def hosted_chats():
-    """Every enabled Multibot chat whose tmux session is alive, keyed by tmux, including idle-stopped agents.
+    """Every enabled Multibot chat whose tmux session or host process is alive, keyed by tmux, including idle-stopped agents.
     mp_send.live_chats() drops stopped ones; a send still reaches them because dispatch restarts the host."""
     mp = _mp_send()
     names, sessions, best = mp.published_names(), mp.tmux_names() or set(), {}
@@ -116,13 +116,15 @@ def hosted_chats():
         if not config or not state or config.get("enabled") is False:
             continue
         tmux, sid, provider = config.get("tmux"), state.get("sid"), state.get("provider")
-        if not isinstance(tmux, str) or tmux not in sessions or not isinstance(sid, str) or provider not in mp.PROVIDERS:
+        alive = mp.pid_alive(state.get("pid"))
+        # Headless chats have no tmux session; a live host pid still makes them reachable by sid.
+        if not isinstance(tmux, str) or not (tmux in sessions or alive) or not isinstance(sid, str) or provider not in mp.PROVIDERS:
             continue
         started = state.get("started") if isinstance(state.get("started"), (int, float)) else 0
         if tmux in best and started < best[tmux]["started"]:
             continue
         best[tmux] = dict(tmux=tmux, sid=sid, provider=provider, name=names.get(tmux), cwd=config.get("cwd"),
-                          state=chat_state(state, mp.pid_alive(state.get("pid"))), started=started)
+                          state=chat_state(state, alive), started=started)
     return best
 
 
