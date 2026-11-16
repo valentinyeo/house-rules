@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""slots: how many more workers an orchestrator starts now, and why when fewer than the cap of 10.
+
+pstack Orchestrate: "Keep about ten workers in flight per coordinator, and start the next one as each finishes."
+The drain tick runs this and starts exactly the number it prints. The only reasons to start fewer are the ones below;
+each is printed so a short fleet is never silent.
+
+Usage: slots --running N --ready M [--cap C]  |  --self-test
+  --cap      this project's own cap when below 10 (a small project); default 10
+  --running  workers and subagents this orchestrator has in flight now
+  --ready    tickets it could hand a worker now: open, unblocked, not waiting on a person, not sharing files with
+             work in flight
+Prints one line: "start K" or "start K: <reason>".
+"""
+import os
+import sys
+
+CAP = 10
+LOAD_MAX = 0.85      # 1-minute load per core above this: the box is full
+MEM_MIN_GB = 8       # available memory below this: the box is full
+PER_WORKER_GB = 2
+
+
+def box():
+    load = os.getloadavg()[0] / (os.cpu_count() or 1)
+    with open("/proc/meminfo") as f:
+        mem = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in f)}
+    return load, mem["MemAvailable"] / 1_048_576
+
+
+def decide(running, ready, load, mem_gb, cap=CAP):
+    """(k, reason) for one tick. Pure."""
+    cap = min(cap, CAP)
+    room = cap - running
+    if room <= 0:
+        return 0, f"at the cap of {cap}"
+    if ready <= 0:
+        return 0, "no ready ticket: board empty, blocked, or waiting on a person"
+    if load > LOAD_MAX:
+        return 0, f"CPU full (load {load:.2f} per core, max {LOAD_MAX})"
+    if mem_gb < MEM_MIN_GB:
+        return 0, f"memory low ({mem_gb:.0f} GB free, min {MEM_MIN_GB})"
+    k = min(room, ready, int((mem_gb - MEM_MIN_GB) // PER_WORKER_GB) or 1)
+    if k == room:
+        return k, ""
+    why = "only {} ready ticket(s)".format(ready) if k == ready else f"memory allows {k}"
+    return k, why
+
+
+def self_test():
+    assert decide(0, 20, 0.3, 70) == (10, ""), "empty orchestrator with work fills to 10"
+    assert decide(4, 20, 0.3, 70) == (6, ""), "HT Product Lead at 4 must start 6 more"
+    assert decide(10, 5, 0.3, 70)[0] == 0
+    assert decide(2, 3, 0.3, 70) == (3, "only 3 ready ticket(s)")
+    assert decide(2, 0, 0.3, 70)[1].startswith("no ready ticket")
+    assert decide(2, 9, 0.95, 70)[1].startswith("CPU full")
+    assert decide(2, 9, 0.3, 5)[1].startswith("memory low")
+    assert decide(0, 9, 0.3, 12) == (2, "memory allows 2")
+    assert decide(1, 20, 0.3, 70, cap=3) == (2, ""), "a small project fills to its own cap"
+    assert decide(0, 20, 0.3, 70, cap=50) == (10, ""), "no project goes past 10"
+    print("slots self-test ok")
+
+
+def main(argv):
+    if argv == ["--self-test"]:
+        return self_test()
+    args = dict(zip(argv[::2], argv[1::2]))
+    load, mem = box()
+    k, why = decide(int(args["--running"]), int(args["--ready"]), load, mem, int(args.get("--cap", CAP)))
+    print(f"start {k}" + (f": {why}" if why else ""))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
