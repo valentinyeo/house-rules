@@ -68,5 +68,10 @@
     "board": 2060, "view": "daaa8d18-da52-4df0-883e-481e8fcce3a1", "lead": "Multiprompt Android Dev", "alarm_board": 2060,
     "repos": ["valentinyeo/multiprompt-android"],
     "workers": [{"tmux": "multiprompt-android", "agent": "Multiprompt Android Dev"}]
+  },
+  "2060/pecunia": {
+    "board": 2060, "view": "82886927-74e7-419d-a4f5-313742424b41", "lead": "Pecunia Ratstack Transitioner", "alarm_board": 2060,
+    "repos": ["valentinyeo/pecunia-oss"],
+    "workers": [{"tmux": "live-10707105", "agent": "Pecunia Ratstack Transitioner"}]
   }
 }
