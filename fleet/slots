@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 from dataclasses import dataclass
+import fcntl
 from math import floor
 import os
 from pathlib import Path
@@ -14,12 +15,14 @@ BUSY_MAX = 0.85
 CORES_PER_WORKER = 0.5  # CPU allowance while a worker builds.
 MEM_MIN_GB = 8
 PER_WORKER_GB = 1.0  # Worker and its tools.
+RESERVATION_SECONDS = 120
 WORKER_MATCHERS = (
-    (re.compile(r"(?:^|/)codex(?:\.js)?$"), ("exec",), ()),
+    (re.compile(r"(?:^|/)codex(?:\.js)?$"), ("exec",)),
     (re.compile(r"(?:^|/)(?:claude|@anthropic-ai/claude-code/cli\.js)$"),
-     ("--print",), ("--session-id", "--resume")),
-    (re.compile(r"(?:^|/)cursor-agent$"), (), ()),
-    (re.compile(r"(?:^|/)(?:pi|pi-coding-agent/(?:dist/)?cli\.js)$"), (), ()),
+     ("-p", "--print")),
+    (re.compile(r"(?:^|/)hax$"), ("-p",)),
+    (re.compile(r"(?:^|/)cursor-agent$"), ()),
+    (re.compile(r"(?:^|/)(?:pi|pi-coding-agent/(?:dist/)?cli\.js)$"), ()),
 )
 
 
@@ -40,9 +43,8 @@ def is_worker(argv):
         executable, *args = args
     flags = {arg.split("=", 1)[0] for arg in args}
     return any(pattern.search(executable)
-               and all(arg in flags for arg in required)
-               and not any(arg in flags for arg in excluded)
-               for pattern, required, excluded in WORKER_MATCHERS)
+               and (not required or any(arg in flags for arg in required))
+               for pattern, required in WORKER_MATCHERS)
 
 
 def fleet_workers():
@@ -72,7 +74,7 @@ def box():
     return Box(busy, os.cpu_count() or 1, mem["MemAvailable"] / 1_048_576, fleet_workers())
 
 
-def decide(running, ready, box, cap=CAP):
+def decide(running, ready, box, cap=CAP, reservations=0):
     cap = min(cap, CAP)
     room = cap - running
     if room <= 0:
@@ -84,7 +86,8 @@ def decide(running, ready, box, cap=CAP):
     cpu_slots = max(0, floor((BUSY_TARGET - box.busy) * box.cores / CORES_PER_WORKER))
     mem_slots = max(0, floor((box.mem_avail_gb - MEM_MIN_GB) / PER_WORKER_GB))
     fleet_max = box.cores * 2
-    fleet_slots = max(0, fleet_max - box.fleet_workers)
+    workers = box.fleet_workers + reservations
+    fleet_slots = max(0, fleet_max - workers)
     memory_reason = (f"memory low ({box.mem_avail_gb:.0f} GB free, min {MEM_MIN_GB})"
                      if box.mem_avail_gb < MEM_MIN_GB else f"memory allows {mem_slots}")
     limits = (
@@ -92,12 +95,34 @@ def decide(running, ready, box, cap=CAP):
         (ready, f"only {ready} ready ticket(s)"),
         (cpu_slots, f"CPU allows {cpu_slots} (busy {box.busy:.0%})"),
         (mem_slots, memory_reason),
-        (fleet_slots, f"server holds {box.fleet_workers} workers (max {fleet_max})"),
+        (fleet_slots, f"server holds {workers} workers (max {fleet_max})"),
     )
     return min(limits, key=lambda limit: limit[0])
 
 
+def reserve(running, ready, cap=CAP, state_dir=None):
+    state_dir = Path(state_dir) if state_dir is not None else Path.home() / ".cache/slots"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with (state_dir / "lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        snapshot = box()
+        now = time.time()
+        reservations_file = state_dir / "reservations"
+        try:
+            reservations = [float(epoch) for epoch in reservations_file.read_text().splitlines()]
+        except FileNotFoundError:
+            reservations = []
+        reservations = [epoch for epoch in reservations if now - epoch < RESERVATION_SECONDS]
+        k, why = decide(running, ready, snapshot, cap, len(reservations))
+        reservations.extend([now] * k)
+        reservations_file.write_text("".join(f"{epoch}\n" for epoch in reservations))
+        return snapshot, k, why
+
+
 def self_test():
+    from tempfile import TemporaryDirectory
+    from unittest.mock import Mock, patch
+
     idle = Box(0.0, 18, 70, 0)
     assert decide(0, 20, idle) == (10, "")
     assert decide(4, 20, idle) == (6, "")
@@ -121,22 +146,47 @@ def self_test():
         ["/usr/bin/codex", "exec", "task"],
         ["node", "/opt/codex/bin/codex.js", "exec", "task"],
         ["claude", "--print", "task"],
+        ["/home/valentin/.local/bin/claude", "-p", "--model", "opus", "--effort", "high",
+         "--permission-mode", "bypassPermissions", "--output-format", "text",
+         "--disallowedTools", "Agent", "Task", "--session-id", "worker-id"],
+        ["claude", "--print", "--session-id", "worker-id"],
+        ["claude", "--print", "--session-id=worker-id"],
+        ["claude", "--print", "--resume", "worker-id"],
+        ["claude", "--print", "--resume=worker-id"],
         ["node", "/opt/@anthropic-ai/claude-code/cli.js", "--print", "task"],
+        ["node", "/opt/@anthropic-ai/claude-code/cli.js", "-p", "--session-id", "worker-id"],
+        ["/home/valentin/.local/bin/hax", "--provider=codex", "--model=gpt-6.1-sol",
+         "--effort=high", "--no-session", "-p"],
+        ["/home/valentin/.local/bin/hax", "--provider=opencode-go", "--model=glm-5",
+         "--effort=high", "--no-session", "-p"],
         ["cursor-agent", "-p", "task"],
         ["pi", "--print", "task"],
     ):
         assert is_worker(argv), argv
     for argv in (
         [], ["codex"], ["claude"],
-        ["claude", "--print", "--session-id", "chat"],
-        ["claude", "--print", "--session-id=chat"],
-        ["claude", "--print", "--resume", "chat"],
-        ["claude", "--print", "--resume=chat"],
+        ["claude", "--session-id", "chat"],
+        ["claude", "--resume", "chat"],
+        ["hax", "--provider=codex"],
+        ["python3", "fleet/slots", "--running", "0", "--ready", "10"],
+        ["fleet/slots", "--running", "0", "--ready", "10"],
         ["bash", "-c", "codex exec task"],
         ["python3", "task.py", "cursor-agent"],
         ["pi-server", "--print"],
     ):
         assert not is_worker(argv), argv
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.0, 18, 70, 35))):
+            with patch("time.time", return_value=1000):
+                grants = [reserve(0, 10, state_dir=state_dir)[1] for _ in range(4)]
+            assert grants == [1, 0, 0, 0], grants
+            reservations_file = Path(state_dir) / "reservations"
+            assert reservations_file.read_text().splitlines() == ["1000.0"]
+            with patch("time.time", return_value=1119):
+                assert reserve(0, 10, state_dir=state_dir)[1] == 0
+            with patch("time.time", return_value=1120):
+                assert reserve(0, 10, state_dir=state_dir)[1] == 1
+            assert reservations_file.read_text().splitlines() == ["1120"]
     print("slots self-test ok")
 
 
@@ -154,10 +204,9 @@ def main(argv):
         parser.error("--running and --ready are required")
     if min(args.running, args.ready, args.cap) < 0:
         parser.error("--running, --ready and --cap must be nonnegative")
-    snapshot = box()
+    snapshot, k, why = reserve(args.running, args.ready, args.cap)
     if args.why:
         print(snapshot, file=sys.stderr)
-    k, why = decide(args.running, args.ready, snapshot, args.cap)
     print(f"start {k}" + (f": {why}" if why else ""))
 
 
