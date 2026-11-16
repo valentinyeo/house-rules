@@ -29,7 +29,7 @@ def box():
     with open("/proc/stat") as f:
         after = list(map(int, f.readline().split()[1:9]))
     delta = [end - start for start, end in zip(before, after)]
-    busy = 1 - (delta[3] + delta[4]) / sum(delta)
+    busy = 1 - (delta[3] + delta[4]) / (sum(delta) or 1)
     with open("/proc/meminfo") as f:
         mem = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in f)}
     return busy, mem["MemAvailable"] / 1_048_576
