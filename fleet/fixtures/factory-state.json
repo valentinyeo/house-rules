@@ -1,0 +1,502 @@
+{
+  "processes": [
+    [
+      10,
+      1,
+      "claude"
+    ],
+    [
+      11,
+      10,
+      "codex exec run"
+    ],
+    [
+      12,
+      11,
+      "claude --print task"
+    ],
+    [
+      13,
+      10,
+      "bash"
+    ],
+    [
+      14,
+      13,
+      "cursor-agent task"
+    ],
+    [
+      15,
+      1,
+      "pi --mode rpc"
+    ],
+    [
+      16,
+      1,
+      "bash -c codex exec run"
+    ],
+    [
+      17,
+      1,
+      "claude -p task"
+    ]
+  ],
+  "transcript": [
+    {
+      "message": {
+        "model": "old-model"
+      }
+    },
+    {
+      "turnOrigin": "scheduled",
+      "timestamp": "2026-11-16T11:45:00Z"
+    },
+    {
+      "model": "latest-model"
+    }
+  ],
+  "roster": [
+    {
+      "name": "A",
+      "kind": "lead",
+      "tmux": "live-a",
+      "board": "2060",
+      "view": "view-a",
+      "repo": "owner/app",
+      "cwd": "/fixture/app",
+      "workers": 5,
+      "workers_by": "Valentin 2026-11-16"
+    },
+    {
+      "name": "B",
+      "kind": "solo-dev",
+      "board": "2060",
+      "view": "view-b",
+      "repo": "owner/app",
+      "cwd": "/fixture/other"
+    },
+    {
+      "name": "Unscoped",
+      "kind": "view-lead",
+      "board": "2060"
+    }
+  ],
+  "boards": {
+    "2060": [
+      {
+        "id": "0",
+        "sectionIsDone": true,
+        "updatedAt": "2026-11-16T11:30:00Z",
+        "labels": [
+          {
+            "id": "a"
+          }
+        ]
+      },
+      {
+        "id": "1",
+        "sectionIsDone": true,
+        "updatedAt": "2026-11-16T10:30:00Z",
+        "labels": [
+          {
+            "id": "a"
+          }
+        ]
+      },
+      {
+        "id": "2",
+        "sectionIsDone": true,
+        "updatedAt": "2026-11-16T01:30:00Z",
+        "labels": [
+          {
+            "id": "a"
+          }
+        ]
+      },
+      {
+        "id": "left-a",
+        "sectionIsDone": false,
+        "labels": [
+          {
+            "id": "a"
+          }
+        ]
+      },
+      {
+        "id": "left-b",
+        "sectionIsDone": false,
+        "labels": [
+          {
+            "id": "b"
+          }
+        ]
+      }
+    ]
+  },
+  "view": {
+    "view": {
+      "board_filters": {
+        "addedFilters": [
+          {
+            "type": "Labels",
+            "searchPayload": [
+              {
+                "id": "a"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "prs": [
+    {
+      "number": 1,
+      "statusCheckRollup": [
+        {
+          "conclusion": "SUCCESS"
+        }
+      ],
+      "comments": [
+        {
+          "body": "PASS"
+        }
+      ]
+    },
+    {
+      "number": 2,
+      "statusCheckRollup": [
+        {
+          "conclusion": "FAILURE"
+        }
+      ],
+      "comments": [
+        {
+          "body": "PASS+NOTES: reviewed"
+        }
+      ]
+    },
+    {
+      "number": 3,
+      "statusCheckRollup": [
+        {
+          "state": "ERROR"
+        }
+      ],
+      "comments": [
+        {
+          "body": "FAIL"
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "statusCheckRollup": [],
+      "comments": []
+    },
+    {
+      "number": 5,
+      "statusCheckRollup": [],
+      "comments": [
+        {
+          "body": "**PASS**"
+        }
+      ]
+    },
+    {
+      "number": 6,
+      "statusCheckRollup": [],
+      "comments": [
+        {
+          "body": "Verdict: PASS"
+        }
+      ]
+    },
+    {
+      "number": 7,
+      "statusCheckRollup": [],
+      "comments": [
+        {
+          "body": "### PASS+NOTES"
+        }
+      ]
+    }
+  ],
+  "cwd": {
+    "11": "/fixture/app",
+    "12": "/fixture/app",
+    "14": "/fixture/app",
+    "17": "/fixture/other"
+  },
+  "saved_views": [
+    {
+      "id": "unrelated",
+      "title": "Other",
+      "slug": "other"
+    },
+    {
+      "id": "82d368d4-a164-49e4-abfa-783cff950aa8",
+      "title": "poteto-2-advisor",
+      "slug": "poteto-2-advisor"
+    }
+  ],
+  "reparented_workers": [
+    {
+      "pid": 100,
+      "ppid": 1,
+      "command": "hax task https://app.hypertask.ai/detail/project-2060/2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 300,
+      "ppid": 900,
+      "command": "timeout 300 hax task https://app.hypertask.ai/detail/project-2060/2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 101,
+      "ppid": 900,
+      "command": "codex exec task YPER4-2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 301,
+      "ppid": 900,
+      "command": "timeout 300 codex exec task YPER4-2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 102,
+      "ppid": 1,
+      "command": "pi -p task https://app.hypertask.ai/detail/project-2060/2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 302,
+      "ppid": 900,
+      "command": "timeout 300 pi -p task https://app.hypertask.ai/detail/project-2060/2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 103,
+      "ppid": 900,
+      "command": "cursor-agent task YPER4-2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 303,
+      "ppid": 900,
+      "command": "timeout 300 cursor-agent task YPER4-2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 104,
+      "ppid": 1,
+      "command": "claude -p task https://app.hypertask.ai/detail/project-2060/2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 304,
+      "ppid": 900,
+      "command": "timeout 300 claude -p task https://app.hypertask.ai/detail/project-2060/2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 105,
+      "ppid": 900,
+      "command": "hax task YPER4-2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 305,
+      "ppid": 900,
+      "command": "timeout 300 hax task YPER4-2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 106,
+      "ppid": 1,
+      "command": "codex exec task https://app.hypertask.ai/detail/project-2060/2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 306,
+      "ppid": 900,
+      "command": "timeout 300 codex exec task https://app.hypertask.ai/detail/project-2060/2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 107,
+      "ppid": 900,
+      "command": "pi -p task YPER4-2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 307,
+      "ppid": 900,
+      "command": "timeout 300 pi -p task YPER4-2551",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 108,
+      "ppid": 1,
+      "command": "cursor-agent task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 308,
+      "ppid": 900,
+      "command": "timeout 300 cursor-agent task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 109,
+      "ppid": 900,
+      "command": "claude -p task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 309,
+      "ppid": 900,
+      "command": "timeout 300 claude -p task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 110,
+      "ppid": 1,
+      "command": "hax task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 310,
+      "ppid": 900,
+      "command": "timeout 300 hax task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 111,
+      "ppid": 900,
+      "command": "codex exec task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 311,
+      "ppid": 900,
+      "command": "timeout 300 codex exec task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 112,
+      "ppid": 1,
+      "command": "pi -p task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 312,
+      "ppid": 900,
+      "command": "timeout 300 pi -p task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 113,
+      "ppid": 900,
+      "command": "cursor-agent task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 313,
+      "ppid": 900,
+      "command": "timeout 300 cursor-agent task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 114,
+      "ppid": 1,
+      "command": "claude -p task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 314,
+      "ppid": 900,
+      "command": "timeout 300 claude -p task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 115,
+      "ppid": 900,
+      "command": "hax task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 315,
+      "ppid": 900,
+      "command": "timeout 300 hax task",
+      "cwd": "/fixture/other"
+    },
+    {
+      "pid": 116,
+      "ppid": 1,
+      "command": "codex exec task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 316,
+      "ppid": 900,
+      "command": "timeout 300 codex exec task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 117,
+      "ppid": 900,
+      "command": "pi -p task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 317,
+      "ppid": 900,
+      "command": "timeout 300 pi -p task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 118,
+      "ppid": 1,
+      "command": "cursor-agent task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 318,
+      "ppid": 900,
+      "command": "timeout 300 cursor-agent task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 119,
+      "ppid": 900,
+      "command": "claude -p task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 319,
+      "ppid": 900,
+      "command": "timeout 300 claude -p task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 120,
+      "ppid": 1,
+      "command": "hax task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 320,
+      "ppid": 900,
+      "command": "timeout 300 hax task",
+      "cwd": "/unowned"
+    },
+    {
+      "pid": 900,
+      "ppid": 1,
+      "command": "tmux term-5bec257"
+    }
+  ]
+}
