@@ -127,13 +127,7 @@ def next_ticket(tickets, login, blocked=open_blocker, take=TAKE):
     return None
 
 
-def newest_transcript(cwd):
-    files = (HOME / ".claude/projects" / cwd.replace("/", "-").replace(".", "-")).glob("*.jsonl")
-    newest = max(files, key=lambda f: f.stat().st_mtime, default=None)
-    return newest.stem if newest else None
-
-
-def tmux_transcript(name, cwd):
+def tmux_transcript(name):
     sessions = []
     for path in (HOME / ".claude/sessions").glob("*.json"):
         try:
@@ -154,15 +148,13 @@ def tmux_transcript(name, cwd):
                 continue
             sessions.append(session)
     newest = max(sessions, key=lambda s: s.get("updatedAt", 0), default=None)
-    return newest["sessionId"] if newest else newest_transcript(cwd)
+    return newest["sessionId"] if newest else None
 
 
-def transcript_age(sid=None, cwd=None, now=None):
+def transcript_age(sid=None, now=None):
     """Seconds since the session last wrote its transcript; None when no transcript is found."""
     now = time.time() if now is None else now
     projects = HOME / ".claude/projects"
-    if not sid and cwd:
-        sid = newest_transcript(cwd)
     if sid:
         files = list(projects.glob(f"*/{sid}.jsonl"))
     else:
@@ -190,7 +182,7 @@ def session_of(row, chats, panes):
         return None
     p = panes.get(row["name"])
     if p and p["harness"] == "claude":
-        return {"via": "tmux", "key": row["name"], "cwd": p["cwd"], "state": p["state"], "age": transcript_age(sid=tmux_transcript(row["name"], p["cwd"]))}
+        return {"via": "tmux", "key": row["name"], "cwd": p["cwd"], "state": p["state"], "age": transcript_age(sid=tmux_transcript(row["name"]))}
     named = [c for c in chats.values() if c.get("name") and c["name"].casefold() == (row.get("multibot") or "").casefold()]
     if len(named) == 1:
         c = named[0]
@@ -264,7 +256,10 @@ def loop_watch(chats, panes, state, now, woken=frozenset()):
         if session and session["via"] == "live":
             session["transcript"] = chats[session["key"]].get("transcript") or session["sid"]
         elif session and session["via"] == "tmux":
-            session["transcript"] = tmux_transcript(session["key"], session["cwd"])
+            session["transcript"] = tmux_transcript(session["key"])
+            if session["transcript"] is None:
+                log(f"{row['name']} loop: skip, no live session record for tmux {session['key']}; cannot tell")
+                continue
         fire = last_loop_fire(session["transcript"]) if session and session.get("transcript") else None
         key, ikey = "loop:" + row["name"], "identity:" + row["name"]
         nudges = [] if fire and now - fire < LOOP_GAP else [t for t in state.get(key, []) if not fire or t > fire]
@@ -437,7 +432,7 @@ def self_test():
     assert identity_gap("Matt Live Stream", exists=lambda t: t in have), "a chat without its own login must be told (16 Nov audit)"
     assert identity_gap(None), "a tab with no name has no identity"
     from tempfile import TemporaryDirectory
-    from unittest.mock import patch
+    from unittest.mock import Mock, patch
 
     with TemporaryDirectory() as home:
         project = Path(home) / ".claude/projects/-tmp-loop-watch-project"
@@ -470,10 +465,18 @@ def self_test():
             assert "postbox loop: ok, loop fired 10 min ago" in logs, f"missing sessionId must be skipped: {logs}"
             missing_session.unlink()
             session.unlink()
-            os.utime(older, (now + 1, now + 1))
+            newest.write_text(older.read_text())
+            (sessions / "other.json").write_text(json.dumps({"tmux": "other:@1.%1", "sessionId": "newest",
+                                                           "pid": os.getpid(), "updatedAt": now + 3}))
+            panes["other"] = dict(panes["postbox"])
             logs.clear()
-            loop_watch({}, panes, {}, now)
-            assert "postbox loop: ok, loop fired 10 min ago" in logs, f"tmux transcript fallback must still work: {logs}"
+            state = {"loop:postbox": [now - 1200]}
+            sent = Mock()
+            with patch.dict(globals(), DRY_RUN=False, STATE=Path(home) / "state.json", send=sent):
+                loop_watch({}, panes, state, now)
+                sent.assert_not_called()
+            assert logs == ["postbox loop: skip, no live session record for tmux postbox; cannot tell"], logs
+            assert state == {"loop:postbox": [now - 1200]}, "unknown transcript must leave nudges unchanged"
     print("solo-wake self-test ok")
 
 
