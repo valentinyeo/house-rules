@@ -16,6 +16,11 @@ Sessions come in two shapes:
 - Plain tmux Claude sessions (roster "name" is the tmux session): busy or idle from session-list; the wake goes
   through session-say.
 
+Loop watch (every orchestrator row: chief, lead, solo-dev): the chat's current transcript must show a scheduled turn
+(turnOrigin "scheduled", fired by /loop or CronCreate) in the last 45 minutes. A chat's own report is not proof. When
+none shows and the chat is idle or stopped, send one arm-your-loop message (one per 30 minutes); after two unanswered,
+log ESCALATE for Chief Of Staff.
+
 Usage: solo-wake [--dry-run] | --self-test
 Log: ~/.local/state/fleet-switch/log.txt. State: ~/.local/state/fleet-switch/solo-wake.json.
 """
@@ -39,6 +44,11 @@ QUIET = 15 * 60  # a session that wrote to its transcript this recently is mid-c
 PRIORITY = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 TAKE = {"Doing": 0, "AI Review": 0, "Todo": 1}  # own work in flight first, then the queue
 DRY_RUN = "--dry-run" in sys.argv
+LOOP_GAP = 45 * 60  # a 30-minute heartbeat plus the scheduler's jitter
+LOOP_KINDS = ("chief", "lead", "solo-dev")
+LOOP_MESSAGE = ("Your drain loop is not running: this chat shows no scheduled turn in 45 minutes. Arm it now per the "
+                "valentin-mode Drain rule (/loop or CronCreate, exit condition: no ticket you can move), run the Drain "
+                "check, fix what it finds, and reply with its one line.")
 
 sys.path.insert(0, str(HERE.parent / "skills/hypertask-triage/scripts"))
 sys.path.insert(0, str(HERE))
@@ -156,6 +166,62 @@ def session_of(row, chats, panes):
     return None
 
 
+def last_loop_fire(transcript_sid, tail=3_000_000):
+    """Epoch of the newest scheduled turn in the chat's current transcript, or None."""
+    for f in (HOME / ".claude/projects").glob(f"*/{transcript_sid}.jsonl"):
+        with open(f, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - tail))
+            lines = fh.read().decode(errors="ignore").splitlines()
+        for line in reversed(lines):
+            if '"turnOrigin":"scheduled"' not in line:
+                continue
+            try:
+                stamp = json.loads(line)["timestamp"]
+            except (ValueError, KeyError):
+                continue
+            return time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+    return None
+
+
+def loop_verdict(session, last_fire, nudges, now):
+    """("ok"|"arm"|"skip"|"escalate", why) for one orchestrator chat. Pure. nudges = [epoch, ...] since the last fire."""
+    if session is None:
+        return "skip", "session not found; Chief Of Staff: restart it or fix its roster row"
+    if last_fire and now - last_fire < LOOP_GAP:
+        return "ok", f"loop fired {int((now - last_fire) // 60)} min ago"
+    if len(nudges) >= 2:
+        return "escalate", f"no loop after {len(nudges)} arm messages; Chief Of Staff: fix it in the chat"
+    if session["state"] not in ("idle", "stopped"):
+        return "skip", f"no loop, busy ({session['state']}); next run"
+    if nudges and now - nudges[-1] < COOLDOWN:
+        return "skip", f"no loop, asked {int((now - nudges[-1]) // 60)} min ago"
+    return "arm", "no scheduled turn in 45 min"
+
+
+def loop_watch(chats, panes, state, now):
+    for row in roster.rows():
+        if row.get("kind") not in LOOP_KINDS or not row.get("tmux"):
+            continue
+        session = session_of(row, chats, panes)
+        if session and session["via"] == "live":
+            session["transcript"] = chats[session["key"]].get("transcript") or session["sid"]
+        fire = last_loop_fire(session["transcript"]) if session and session.get("transcript") else None
+        key = "loop:" + row["name"]
+        nudges = [] if fire and now - fire < LOOP_GAP else [t for t in state.get(key, []) if not fire or t > fire]
+        verdict, why = loop_verdict(session, fire, nudges, now)
+        who = f"{row['name']} loop"
+        if verdict != "arm" or DRY_RUN:
+            state[key] = nudges
+            log(f"{who}: {'would arm' if verdict == 'arm' else verdict}, {why}")
+            continue
+        ok, detail = send(session, LOOP_MESSAGE)
+        state[key] = nudges + ([now] if ok else [])
+        log(f"{who}: {'asked to arm' if ok else 'arm message failed for'} {session['key']} ({detail})")
+    if not DRY_RUN:
+        STATE.write_text(json.dumps(state))
+
+
 def decide(row, session, ticket, last_wake, now):
     """One verdict per solo dev: ("wake", why) or ("skip", why). Pure."""
     if session is None:
@@ -241,6 +307,7 @@ def main():
             state[row["name"]] = now
             STATE.write_text(json.dumps(state))
         log(f"{who}: {'woke' if ok else 'wake failed for'} {session['key']} with {why} via {session['via']} ({detail})")
+    loop_watch(chats, panes, state, now)
 
 
 def self_test():
@@ -286,6 +353,15 @@ def self_test():
     assert scope_of({"board": "15", "view": "e6753c48", "view_name": "Design pass"})["view"] == "e6753c48"
     assert scope_of({"board": "2060", "view": "2060/postbox"})["where"] == "view 2060/postbox"
     assert scope_of({"board": None, "view": None}) is None, "no board, no scope"
+    live = {"via": "live", "key": "live-1", "sid": "s", "state": "idle", "age": 3600}
+    assert loop_verdict(live, now - 10 * 60, [], now)[0] == "ok", "a loop that fired 10 min ago is healthy"
+    assert loop_verdict(live, None, [], now)[0] == "arm", "a chat that never looped must be asked to arm (Pecunia, 16 Nov)"
+    assert loop_verdict(live, now - 50 * 60, [], now)[0] == "arm", "a loop silent for 50 min is dead"
+    assert loop_verdict(dict(live, state="busy"), None, [], now)[0] == "skip", "never interrupt a busy chat"
+    assert loop_verdict(live, None, [now - 10 * 60], now)[0] == "skip", "one arm message per 30 min"
+    assert loop_verdict(live, None, [now - 90 * 60, now - 40 * 60], now)[0] == "escalate", "two ignored asks escalate"
+    assert loop_verdict(None, None, [], now)[0] == "skip"
+    assert "Drain check" in LOOP_MESSAGE and "/loop" in LOOP_MESSAGE
     print("solo-wake self-test ok")
 
 
