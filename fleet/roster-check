@@ -47,8 +47,18 @@ def announced_sessions(announced, live_tmux):
             for a in announced if a.get("tmux") in live_tmux and a.get("kind") in (None, "unknown")]
 
 
+def worker_errors(rows):
+    return [f"roster.json row {row.get('name', index)}: workers requires workers_by starting Valentin"
+            for index, row in enumerate(rows)
+            if "workers" in row and not str(row.get("workers_by", "")).startswith("Valentin")]
+
+
 def main():
     static, announced = roster.static_rows(), roster.announced()
+    errors = worker_errors(static)
+    if errors:
+        print("\n".join(errors))
+        sys.exit(1)
     sessions = roster.live_sessions()
     seen = {s["tmux"] for s in sessions}
     alive = roster._mp_send().tmux_names() or set()
@@ -81,6 +91,17 @@ def main():
 
 
 def self_test():
+    assert worker_errors([{"name": "A", "workers": 5}]) == [
+        "roster.json row A: workers requires workers_by starting Valentin"]
+    assert worker_errors([{"name": "A", "workers": 5, "workers_by": "agent"}])
+    assert not worker_errors([{"name": "A", "workers": 5, "workers_by": "Valentin 2026-11-16"},
+                              {"name": "B"}])
+    actual = roster.static_rows()
+    assert not worker_errors(actual)
+    assert {r["name"]: r["workers"] for r in actual if "workers" in r} == {
+        "HT Product Lead": 10, "Multi Bot Opus Runner": 10, "multiprompt-android": 5,
+        "Pecunia": 5, "postbox": 5, "poteto-2-advisor": 10}
+    assert all(r["workers_by"] == "Valentin 2026-11-16" for r in actual if "workers" in r)
     static = [{"name": "postbox"}, {"name": "ht-or-runner-{n}"},
               {"name": "Matt Live Stream", "multibot": "Matt Live Stream", "tmux": "live-1d21840"}]
     s = lambda t, name=None: {"tmux": t, "name": name, "harness": "claude"}

@@ -12,7 +12,10 @@
    "login": "Chief Of Staff",
    "board": "15,2060,11514",
    "status": "live",
-   "notes": "Poteto takes Chief Of Staff at the switch. Runs the factory only; no app contact. Owns board-health on every board. Reuses the Chief Of Staff login."
+   "notes": "Poteto takes Chief Of Staff at the switch. Runs the factory only; no app contact. Owns board-health on every board. Reuses the Chief Of Staff login.",
+   "workers": 10,
+   "workers_by": "Valentin 2026-11-16",
+   "cwd": "~/projects/poteto-2-advisor"
   },
   {
    "name": "HT Product Lead",
@@ -28,7 +31,11 @@
     "expert",
     "solo-dev"
    ],
-   "priority": 1
+   "priority": 1,
+   "workers": 10,
+   "workers_by": "Valentin 2026-11-16",
+   "repo": "hypertask-ai/hypertask",
+   "cwd": "~/projects/hypertask"
   },
   {
    "name": "Infra Lead",
@@ -58,7 +65,8 @@
    "login": "Mini Boss CEO",
    "board": "2060",
    "status": "live",
-   "notes": "Contact for smaller Software Factory apps. Owns no runners and no board health. One notes file per app; reads only the one it needs. Session name inferred from cwd ~/projects/software-factory. Confirmed by claude agents: Mini Boss CEO in tmux projects."
+   "notes": "Contact for smaller Software Factory apps. Owns no runners and no board health. One notes file per app; reads only the one it needs. Session name inferred from cwd ~/projects/software-factory. Confirmed by claude agents: Mini Boss CEO in tmux projects.",
+   "cwd": "~/projects/software-factory"
   },
   {
    "name": "ht-support-lead",
@@ -82,7 +90,9 @@
    "role_skill": "design-lead",
    "login": "HT Design Lead",
    "board": "15",
-   "status": "unknown"
+   "status": "unknown",
+   "repo": "hypertask-ai/hypertask",
+   "cwd": "~/projects/hypertask"
   },
   {
    "name": "SF Design Lead",
@@ -110,7 +120,7 @@
    "role_skill": "/solo-dev",
    "login": "Multi Bot Opus Lead",
    "board": "2060",
-   "view": "2060/multi-bot",
+   "view": "6334f64c-8a04-449d-a7ad-7fcb5be23b4a",
    "app": "multiprompt",
    "fallback": "Mini Boss CEO",
    "status": "unknown",
@@ -119,7 +129,10 @@
     "AI Review": 0
    },
    "notes": "Ticket writer first (Valentin 2026-11-10: \"should write more tickets and do less himself we are overburning claude\"; \"he can still do some stuff the hard or immediate stuff himself but runners should work on multibot too\"). Turn what Valentin asks into tickets and leave them unassigned in Todo: the runner pool builds them. Build yourself only hard tickets (brain-hard or brain-extra-hard) or immediate ones Valentin is waiting on live; assign yourself first. solo-wake wakes you only for your own Doing and AI Review tickets, never to drain Todo.",
-   "priority": 2
+   "priority": 2,
+   "workers": 10,
+   "workers_by": "Valentin 2026-11-16",
+   "repo": "valentinyeo/multiprompt"
   },
   {
    "name": "multiprompt-android",
@@ -128,11 +141,14 @@
    "role_skill": "/solo-dev",
    "login": "Multiprompt Android Dev",
    "board": "2060",
-   "view": "2060/multi-bot-android",
+   "view": "daaa8d18-da52-4df0-883e-481e8fcce3a1",
    "app": "multiprompt-android",
    "fallback": "Mini Boss CEO",
    "status": "live",
-   "notes": "Solo dev (Valentin 2026-11-07: keep solo devs). Builds and ships its own app's tickets live, while Valentin chats with it. Assign yourself before you start a ticket; runners never take a ticket a solo dev holds. Hand a ticket to the runner pool only by leaving it unassigned in Todo."
+   "notes": "Solo dev (Valentin 2026-11-07: keep solo devs). Builds and ships its own app's tickets live, while Valentin chats with it. Assign yourself before you start a ticket; runners never take a ticket a solo dev holds. Hand a ticket to the runner pool only by leaving it unassigned in Todo.",
+   "workers": 5,
+   "workers_by": "Valentin 2026-11-16",
+   "repo": "valentinyeo/multiprompt-android"
   },
   {
    "name": "postbox",
@@ -141,11 +157,14 @@
    "role_skill": "/solo-dev",
    "login": "Postbox Dev",
    "board": "2060",
-   "view": "2060/postbox",
+   "view": "2c143454-003b-4384-b261-c755f43a2d90",
    "app": "postbox",
    "fallback": "Mini Boss CEO",
    "status": "live",
-   "notes": "Solo dev (Valentin 2026-11-07: keep solo devs). Builds and ships its own app's tickets live, while Valentin chats with it. Assign yourself before you start a ticket; runners never take a ticket a solo dev holds. Hand a ticket to the runner pool only by leaving it unassigned in Todo."
+   "notes": "Solo dev (Valentin 2026-11-07: keep solo devs). Builds and ships its own app's tickets live, while Valentin chats with it. Assign yourself before you start a ticket; runners never take a ticket a solo dev holds. Hand a ticket to the runner pool only by leaving it unassigned in Todo.",
+   "workers": 5,
+   "workers_by": "Valentin 2026-11-16",
+   "repo": "valentinyeo/postbox"
   },
   {
    "name": "Pecunia",
@@ -154,11 +173,15 @@
    "role_skill": "/solo-dev",
    "login": "Ratstack Transitioner",
    "board": "2060",
-   "view": "2060/pecunia",
+   "view": "82886927-74e7-419d-a4f5-313742424b41",
    "tmux": "live-10707105",
    "app": "pecunia",
    "status": "live",
-   "notes": "Pecunia Ratstack Transitioner owns the Pecunia view, not Software Factory Lead (Valentin, 2026-11-16)."
+   "notes": "Pecunia Ratstack Transitioner owns the Pecunia view, not Software Factory Lead (Valentin, 2026-11-16).",
+   "workers": 5,
+   "workers_by": "Valentin 2026-11-16",
+   "repo": "valentinyeo/pecunia-oss",
+   "cwd": "~/projects/pecunia"
   },
   {
    "name": "chromescribe",
@@ -170,7 +193,8 @@
    "app": "chromescribe",
    "fallback": "Mini Boss CEO",
    "status": "dead",
-   "notes": "Empty shell, no agent. Mini Boss covers it."
+   "notes": "Empty shell, no agent. Mini Boss covers it.",
+   "repo": "valentinyeo/chromescribe"
   },
   {
    "name": "screencast2-go",
@@ -182,7 +206,8 @@
    "app": "screencast2",
    "fallback": "Mini Boss CEO",
    "status": "dead",
-   "notes": "Empty shell, no agent. Mini Boss covers it."
+   "notes": "Empty shell, no agent. Mini Boss covers it.",
+   "repo": "valentinyeo/screencast2-go"
   },
   {
    "name": "token-ladder",
@@ -194,7 +219,8 @@
    "app": "token-ladder",
    "fallback": "Mini Boss CEO",
    "status": "dead",
-   "notes": "No session. Mini Boss covers it."
+   "notes": "No session. Mini Boss covers it.",
+   "repo": "valentinyeo/token-ladder"
   },
   {
    "name": "upwork-auto-applier",
@@ -206,7 +232,8 @@
    "app": "upwork-auto-applier",
    "fallback": "Mini Boss CEO",
    "status": "live",
-   "notes": "Own board 8783, not a 2060 view."
+   "notes": "Own board 8783, not a 2060 view.",
+   "repo": "valentinyeo/upwork-auto-applier"
   },
   {
    "name": "ht-or-runner-{n}",
@@ -304,7 +331,9 @@
     "solo-dev",
     "expert",
     "designer"
-   ]
+   ],
+   "repo": "hypertask-ai/hypertask",
+   "cwd": "~/projects/hypertask"
   },
   {
    "name": "Speed Runner",
@@ -322,7 +351,8 @@
    "login": null,
    "board": null,
    "status": "live",
-   "notes": "Triage briefs, cwd ~/projects/triage. Outside the factory. Old tmux session triage is stale."
+   "notes": "Triage briefs, cwd ~/projects/triage. Outside the factory. Old tmux session triage is stale.",
+   "cwd": "~/projects/triage"
   },
   {
    "name": "shell-projects-mux0iinm",
@@ -348,7 +378,8 @@
    "login": "CRO consulting",
    "board": null,
    "status": "live",
-   "notes": "cwd ~/projects/claude-cro."
+   "notes": "cwd ~/projects/claude-cro.",
+   "cwd": "~/projects/claude-cro"
   },
   {
    "name": "Funeralprints",
@@ -395,7 +426,8 @@
    },
    "fallback": "Chief Of Staff",
    "status": "live",
-   "notes": "Client solo dev (Valentin 2026-11-09): Matt's Shopify work, cwd ~/projects/clickshades-theme, runs on our Claude subscription. Owns the whole board 12322 (Matt - EZYFIT and ClickShades), no view, no own login. solo-wake drains In Progress then Backlog; Waiting on Matt and Valentin Review are never woken for."
+   "notes": "Client solo dev (Valentin 2026-11-09): Matt's Shopify work, cwd ~/projects/clickshades-theme, runs on our Claude subscription. Owns the whole board 12322 (Matt - EZYFIT and ClickShades), no view, no own login. solo-wake drains In Progress then Backlog; Waiting on Matt and Valentin Review are never woken for.",
+   "cwd": "~/projects/clickshades-theme"
   },
   {
    "name": "Big Boss Man",
@@ -425,14 +457,16 @@
    "kind": "outside",
    "role_skill": null,
    "status": "live",
-   "notes": "Claude session projects-a6 in ~/projects; purpose unknown. Not in factory until identified."
+   "notes": "Claude session projects-a6 in ~/projects; purpose unknown. Not in factory until identified.",
+   "cwd": "~/projects"
   },
   {
    "name": "HT AGENT MANAGER",
    "kind": "outside",
    "role_skill": null,
    "status": "live",
-   "notes": "Two background Claude sessions in ~/projects/hypertasks, plus 'Drain ready for dev column with cloud code'. No pane; not reachable by session-say. Review after switch."
+   "notes": "Two background Claude sessions in ~/projects/hypertasks, plus 'Drain ready for dev column with cloud code'. No pane; not reachable by session-say. Review after switch.",
+   "cwd": "~/projects/hypertasks"
   }
  ],
  "cleanup": {

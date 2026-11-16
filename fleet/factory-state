@@ -1,0 +1,752 @@
+#!/usr/bin/env python3
+import argparse
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from zoneinfo import ZoneInfo
+
+HERE = Path(__file__).resolve().parent
+KINDS = {"chief", "lead", "view-lead", "solo-dev"}
+WINDOWS = (1, 3, 12)
+WORKER_PATTERNS = (
+    re.compile(r"^(?:\S*/)?hax(?:\s|$)"),
+    re.compile(r"^(?:\S*/)?codex\s+exec(?:\s|$)"),
+    re.compile(r"^(?:\S*/)?claude\s+(?:.*\s)?(?:--print|-p)(?:\s|=|$)"),
+    re.compile(r"^(?:\S*/)?cursor-agent(?:\s|$)"),
+    re.compile(r"^(?:\S*/)?(?:pi|pi-agent)(?:\s|$)|^(?:\S*/)?node\s+\S*pi-coding-agent/\S*"),
+)
+
+
+@dataclass
+class Process:
+    ppid: int
+    command: str
+    cwd: str | None
+    worker: bool
+
+
+@dataclass
+class Orchestrator:
+    name: str
+    kind: str
+    board: str | None
+    view: str | None
+    live: bool
+    loop: str
+    loop_why: str
+    allowed: int
+    active: int | None
+    shipped: dict
+    left: int | None
+    repo: str | None = None
+    model: str = "?"
+    ranked: bool = False
+    process_why: str = "no live session"
+    prs: dict | None = None
+
+
+class Snapshot(list):
+    def __init__(self):
+        super().__init__()
+        self.server_workers = None
+        self.unattributed = None
+        self.boards = {}
+        self.failures = []
+        self.live_known = True
+        self.ticket_sets = {}
+        self.prs = {}
+        self.all_rows = True
+
+    def failed(self, source):
+        if source not in self.failures:
+            self.failures.append(source)
+
+
+def load_solo_wake():
+    loader = SourceFileLoader("solo_wake", str(HERE / "solo-wake"))
+    module = module_from_spec(spec_from_loader(loader.name, loader))
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+def processes(proc):
+    result = {}
+    for path in proc.iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
+            command = (path / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+            try:
+                cwd = str((path / "cwd").readlink())
+            except OSError:
+                cwd = None
+            result[int(path.name)] = Process(int(fields[1]), command, cwd,
+                                             any(p.search(command) for p in WORKER_PATTERNS))
+        except FileNotFoundError:
+            continue
+    return result
+
+
+def attribute_workers(tree, roster, row_tickets, home, scoped_boards=()):
+    assigned = {row["name"]: set() for row in roster}
+    unattributed = set()
+    ticket_rows = {}
+    for name, boards in row_tickets.items():
+        for board, tickets in boards.items():
+            for ticket in tickets:
+                keys = re.findall(r"project-\d+/[\w-]+", str(ticket.get("url") or ""))
+                if ticket.get("uniqueIndex") is not None:
+                    keys.append(f"project-{board}/{ticket['uniqueIndex']}")
+                keys.extend(str(ticket[k]) for k in ("ticketNumber", "ticketKey") if ticket.get(k))
+                for key in keys:
+                    ticket_rows.setdefault(key, {})[name] = (name, board) in scoped_boards
+    for pid, process in tree.items():
+        if not process.worker:
+            continue
+        references = set(re.findall(r"project-\d+/[\w-]+|\b[A-Z][A-Z0-9]*-\d+\b", process.command))
+        candidates = set()
+        for key in references:
+            owners = ticket_rows.get(key, {})
+            candidates.update({name for name, scoped in owners.items() if scoped} or owners)
+        if len(candidates) != 1:
+            eligible = [row for row in roster if not candidates or row["name"] in candidates]
+            exact = {row["name"] for row in eligible if process.cwd and row.get("cwd")
+                     and str(Path(str(row["cwd"]).replace("~/", str(home) + "/", 1)).resolve()) == process.cwd}
+            folders = {row["name"] for row in eligible if process.cwd and row.get("repo")
+                       and Path(process.cwd).name.casefold() == row["repo"].rsplit("/", 1)[-1].casefold()}
+            candidates = exact or folders
+        if len(candidates) == 1:
+            assigned[next(iter(candidates))].add(pid)
+        else:
+            unattributed.add(pid)
+    return assigned, unattributed
+
+
+def board_views(board, token, run=subprocess.run):
+    views, offset = [], 0
+    while True:
+        command = [hypertask(), "view", "list", "--project", str(board), "--limit", "100",
+                   "--offset", str(offset), "--json", "--token", token]
+        result = run(command, capture_output=True, text=True, timeout=120)
+        result.check_returncode()
+        data = json.loads(result.stdout)
+        page = data.get("views")
+        if not isinstance(page, list):
+            raise ValueError("missing views")
+        views.extend(page)
+        if len(views) >= data.get("total", len(views)) or not page:
+            return views
+        offset += len(page)
+
+
+def resolve_view(row, views):
+    names = {str(row.get(key) or "").casefold() for key in ("name", "login", "app", "multibot")}
+    names.discard("")
+    matches = {view["id"] for view in views
+               if any(str(view.get(key) or "").casefold() in names for key in ("title", "slug"))}
+    if len(matches) > 1:
+        raise ValueError(f"ambiguous view for {row['name']}")
+    return next(iter(matches), None)
+
+
+def session_records(home):
+    result = {}
+    directory = home / ".claude/sessions"
+    for path in directory.glob("*.json"):
+        record = json.loads(path.read_text())
+        if not isinstance(record, dict):
+            raise ValueError("invalid session record")
+        sid = record.get("sessionId")
+        if isinstance(sid, str):
+            result.setdefault(("sid", sid), []).append(record)
+        name = record.get("tmux")
+        if isinstance(name, str):
+            name = name.split(":", 1)[0]
+            result.setdefault(name, []).append(record)
+    return result
+
+
+def hypertask(home=None):
+    path = (Path.home() if home is None else home) / ".local/bin/hypertask"
+    return str(path) if path.is_file() else shutil.which("hypertask") or str(path)
+
+
+def board_tickets(board, token, run=subprocess.run):
+    tickets, offset = [], 0
+    while True:
+        command = [hypertask(), "task", "list", "--project", str(board), "--status", "Normal",
+                   "--limit", "100", "--offset", str(offset), "--json", "--token", token]
+        result = run(command, capture_output=True, text=True, timeout=120)
+        if result.returncode:
+            raise ValueError("task list failed")
+        data = json.loads(result.stdout)
+        page = data.get("tasks") if isinstance(data, dict) else None
+        if not isinstance(page, list):
+            raise ValueError("missing tasks")
+        tickets.extend(page)
+        if len(page) < 100:
+            return tickets
+        offset += 100
+
+
+def ticket_counts(tasks, now):
+    shipped, left = dict.fromkeys(WINDOWS, 0), 0
+    for task in tasks:
+        done = task.get("sectionIsDone")
+        if type(done) is not bool:
+            raise ValueError("missing sectionIsDone")
+        if not done:
+            left += 1
+            continue
+        updated = datetime.fromisoformat(task["updatedAt"].replace("Z", "+00:00"))
+        if updated.tzinfo is None:
+            raise ValueError("updatedAt has no timezone")
+        age = now.timestamp() - updated.timestamp()
+        for hours in WINDOWS:
+            shipped[hours] += int(0 <= age <= hours * 3600)
+    return shipped, left
+
+
+def read_token(home):
+    token = os.environ.get("HT_TOKEN")
+    if token is not None and len(token) < 4096 and Path(token).is_file():
+        token = Path(token).read_text().strip()
+    if token is None:
+        token = (home / ".config/hypertask-agents/credentials/sessions/poteto-agent-token").read_text().strip()
+    if not token:
+        raise ValueError("empty token")
+    return token
+
+
+def view_filter(view, token, run=subprocess.run):
+    result = run([hypertask(), "view", "get", view, "--json", "--token", token],
+                 capture_output=True, text=True, timeout=120)
+    result.check_returncode()
+    data = json.loads(result.stdout)
+    filters = data.get("view", data).get("board_filters")
+    if not isinstance(filters, dict) or not isinstance(filters.get("addedFilters"), list):
+        raise ValueError("missing view filter")
+    labels = set()
+    for item in filters["addedFilters"]:
+        if item.get("type") != "Labels":
+            raise ValueError("unsupported view filter")
+        payload = item.get("searchPayload")
+        if not isinstance(payload, list) or not payload or any("id" not in p for p in payload):
+            raise ValueError("invalid label filter")
+        labels.update(p["id"] for p in payload)
+    if not labels:
+        raise ValueError("view has no label filter")
+    return labels
+
+
+def pr_counts(repo, run=subprocess.run):
+    counts = {}
+    for checks in (None, "failure", "pending", "success"):
+        command = ["gh", "search", "prs", "--repo", repo, "--state", "open", "--json", "number", "--limit", "1000"]
+        if checks:
+            command.extend(["--checks", checks])
+        result = run(command, capture_output=True, text=True, timeout=120)
+        result.check_returncode()
+        prs = json.loads(result.stdout)
+        if not isinstance(prs, list) or len(prs) >= 1000:
+            raise ValueError("incomplete PR search")
+        counts[{None: "open", "failure": "red", "pending": "pending", "success": "green"}[checks]] = len(prs)
+    result = run(["gh", "pr", "list", "-R", repo, "--state", "open", "--json",
+                  "number,comments", "--limit", "1000"], capture_output=True, text=True, timeout=120)
+    result.check_returncode()
+    prs = json.loads(result.stdout)
+    if not isinstance(prs, list) or len(prs) >= 1000:
+        raise ValueError("incomplete PR comments")
+    counts["waiting"] = sum(not any(re.search(r"(?im)^\s*(?:\#{1,6}\s*)?(?:(?:verdict|pstack verifier)\s*:\s*)?(?:\*\*)?(?:PASS\+NOTES|PASS|FAIL)(?=\s|[:.,*]|$)", c["body"])
+                                    for c in pr["comments"]) for pr in prs)
+    return counts
+
+
+def transcript_model(home, sid):
+    model = "?"
+    for path in sorted((home / ".claude/projects").glob(f"*/{sid}.jsonl")) if sid else []:
+        with path.open(errors="replace") as transcript:
+            for line in transcript:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                message = record.get("message")
+                value = record.get("model") or (message.get("model") if isinstance(message, dict) else None)
+                if isinstance(value, str):
+                    model = value
+    return model
+
+
+def git_identity(run=subprocess.run):
+    root = run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    remote = run(["git", "remote", "get-url", "origin"], capture_output=True, text=True)
+    repo = remote.stdout.strip().removesuffix(".git")
+    repo = re.sub(r"^(?:https?://github.com/|git@github.com:|ssh://git@github.com/)", "", repo)
+    return root.stdout.strip() if root.returncode == 0 else "", repo if remote.returncode == 0 else ""
+
+
+def select_rows(rows, root, repo, all_rows=False, home=None, keys=()):
+    home = Path.home() if home is None else home
+    def path(value):
+        return str(Path(str(value).replace("~/", str(home) + "/", 1)).resolve()) if value else ""
+    if all_rows or path(root) == str((home / "projects/poteto-2-advisor").resolve()):
+        return rows, True
+    folder = Path(root).name.lower() if root else ""
+    def folders(row):
+        return {str(row.get("name") or "").lower(), str(row.get("repo") or "").rsplit("/", 1)[-1].lower()}
+    exact = [r for r in rows if root and path(r.get("cwd")) == path(root)]
+    matches = (exact or [r for r in rows if repo and r.get("repo") == repo]
+               or [r for r in rows if folder and folder in folders(r)])
+    if len(matches) > 1 and keys:
+        matches = [r for r in matches if any(r.get(k) in keys for k in ("name", "tmux", "multibot", "sid"))]
+    if len(matches) != 1:
+        raise ValueError("caller matches no unique roster row; use --all")
+    return matches, False
+
+
+def gather(solo, now, roster_path=HERE / "roster.json", home=None, proc=Path("/proc"), tasks=None,
+           views=None, prs=None, all_rows=True, identity=None, caller_keys=(), list_views=None):
+    home = Path.home() if home is None else home
+    snapshot = Snapshot()
+    snapshot.all_rows = all_rows
+    try:
+        roster = json.loads(roster_path.read_text())["rows"]
+        roster = [r for r in roster if r.get("kind") in KINDS and r.get("status") != "closed"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        snapshot.failed(f"roster: {error}")
+        return snapshot
+    try:
+        chats = solo.roster.hosted_chats()
+    except (OSError, ValueError, subprocess.SubprocessError, ImportError):
+        chats = {}
+        snapshot.live_known = False
+        snapshot.failed("live chats failed")
+    try:
+        panes = solo.tmux_states()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        panes = {}
+        snapshot.live_known = False
+        snapshot.failed("tmux sessions failed")
+    try:
+        tree = processes(proc)
+        snapshot.server_workers = sum(process.worker for process in tree.values())
+    except (OSError, ValueError, IndexError):
+        tree = None
+        snapshot.failed("/proc failed")
+    try:
+        records = session_records(home)
+    except (OSError, ValueError, TypeError):
+        records = None
+        snapshot.failed("session records failed")
+    if not all_rows and not caller_keys and tree is not None and records is not None:
+        ancestors, pid = set(), os.getpid()
+        while pid in tree and pid not in ancestors:
+            ancestors.add(pid)
+            pid = tree[pid].ppid
+        native = {r.get("sessionId") for group in records.values() for r in group if r.get("pid") in ancestors}
+        caller_keys = tuple(value for key, chat in chats.items()
+                            if chat.get("sid") in native or chat.get("transcript") in native
+                            for value in (key, chat.get("name")) if value)
+        caller_keys += tuple(r.get("tmux", "").split(":", 1)[0] for group in records.values()
+                             for r in group if r.get("pid") in ancestors)
+    try:
+        roster, snapshot.all_rows = select_rows(roster, *(identity or ("", "")), all_rows, home, caller_keys)
+    except ValueError as error:
+        snapshot.failed(str(error))
+        return snapshot
+    if tasks is None or views is None:
+        try:
+            token = read_token(home)
+            tasks = tasks or (lambda board: board_tickets(board, token))
+            views = views or (lambda view: view_filter(view, token))
+            list_views = list_views or (lambda board: board_views(board, token))
+        except (OSError, ValueError):
+            snapshot.failed("Hypertask token failed")
+    prs = prs or pr_counts
+    view_cache, board_view_cache, row_tickets, scoped_boards = {}, {}, {}, set()
+    for row in roster:
+        session, sid, loop, why, model = None, None, "unknown", "no transcript", "?"
+        try:
+            session = solo.session_of(row, chats, panes)
+            if session and session["via"] == "live":
+                sid = chats[session["key"]].get("transcript") or session.get("sid")
+            elif session:
+                sid = solo.tmux_transcript(session["key"])
+            model = transcript_model(home, sid)
+            if sid and list((home / ".claude/projects").glob(f"*/{sid}.jsonl")):
+                fire = solo.last_loop_fire(sid)
+                verdict, why = solo.loop_verdict(session, fire, [], now.timestamp())
+                loop = "on" if verdict == "ok" else "off"
+        except (OSError, ValueError, KeyError, TypeError):
+            why = "transcript failed"
+            snapshot.failed(f"transcript {row['name']} failed")
+        active = 0 if tree is not None else None
+        process_why = "ticket/cwd attribution" if tree is not None else "/proc unavailable"
+        boards = list(dict.fromkeys(b.strip() for b in str(row.get("board") or "").split(",") if b.strip()))
+        selected, good = [], bool(boards)
+        if not boards:
+            snapshot.failed(f"board {row['name']} missing")
+        view = row.get("view")
+        if view in solo.scopes.SCOPES:
+            view = solo.scopes.SCOPES[view].get("view")
+        resolved_view = view
+        for board in boards:
+            try:
+                board_view = view
+                if board == "2060" and not board_view:
+                    if board not in board_view_cache:
+                        board_view_cache[board] = list_views(board) if list_views else []
+                    board_view = resolve_view(row, board_view_cache[board])
+                    resolved_view = board_view
+                    if not board_view:
+                        snapshot.failed(f"{row['name']} has no view")
+                        good = False
+                        continue
+                if board not in snapshot.boards:
+                    snapshot.boards[board] = tasks(board)
+                tickets = snapshot.boards[board]
+                if board_view:
+                    scoped_boards.add((row["name"], board))
+                    if board_view not in view_cache:
+                        view_cache[board_view] = views(board_view)
+                    tickets = [t for t in tickets if solo.scopes.in_view(t, view_cache[board_view])]
+                selected.extend(tickets)
+                row_tickets.setdefault(row["name"], {})[board] = tickets
+                snapshot.ticket_sets.setdefault(board, {}).update({str(t.get("id", t.get("ticketNumber", json.dumps(t, sort_keys=True)))): t for t in tickets})
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                good = False
+                snapshot.failed(f"board {board} failed: {error}")
+        try:
+            shipped, left = ticket_counts(selected, now) if good else (dict.fromkeys(WINDOWS), None)
+        except (ValueError, KeyError, TypeError):
+            shipped, left = dict.fromkeys(WINDOWS), None
+            snapshot.failed(f"tickets {row['name']} failed")
+        repo = row.get("repo")
+        if repo and repo not in snapshot.prs:
+            try:
+                snapshot.prs[repo] = prs(repo)
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                snapshot.prs[repo] = None
+                snapshot.failed(f"PRs {repo} failed")
+        snapshot.append(Orchestrator(row["name"], row["kind"], row.get("board"), resolved_view,
+                                     session is not None, loop, why, row.get("workers", 2), active, shipped, left,
+                                     repo, model, str(row.get("workers_by", "")).startswith("Valentin"),
+                                     process_why, snapshot.prs.get(repo)))
+    if tree is not None:
+        assigned, unattributed = attribute_workers(tree, roster, row_tickets, home, scoped_boards)
+        snapshot.unattributed = len(unattributed)
+        for row in snapshot:
+            row.active = len(assigned[row.name])
+        assert sum(row.active for row in snapshot) + snapshot.unattributed == snapshot.server_workers
+    return snapshot
+
+
+def number(value):
+    return "?" if value is None else str(value)
+
+
+def total(values):
+    values = list(values)
+    return sum(values) if all(v is not None for v in values) else None
+
+
+def render(rows, now, why=False):
+    lines = []
+    if rows.all_rows:
+        good = bool(rows) and all(r.left is not None for r in rows)
+        tasks = [t for board in rows.ticket_sets.values() for t in board.values()]
+        shipped, left = ticket_counts(tasks, now) if good else (dict.fromkeys(WINDOWS), None)
+        live = sum(r.live for r in rows) if rows.live_known else None
+        loops = sum(r.live and r.loop == "on" for r in rows) if rows.live_known and not any(r.live and r.loop == "unknown" for r in rows) else None
+        counts = {key: total(p[key] if p else None for p in rows.prs.values())
+                  if all(r.repo for r in rows) else None for key in ("open", "red", "pending", "green", "waiting")}
+        clock = now.astimezone(ZoneInfo("Europe/London")).strftime("%H:%M")
+        lines.append(f"Factory {clock} (Europe/London): {len(rows)} orchestrators, {number(live)} live, "
+                     f"loops on {number(loops)}/{number(live)}, workers {number(total(r.active for r in rows))}/"
+                     f"{sum(r.allowed for r in rows)}, server workers {number(rows.server_workers)}, unattributed {number(rows.unattributed)}. "
+                     f"Shipped 1h/3h/12h: {'/'.join(number(shipped[h]) for h in WINDOWS)}. Left: {number(left)}. "
+                     f"PRs open/red/pending/green/waiting verifier: {'/'.join(number(counts[k]) for k in ('open', 'red', 'pending', 'green', 'waiting'))}.")
+    lines.append("name | model | loop | workers active/allowed | shipped 1h/3h/12h (Done, last update) | left | PRs open/red/pending/green/waiting verifier")
+    for row in sorted(rows, key=lambda r: not r.live):
+        ranking = "" if row.ranked else " not ranked"
+        prs = "/".join(number(row.prs[k]) for k in ("open", "red", "pending", "green", "waiting")) if row.prs else "?/?/?/?/?"
+        lines.append(f"{row.name} | {row.model} | {row.loop} | {number(row.active)}/{row.allowed}{ranking} | "
+                     f"{'/'.join(number(row.shipped[h]) for h in WINDOWS)} | {number(row.left)} | {prs}")
+        for board in str(row.board or "").split(","):
+            if board.strip():
+                lines.append(f"  https://app.hypertask.ai/project?id={board.strip()}")
+        if why:
+            lines.append(f"  Loop: {row.loop_why}. Process: {row.process_why}.")
+    lines.extend(f"Not good: {source}" for source in rows.failures)
+    return "\n".join(lines)
+
+
+def self_test():
+    from unittest.mock import patch
+    solo = load_solo_wake()
+    now = datetime(2026, 11, 16, 12, tzinfo=timezone.utc)
+    fixture = json.loads((HERE / "fixtures/factory-state.json").read_text())
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory)
+        proc = home / "proc"
+        proc.mkdir()
+        for pid, ppid, command in fixture["processes"]:
+            path = proc / str(pid)
+            path.mkdir()
+            (path / "stat").write_text(f"{pid} (name ) with spaces) S {ppid} 0 0")
+            (path / "cmdline").write_bytes(command.replace(" ", "\0").encode())
+            if str(pid) in fixture["cwd"]:
+                (path / "cwd").symlink_to(fixture["cwd"][str(pid)])
+        records = home / ".claude/sessions"
+        records.mkdir(parents=True)
+        record = records / "live.json"
+        record.write_text(json.dumps(dict(pid=10, sessionId="native-a")))
+        transcripts = home / ".claude/projects/test"
+        transcripts.mkdir(parents=True)
+        (transcripts / "native-a.jsonl").write_text("\n".join(json.dumps(r, separators=(",", ":")) for r in fixture["transcript"]))
+        roster = home / "roster.json"
+        roster.write_text(json.dumps({"rows": fixture["roster"]}))
+        chats = {"live-a": dict(tmux="live-a", name="A", sid="host-a", transcript="native-a", state="idle")}
+        calls, view_calls, pr_calls = [], [], []
+        def tasks(board):
+            calls.append(board)
+            return fixture["boards"][board]
+        def views(view):
+            view_calls.append(view)
+            return {"a"} if view == "view-a" else {"b"}
+        def prs(repo):
+            pr_calls.append(repo)
+            return pr_counts(repo, run=fake_pr_run)
+        def fake_pr_run(command, **kwargs):
+            fields = command[command.index("--json") + 1]
+            if command[1:3] == ["pr", "list"]:
+                if "statusCheckRollup" in fields:
+                    return subprocess.CompletedProcess(command, 1, "", "HTTP 504: Gateway Timeout")
+                assert fields == "number,comments"
+                data = fixture["prs"]
+            else:
+                assert command[:3] == ["gh", "search", "prs"] and fields == "number"
+                checks = command[command.index("--checks") + 1] if "--checks" in command else None
+                numbers = {None: range(7), "failure": range(2), "pending": range(3), "success": range(1)}[checks]
+                data = [dict(number=n) for n in numbers]
+            return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
+        def collect(**kwargs):
+            return gather(solo, now, roster, home, proc, tasks, views, prs, list_views=lambda board: [], **kwargs)
+        with patch.object(solo, "HOME", home), patch.object(solo.roster, "hosted_chats", return_value=chats), patch.object(solo, "tmux_states", return_value={}):
+            rows = collect()
+            assert len(rows) == 3 and calls == ["2060"]
+            assert rows[0].active == 3 and rows[1].active == 1 and rows.unattributed == 1 and rows.server_workers == 5
+            assert rows[0].loop == "on" and rows[0].model == "latest-model"
+            assert rows[0].shipped == {1: 1, 3: 2, 12: 3} and rows[0].left == 1
+            assert rows[1].shipped == {1: 0, 3: 0, 12: 0} and rows[1].left == 1
+            assert rows[2].left is None and "Unscoped has no view" in rows.failures
+            assert view_calls == ["view-a", "view-b"] and pr_calls == ["owner/app"]
+            assert rows[0].prs == dict(open=7, red=2, pending=3, green=1, waiting=1)
+            output = render(rows, now, why=True)
+            assert "Not good: Unscoped has no view" in output
+            assert "server workers 5, unattributed 1" in output
+            assert "Loop:" in output and "2 not ranked" in output
+            assert "session process A failed" not in output
+            before = json.dumps([asdict(r) for r in rows])
+            assert render(rows, now, True) == output
+            assert before == json.dumps([asdict(r) for r in rows])
+            with patch("os.getpid", return_value=11):
+                duplicate = dict(fixture["roster"][0], name="B", tmux="live-b")
+                named = dict(fixture["roster"][0], multibot="A")
+                named.pop("tmux")
+                roster.write_text(json.dumps({"rows": [named, duplicate]}))
+                assert [r.name for r in collect(all_rows=False, identity=("/fixture/app", "owner/app"))] == ["A"]
+            roster.write_text(json.dumps({"rows": fixture["roster"]}))
+            scoped = collect(all_rows=False, identity=("/fixture/app", "owner/app"))
+            assert [r.name for r in scoped] == ["A"]
+            assert "Factory" not in render(scoped, now) and "Unscoped" not in render(scoped, now)
+            assert "server workers" not in render(scoped, now)
+            assert len(collect(all_rows=False, identity=(str(home / "projects/poteto-2-advisor"), ""))) == 3
+            record.write_text(json.dumps(dict(pid=9999, sessionId="native-a")))
+            missing = collect()
+            assert missing[0].active == 3 and missing.unattributed == 1
+            chats["live-a"]["state"] = "stopped"
+            stopped = collect()
+            assert stopped[0].active == 3 and "session process A failed" not in stopped.failures
+            chats["live-a"]["state"] = "idle"
+            record.write_text(json.dumps(dict(pid=10, sessionId="host-a")))
+            stale = records / "stale.json"
+            stale.write_text(json.dumps(dict(pid=9999, sessionId="native-a")))
+            assert collect()[0].active == 3
+            stale.unlink()
+            chats["live-a"]["transcript"] = "missing"
+            assert collect()[0].loop == "unknown"
+            chats["live-a"]["transcript"] = "native-a"
+            (transcripts / "native-a.jsonl").write_text('{"turnOrigin":"scheduled","timestamp":"2026-11-16T10:00:00Z"}\n')
+            assert collect()[0].loop == "off"
+            record.write_text(json.dumps(dict(pid=10, tmux="plain:0", sessionId="native-a")))
+            assert session_records(home)["plain"][0]["pid"] == 10
+            record.write_text("invalid")
+            assert "session records failed" in collect().failures
+            roster.write_text(json.dumps({"rows": fixture["roster"][:2]}))
+            totals = collect()
+            assert "Shipped 1h/3h/12h: 1/2/3. Left: 2." in render(totals, now)
+            assert "PRs open/red/pending/green/waiting verifier: 7/2/3/1/1." in render(totals, now)
+            def failed(board):
+                raise ValueError("fixture failure")
+            broken = gather(solo, now, roster, home, proc, failed, views, prs)
+            assert broken[0].left is None and "board 2060 failed" in render(broken, now)
+        worker_proc = home / "real-workers"
+        worker_proc.mkdir()
+        for case in fixture["reparented_workers"]:
+            path = worker_proc / str(case["pid"])
+            path.mkdir()
+            (path / "stat").write_text(f"{case['pid']} (worker) S {case['ppid']} 0 0")
+            (path / "cmdline").write_bytes(case["command"].replace(" ", "\0").encode())
+            if case.get("cwd"):
+                (path / "cwd").symlink_to(case["cwd"])
+        tree = processes(worker_proc)
+        tickets = {"A": {"2060": [dict(id=97859, uniqueIndex=2551, ticketNumber="YPER4-2551")]},
+                   "B": {"2060": [dict(id=97860, uniqueIndex=2552, ticketNumber="YPER4-2552")]}}
+        assigned, unknown = attribute_workers(tree, fixture["roster"], tickets, home)
+        assert sum(p.worker for p in tree.values()) == 21
+        assert len(assigned["A"]) == 8 and len(assigned["B"]) == 8 and len(unknown) == 5
+        assert sum(map(len, assigned.values())) + len(unknown) == 21
+        real_ticket = dict(id=97859, uniqueIndex=2551, ticketNumber="SOFT-2551",
+                           url="/detail/project-2060/2551")
+        actual = {"A": {"2060": [real_ticket]}}
+        detached = {999: Process(1, "hax https://app.hypertask.ai/detail/project-2060/2551", None, True)}
+        assigned, unknown = attribute_workers(detached, fixture["roster"], actual, home)
+        assert assigned["A"] == {999} and not unknown, "URL uses uniqueIndex, not internal task id"
+        actual["B"] = actual["A"]
+        assigned, unknown = attribute_workers(detached, fixture["roster"], actual, home, {("A", "2060")})
+        assert assigned["A"] == {999} and not unknown, "saved view outranks whole-board ownership"
+        assigned, unknown = attribute_workers(detached, fixture["roster"], actual, home,
+                                               {("A", "2060"), ("B", "2060")})
+        assert unknown == {999}, "overlapping views must not invent an owner"
+        overlap = dict(tickets, B={"2060": tickets["A"]["2060"]})
+        assigned, unknown = attribute_workers(tree, fixture["roster"], overlap, home)
+        assert sum(map(len, assigned.values())) + len(unknown) == 21
+        view_pages = []
+        def saved_views(command, **kwargs):
+            offset = int(command[command.index("--offset") + 1])
+            view_pages.append(offset)
+            data = dict(views=fixture["saved_views"][offset:offset + 1], total=len(fixture["saved_views"]))
+            return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
+        saved = board_views("2060", "fixture", saved_views)
+        assert view_pages == [0, 1]
+        assert resolve_view(dict(name="poteto-2-advisor"), saved) == "82d368d4-a164-49e4-abfa-783cff950aa8"
+        assert resolve_view(dict(name="projects"), saved) is None
+        assert resolve_view(dict(name="SF Design Lead"), saved) is None
+        record.write_text(json.dumps(dict(pid=10, sessionId="native-a")))
+        roster.write_text(json.dumps({"rows": [dict(fixture["roster"][0], name="poteto-2-advisor", board="15,2060,11514", view=None)]}))
+        with patch.object(solo.roster, "hosted_chats", return_value={}), patch.object(solo, "tmux_states", return_value={}):
+            resolved = gather(solo, now, roster, home, proc,
+                              tasks=lambda board: fixture["boards"]["2060"], views=lambda view: {"a"}, prs=prs,
+                              list_views=lambda board: saved)
+        assert resolved[0].view == "82d368d4-a164-49e4-abfa-783cff950aa8"
+        assert resolved[0].left == 5 and not resolved.failures, (resolved[0], resolved.failures)
+        searches = []
+        def big_repo(command, **kwargs):
+            searches.append(command)
+            assert "statusCheckRollup" not in command[command.index("--json") + 1], "504 rollup must never be requested"
+            if command[1:3] == ["pr", "list"]:
+                data = [dict(number=n, comments=[]) for n in range(77)]
+            else:
+                checks = command[command.index("--checks") + 1] if "--checks" in command else None
+                data = [dict(number=n) for n in range({None: 77, "failure": 23, "pending": 51, "success": 3}[checks])]
+            return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
+        assert pr_counts("hypertask-ai/hypertask", big_repo) == dict(open=77, red=23, pending=51, green=3, waiting=77)
+        assert len(searches) == 5
+        pairs = [dict(name="one", cwd="/same", repo="owner/repo", tmux="live-one"),
+                 dict(name="two", cwd="/same", repo="owner/repo", tmux="live-two")]
+        assert select_rows(pairs, "/same", "owner/repo", keys=("live-two",))[0] == [pairs[1]]
+        assert select_rows(pairs, "/elsewhere", "owner/repo", keys=("live-one",))[0] == [pairs[0]]
+        try:
+            select_rows(pairs, "/same", "owner/repo")
+            assert False, "ambiguous scope must fail"
+        except ValueError:
+            pass
+        pecunia = [dict(name="Pecunia", repo="owner/pecunia-oss", tmux="live-pecunia")]
+        assert select_rows(pecunia, "/fixture/pecunia", "owner/pecunia", home=home)[0] == pecunia
+        assert select_rows(pecunia, "/fixture/Pecunia", "owner/pecunia", home=home)[0] == pecunia
+        renamed = [dict(name="Ratstack", repo="owner/pecunia")]
+        assert select_rows(renamed, "/fixture/pecunia", "valentinyeo/pecunia", home=home)[0] == renamed
+        try:
+            select_rows(pecunia, "/fixture/elsewhere", "owner/elsewhere", home=home)
+            assert False, "unknown caller must fail"
+        except ValueError:
+            pass
+        real = [r for r in json.loads((HERE / "roster.json").read_text())["rows"] if r.get("name") == "Pecunia"]
+        assert len(real) == 1, "roster must carry one Pecunia row"
+        assert select_rows(real, str(home / "projects/pecunia"), "valentinyeo/pecunia", home=home)[0] == real
+        checkout = dict(real[0])
+        checkout.pop("cwd")
+        assert select_rows([checkout], str(home / "projects/pecunia"), "valentinyeo/pecunia", home=home)[0] == [checkout]
+        missing = gather(solo, now, home / "missing", home, proc, tasks, views, prs, all_rows=False)
+        assert "Factory" not in render(missing, now)
+        pages = []
+        def fake_run(command, **kwargs):
+            pages.append(command)
+            offset = int(command[command.index("--offset") + 1])
+            return subprocess.CompletedProcess(command, 0, json.dumps({"tasks": [dict(sectionIsDone=False)] * (100 if offset == 0 else 1)}), "")
+        binary = home / ".local/bin/hypertask"
+        binary.parent.mkdir(parents=True)
+        binary.touch()
+        with patch.object(Path, "home", return_value=home), patch.dict(os.environ, {"PATH": ""}):
+            assert len(board_tickets("15", "fixture-token", fake_run)) == 101
+            assert pages[0][0] == str(binary)
+        binary.unlink()
+        with patch("shutil.which", return_value="/fixture/bin/hypertask"):
+            assert hypertask(home) == "/fixture/bin/hypertask"
+        assert len(pages) == 2 and pages[1][pages[1].index("--offset") + 1] == "100"
+        assert pages[0][-2:] == ["--token", "fixture-token"]
+        def view_run(command, **kwargs):
+            assert command[1:5] == ["view", "get", "view-a", "--json"]
+            return subprocess.CompletedProcess(command, 0, json.dumps(fixture["view"]), "")
+        assert view_filter("view-a", "fixture", view_run) == {"a"}
+        invalid = lambda *a, **kw: subprocess.CompletedProcess(a, 0, '{"board_filters":{"addedFilters":[{"type":"Assignee"}]}}', "")
+        try:
+            view_filter("view-a", "fixture", invalid)
+            assert False, "unsupported filter must not count whole board"
+        except ValueError:
+            pass
+        assert ticket_counts([dict(sectionIsDone=True, updatedAt="2026-11-16T12:01:00Z")], now)[0] == dict.fromkeys(WINDOWS, 0)
+        token_file = home / "token"
+        token_file.write_text("fixture-token")
+        with patch.dict(os.environ, {"HT_TOKEN": str(token_file)}):
+            assert read_token(home) == "fixture-token"
+    print("factory-state self-test ok: 21 reparented workers, ticket/cwd attribution, unattributed totals, saved views, 504-safe PR checks, verifier counts, loops, scope, failures")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--why", action="store_true")
+    parser.add_argument("--all", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return
+    now = datetime.now(timezone.utc)
+    rows = gather(load_solo_wake(), now, all_rows=args.all, identity=git_identity())
+    if args.json:
+        print(json.dumps([asdict(row) for row in rows], indent=2))
+        for source in rows.failures:
+            print(f"Not good: {source}", file=sys.stderr)
+    else:
+        print(render(rows, now, args.why))
+
+
+if __name__ == "__main__":
+    main()
