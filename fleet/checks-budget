@@ -36,6 +36,8 @@ def workflow_policy(source, name="", path="", default_branch="main"):
     try:
         import yaml
         workflow = yaml.safe_load(textwrap.dedent(source))
+    except TimeoutError:
+        raise
     except Exception:
         return False, None
     if not isinstance(workflow, Mapping):
@@ -183,6 +185,8 @@ def inspect_repo(path, debug=False):
             continue
         try:
             source = workflow_path.read_text(encoding="utf-8")
+        except TimeoutError:
+            raise
         except (OSError, UnicodeError) as error:
             if debug:
                 print(f"checks-budget: {workflow_path}: {type(error).__name__}: {error}", file=sys.stderr)
