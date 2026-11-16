@@ -1,25 +1,61 @@
 #!/usr/bin/env python3
-"""slots: how many more workers an orchestrator starts now, and why when fewer than the cap of 10.
-
-pstack Orchestrate: "Keep about ten workers in flight per coordinator, and start the next one as each finishes."
-The drain tick runs this and starts exactly the number it prints. The only reasons to start fewer are the ones below;
-each is printed so a short fleet is never silent.
-CPU capacity uses busy share sampled from /proc/stat over one second.
-
-Usage: slots --running N --ready M [--cap C]  |  --self-test
-  --cap      this project's own cap when below 10 (a small project); default 10
-  --running  workers and subagents this orchestrator has in flight now
-  --ready    tickets it could hand a worker now: open, unblocked, not waiting on a person, not sharing files with
-             work in flight
-Prints one line: "start K" or "start K: <reason>".
-"""
+import argparse
+from dataclasses import dataclass
+from math import floor
+import os
+from pathlib import Path
+import re
 import sys
 import time
 
 CAP = 10
-BUSY_MAX = 0.85      # CPU busy share above this: the box is full
-MEM_MIN_GB = 8       # available memory below this: the box is full
-PER_WORKER_GB = 2
+BUSY_TARGET = 0.75
+BUSY_MAX = 0.85
+CORES_PER_WORKER = 0.5  # CPU allowance while a worker builds.
+MEM_MIN_GB = 8
+PER_WORKER_GB = 1.0  # Worker and its tools.
+WORKER_MATCHERS = (
+    (re.compile(r"(?:^|/)codex(?:\.js)?$"), ("exec",), ()),
+    (re.compile(r"(?:^|/)(?:claude|@anthropic-ai/claude-code/cli\.js)$"),
+     ("--print",), ("--session-id", "--resume")),
+    (re.compile(r"(?:^|/)cursor-agent$"), (), ()),
+    (re.compile(r"(?:^|/)(?:pi|pi-coding-agent/(?:dist/)?cli\.js)$"), (), ()),
+)
+
+
+@dataclass(frozen=True)
+class Box:
+    busy: float
+    cores: int
+    mem_avail_gb: float
+    fleet_workers: int
+
+
+def is_worker(argv):
+    if not argv:
+        return False
+    executable = argv[0]
+    args = argv[1:]
+    if Path(executable).name in ("node", "nodejs") and args:
+        executable, *args = args
+    flags = {arg.split("=", 1)[0] for arg in args}
+    return any(pattern.search(executable)
+               and all(arg in flags for arg in required)
+               and not any(arg in flags for arg in excluded)
+               for pattern, required, excluded in WORKER_MATCHERS)
+
+
+def fleet_workers():
+    workers = 0
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            argv = process.joinpath("cmdline").read_bytes().decode(errors="replace").rstrip("\0").split("\0")
+        except OSError:
+            continue
+        workers += is_worker(argv)
+    return workers
 
 
 def box():
@@ -29,52 +65,99 @@ def box():
     with open("/proc/stat") as f:
         after = list(map(int, f.readline().split()[1:9]))
     delta = [end - start for start, end in zip(before, after)]
-    busy = 1 - (delta[3] + delta[4]) / (sum(delta) or 1)
+    total = sum(delta)
+    busy = 1 - (delta[3] + delta[4]) / total if total else 0.0
     with open("/proc/meminfo") as f:
         mem = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in f)}
-    return busy, mem["MemAvailable"] / 1_048_576
+    return Box(busy, os.cpu_count() or 1, mem["MemAvailable"] / 1_048_576, fleet_workers())
 
 
-def decide(running, ready, busy, mem_gb, cap=CAP):
-    """(k, reason) for one tick. Pure."""
+def decide(running, ready, box, cap=CAP):
     cap = min(cap, CAP)
     room = cap - running
     if room <= 0:
         return 0, f"at the cap of {cap}"
     if ready <= 0:
         return 0, "no ready ticket: board empty, blocked, or waiting on a person"
-    if busy > BUSY_MAX:
-        return 0, f"CPU full (busy {busy:.0%}, max {BUSY_MAX:.0%})"
-    if mem_gb < MEM_MIN_GB:
-        return 0, f"memory low ({mem_gb:.0f} GB free, min {MEM_MIN_GB})"
-    k = min(room, ready, int((mem_gb - MEM_MIN_GB) // PER_WORKER_GB) or 1)
-    if k == room:
-        return k, ""
-    why = "only {} ready ticket(s)".format(ready) if k == ready else f"memory allows {k}"
-    return k, why
+    if box.busy >= BUSY_MAX:
+        return 0, f"CPU full (busy {box.busy:.0%})"
+    cpu_slots = max(0, floor((BUSY_TARGET - box.busy) * box.cores / CORES_PER_WORKER))
+    mem_slots = max(0, floor((box.mem_avail_gb - MEM_MIN_GB) / PER_WORKER_GB))
+    fleet_max = box.cores * 2
+    fleet_slots = max(0, fleet_max - box.fleet_workers)
+    memory_reason = (f"memory low ({box.mem_avail_gb:.0f} GB free, min {MEM_MIN_GB})"
+                     if box.mem_avail_gb < MEM_MIN_GB else f"memory allows {mem_slots}")
+    limits = (
+        (room, ""),
+        (ready, f"only {ready} ready ticket(s)"),
+        (cpu_slots, f"CPU allows {cpu_slots} (busy {box.busy:.0%})"),
+        (mem_slots, memory_reason),
+        (fleet_slots, f"server holds {box.fleet_workers} workers (max {fleet_max})"),
+    )
+    return min(limits, key=lambda limit: limit[0])
 
 
 def self_test():
-    assert decide(0, 20, 0.3, 70) == (10, ""), "empty orchestrator with work fills to 10"
-    assert decide(4, 20, 0.3, 70) == (6, ""), "HT Product Lead at 4 must start 6 more"
-    assert decide(10, 5, 0.3, 70)[0] == 0
-    assert decide(2, 3, 0.3, 70) == (3, "only 3 ready ticket(s)")
-    assert decide(2, 0, 0.3, 70)[1].startswith("no ready ticket")
-    assert decide(2, 9, 0.91, 70) == (0, "CPU full (busy 91%, max 85%)")
-    assert decide(2, 10, 0.5, 70) == (8, ""), "50% busy leaves CPU room for workers"
-    assert decide(2, 9, 0.3, 5)[1].startswith("memory low")
-    assert decide(0, 9, 0.3, 12) == (2, "memory allows 2")
-    assert decide(1, 20, 0.3, 70, cap=3) == (2, ""), "a small project fills to its own cap"
-    assert decide(0, 20, 0.3, 70, cap=50) == (10, ""), "no project goes past 10"
+    idle = Box(0.0, 18, 70, 0)
+    assert decide(0, 20, idle) == (10, "")
+    assert decide(4, 20, idle) == (6, "")
+    assert decide(10, 5, idle) == (0, "at the cap of 10")
+    assert decide(2, 3, idle) == (3, "only 3 ready ticket(s)")
+    assert decide(2, 0, idle) == (0, "no ready ticket: board empty, blocked, or waiting on a person")
+    assert decide(0, 20, Box(0.60, 18, 70, 0)) == (5, "CPU allows 5 (busy 60%)")
+    assert decide(0, 20, Box(0.80, 18, 70, 0)) == (0, "CPU allows 0 (busy 80%)")
+    assert decide(0, 20, Box(0.85, 18, 70, 0)) == (0, "CPU full (busy 85%)")
+    assert decide(0, 20, Box(0.91, 18, 70, 0)) == (0, "CPU full (busy 91%)")
+    assert decide(0, 20, Box(0.0, 18, 70, 36)) == (0, "server holds 36 workers (max 36)")
+    assert decide(0, 20, Box(0.0, 18, 70, 40)) == (0, "server holds 40 workers (max 36)")
+    assert decide(0, 20, Box(0.0, 18, 70, 33)) == (3, "server holds 33 workers (max 36)")
+    assert decide(0, 20, Box(0.0, 18, 5, 0)) == (0, "memory low (5 GB free, min 8)")
+    assert decide(0, 20, Box(0.0, 18, 8, 0)) == (0, "memory allows 0")
+    assert decide(0, 20, Box(0.0, 18, 8.5, 0)) == (0, "memory allows 0")
+    assert decide(0, 20, Box(0.0, 18, 12, 0)) == (4, "memory allows 4")
+    assert decide(1, 20, idle, cap=3) == (2, "")
+    assert decide(0, 20, idle, cap=50) == (10, "")
+    for argv in (
+        ["/usr/bin/codex", "exec", "task"],
+        ["node", "/opt/codex/bin/codex.js", "exec", "task"],
+        ["claude", "--print", "task"],
+        ["node", "/opt/@anthropic-ai/claude-code/cli.js", "--print", "task"],
+        ["cursor-agent", "-p", "task"],
+        ["pi", "--print", "task"],
+    ):
+        assert is_worker(argv), argv
+    for argv in (
+        [], ["codex"], ["claude"],
+        ["claude", "--print", "--session-id", "chat"],
+        ["claude", "--print", "--session-id=chat"],
+        ["claude", "--print", "--resume", "chat"],
+        ["claude", "--print", "--resume=chat"],
+        ["bash", "-c", "codex exec task"],
+        ["python3", "task.py", "cursor-agent"],
+        ["pi-server", "--print"],
+    ):
+        assert not is_worker(argv), argv
     print("slots self-test ok")
 
 
 def main(argv):
-    if argv == ["--self-test"]:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--running", type=int)
+    parser.add_argument("--ready", type=int)
+    parser.add_argument("--cap", type=int, default=CAP)
+    parser.add_argument("--why", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args(argv)
+    if args.self_test:
         return self_test()
-    args = dict(zip(argv[::2], argv[1::2]))
-    busy, mem = box()
-    k, why = decide(int(args["--running"]), int(args["--ready"]), busy, mem, int(args.get("--cap", CAP)))
+    if args.running is None or args.ready is None:
+        parser.error("--running and --ready are required")
+    if min(args.running, args.ready, args.cap) < 0:
+        parser.error("--running, --ready and --cap must be nonnegative")
+    snapshot = box()
+    if args.why:
+        print(snapshot, file=sys.stderr)
+    k, why = decide(args.running, args.ready, snapshot, args.cap)
     print(f"start {k}" + (f": {why}" if why else ""))
 
 
