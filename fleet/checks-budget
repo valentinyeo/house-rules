@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-import base64
 import datetime
 import json
 import os
+from pathlib import Path
 import re
 import signal
 import statistics
@@ -10,6 +10,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import traceback
 import urllib.parse
 
 
@@ -43,22 +44,28 @@ def workflow_policy(source):
     return triggered, bool(valid_group and cancel)
 
 
-def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows):
+def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=False):
     problems = []
     maximum = max((jobs[str(run["id"])] for run in pr_runs
-                   if run["event"] in {"pull_request", "pull_request_target"}), default=0)
-    if maximum > 20:
+                   if run["event"] in {"pull_request", "pull_request_target"}
+                   and str(run["id"]) in jobs), default=None)
+    if maximum is not None and maximum > 20:
         problems.append(f"max PR run {maximum} jobs > 20")
     releases = {workflow["id"] for workflow in workflows
                 if re.search(r"release|deploy|publish", workflow["name"] + " " + workflow["path"], re.I)}
     durations = [(datetime.datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00")) -
                   datetime.datetime.fromisoformat(merged_at[run["head_sha"]].replace("Z", "+00:00"))).total_seconds() / 60
                  for run in branch_runs if run["workflow_id"] in releases and run["head_sha"] in merged_at]
-    if durations and statistics.median(durations) > 15:
-        problems.append(f"median merge-to-release {statistics.median(durations):.1f} minutes > 15")
+    median = statistics.median(durations) if durations else None
+    if median is not None and median > 15:
+        problems.append(f"median merge-to-release {median:.1f} minutes > 15")
     policies = [workflow_policy(workflow["source"]) for workflow in workflows]
     checked = sum(triggered for triggered, valid in policies)
     missing = sum(triggered and not valid for triggered, valid in policies)
+    if debug:
+        ship_minutes = f"{median:.1f}" if median is not None else "unavailable"
+        print(f"checks-budget: {repo}: max jobs={maximum if maximum is not None else 'unavailable'}; median ship minutes={ship_minutes}; "
+              f"workflows missing cancel-in-progress={missing}/{checked}", file=sys.stderr)
     if missing:
         problems.append(f"{missing}/{checked} workflows lack concurrency group with cancel-in-progress true")
     if not problems:
@@ -67,7 +74,7 @@ def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows):
             "Fix the checks before new feature work (valentin-mode Checks).")
 
 
-def inspect_repo(path):
+def inspect_repo(path, debug=False):
     deadline = time.monotonic() + 19.5
 
     def command(args):
@@ -75,7 +82,7 @@ def inspect_repo(path):
         if remaining <= 0:
             raise TimeoutError
         return subprocess.run(args, check=True, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, text=True, timeout=remaining,
+                              stderr=None if debug else subprocess.DEVNULL, text=True, timeout=min(remaining, 4),
                               env={**os.environ, "GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat"}).stdout
 
     origin = command(["git", "-C", path, "remote", "get-url", "origin"]).strip()
@@ -84,43 +91,82 @@ def inspect_repo(path):
         return ""
     repo = match[1]
 
-    def api(endpoint, paginate=False):
-        args = ["gh", "api", "--hostname", "github.com", f"repos/{repo}/{endpoint}".rstrip("/")]
-        if paginate:
-            args += ["--paginate", "--slurp"]
-        return json.loads(command(args))
+    def api(endpoint, collection=None):
+        url = f"repos/{repo}/{endpoint}".rstrip("/")
+        items = []
+        page = 1
+        while deadline - time.monotonic() > 0.25:
+            target = url if collection is None else f"{url}&page={page}"
+            try:
+                data = json.loads(command(["gh", "api", "--hostname", "github.com", target]))
+            except (subprocess.SubprocessError, OSError, ValueError, TimeoutError) as error:
+                if debug:
+                    print(f"checks-budget: {target}: {type(error).__name__}: {error}", file=sys.stderr)
+                return None if collection is None else items
+            if collection is None:
+                return data
+            batch = data[collection] if collection else data
+            items.extend(batch)
+            if len(batch) < 100:
+                return items
+            page += 1
+        return None if collection is None else items
 
-    branch = api("")["default_branch"]
-    branch_query = urllib.parse.urlencode({"branch": branch, "status": "completed", "per_page": 10})
-    branch_runs = api(f"actions/runs?{branch_query}")["workflow_runs"]
-    pr_runs = api("actions/runs?event=pull_request&status=completed&per_page=10")["workflow_runs"]
-    target_runs = api("actions/runs?event=pull_request_target&status=completed&per_page=10")["workflow_runs"]
-    pr_runs = sorted(pr_runs + target_runs, key=lambda run: run["created_at"], reverse=True)[:10]
-    jobs = {str(run["id"]): api(f"actions/runs/{run['id']}/jobs?per_page=1")["total_count"]
-            for run in pr_runs}
-    workflows = [workflow for page in api("actions/workflows?per_page=100", paginate=True)
-                 for workflow in page["workflows"] if workflow.get("state") == "active"]
-    for workflow in workflows:
-        content = api(f"contents/{urllib.parse.quote(workflow['path'])}?ref={urllib.parse.quote(branch, safe='')}")
-        workflow["source"] = base64.b64decode(content["content"]).decode("utf-8")
+    workflows = []
+    workflow_directory = Path(path) / ".github/workflows"
+    for workflow_path in sorted(workflow_directory.glob("*")):
+        if workflow_path.suffix not in {".yml", ".yaml"}:
+            continue
+        try:
+            source = workflow_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            if debug:
+                print(f"checks-budget: {workflow_path}: {type(error).__name__}: {error}", file=sys.stderr)
+            continue
+        workflows.append({"id": None, "name": workflow_path.stem,
+                          "path": f".github/workflows/{workflow_path.name}", "source": source})
+    local_workflows = {workflow["path"]: workflow for workflow in workflows}
+    for workflow in api("actions/workflows?per_page=100", collection="workflows"):
+        if workflow.get("state") == "active" and workflow["path"] in local_workflows:
+            local_workflows[workflow["path"]].update(workflow)
+    pr_runs = (api("actions/runs?event=pull_request&status=completed&per_page=5") or {}).get("workflow_runs", [])
+    target_runs = (api("actions/runs?event=pull_request_target&status=completed&per_page=5") or {}).get("workflow_runs", [])
+    pr_runs = sorted(pr_runs + target_runs, key=lambda run: run["created_at"], reverse=True)[:5]
+    jobs = {}
+    for run in pr_runs:
+        measurement = api(f"actions/runs/{run['id']}/jobs?per_page=1")
+        if measurement is not None:
+            jobs[str(run["id"])] = measurement["total_count"]
+    branch = (api("") or {}).get("default_branch")
+    branch_runs = []
+    if branch:
+        branch_query = urllib.parse.urlencode({"branch": branch, "status": "completed", "per_page": 100})
+        branch_runs = (api(f"actions/runs?{branch_query}") or {}).get("workflow_runs", [])
     releases = {workflow["id"] for workflow in workflows
                 if re.search(r"release|deploy|publish", workflow["name"] + " " + workflow["path"], re.I)}
+    branch_runs = sorted((run for run in branch_runs if run["workflow_id"] in releases),
+                         key=lambda run: run["created_at"], reverse=True)[:5]
     merged_at = {}
-    for sha in dict.fromkeys(run["head_sha"] for run in branch_runs if run["workflow_id"] in releases):
-        pulls = [pull for page in api(f"commits/{sha}/pulls?per_page=100", paginate=True) for pull in page]
+    for sha in dict.fromkeys(run["head_sha"] for run in branch_runs):
+        pulls = api(f"commits/{sha}/pulls?per_page=100", collection="")
         times = [pull["merged_at"] for pull in pulls if pull.get("merged_at")
                  and pull.get("merge_commit_sha") == sha and pull["base"]["ref"] == branch]
         if times:
             merged_at[sha] = min(times)
-    return report(repo, pr_runs, jobs, branch_runs, merged_at, workflows)
+    return report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=debug)
 
 
 def self_test():
+    import contextlib
+    import io
+    import tempfile
+    from unittest.mock import patch
+
     fixture = json.loads('''{
       "pr_runs": [{"id": 1, "event": "pull_request"}],
       "jobs": {"1": 21},
       "branch_runs": [{"event": "push", "head_sha": "merged", "workflow_id": 7,
-        "updated_at": "2026-11-16T12:16:00Z"}],
+        "updated_at": "2026-11-16T12:16:00Z", "created_at": "2026-11-16T12:00:00Z"}],
       "merged_at": {"merged": "2026-11-16T12:00:00Z"},
       "workflows": [{"id": 7, "name": "Release", "path": ".github/workflows/release.yml",
         "source": "on: [push, pull_request]\\nconcurrency:\\n  group: release-${{ github.ref }}\\n  cancel-in-progress: true\\njobs: {}\\n"}]
@@ -128,12 +174,132 @@ def self_test():
     def check(data):
         return report("owner/repo", data["pr_runs"], data["jobs"],
                       data["branch_runs"], data["merged_at"], data["workflows"])
+    def gh245(args, **kwargs):
+        assert "--slurp" not in args and "--paginate" not in args, args
+        if args[0] == "git":
+            return subprocess.CompletedProcess(args, 0, "git@github.com:owner/repo.git\n")
+        endpoint = args[-1].removeprefix("repos/owner/repo/")
+        responses = {
+            "repos/owner/repo": {"default_branch": "main"},
+            "actions/runs?branch=main&status=completed&per_page=100": {"workflow_runs": fixture["branch_runs"]},
+            "actions/runs?event=pull_request&status=completed&per_page=5": {
+                "workflow_runs": [dict(fixture["pr_runs"][0], created_at="2026-11-16T12:00:00Z")]},
+            "actions/runs?event=pull_request_target&status=completed&per_page=5": {"workflow_runs": []},
+            "actions/runs/1/jobs?per_page=1": {"total_count": fixture["jobs"]["1"]},
+            "actions/workflows?per_page=100&page=1": {"workflows": [dict(fixture["workflows"][0], state="active")]},
+            "commits/merged/pulls?per_page=100&page=1": [{
+                "merged_at": fixture["merged_at"]["merged"], "merge_commit_sha": "merged", "base": {"ref": "main"}}],
+        }
+        if multiple_pages and endpoint == "actions/workflows?per_page=100&page=1":
+            data = {"workflows": [{"state": "disabled_manually"}] * 100}
+        elif multiple_pages and endpoint == "actions/workflows?per_page=100&page=2":
+            data = responses["actions/workflows?per_page=100&page=1"]
+        elif multiple_pages and endpoint == "commits/merged/pulls?per_page=100&page=1":
+            data = [{"merged_at": None}] * 100
+        elif multiple_pages and endpoint == "commits/merged/pulls?per_page=100&page=2":
+            data = responses["commits/merged/pulls?per_page=100&page=1"]
+        else:
+            data = responses[endpoint]
+        return subprocess.CompletedProcess(args, 0, json.dumps(data))
+
+    directory = tempfile.TemporaryDirectory()
+    fixture_path = Path(directory.name)
+    (fixture_path / ".github/workflows").mkdir(parents=True)
+    source_path = fixture_path / ".github/workflows/release.yml"
+    source_path.write_text(fixture["workflows"][0]["source"])
     output = check(fixture)
+    multiple_pages = False
+    with patch.object(subprocess, "run", side_effect=gh245):
+        assert inspect_repo(str(fixture_path)) == output
+    multiple_pages = True
+    with patch.object(subprocess, "run", side_effect=gh245):
+        assert inspect_repo(str(fixture_path)) == output
     assert output.startswith("CHECKS OVER BUDGET: owner/repo:"), output
     assert "21 jobs" in output and "16.0 minutes" in output, output
     fixture["jobs"]["1"] = 20
     fixture["branch_runs"][0]["updated_at"] = "2026-11-16T12:15:00Z"
     assert check(fixture) == ""
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=gh245), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    assert "median ship minutes=15.0" in stderr.getvalue(), stderr.getvalue()
+    assert "workflows missing cancel-in-progress=0/1" in stderr.getvalue(), stderr.getvalue()
+    source_path.unlink()
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=gh245), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue(), stderr.getvalue()
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    source_path.write_text(fixture["workflows"][0]["source"])
+    def failing_api(args, **kwargs):
+        if "actions/runs/1/jobs" in args[-1]:
+            raise subprocess.CalledProcessError(1, args)
+        return gh245(args, **kwargs)
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=failing_api), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "CalledProcessError" in stderr.getvalue(), stderr.getvalue()
+    assert "max jobs=unavailable" in stderr.getvalue(), stderr.getvalue()
+    assert "median ship minutes=15.0" in stderr.getvalue(), stderr.getvalue()
+    calls = []
+    def capped_api(args, **kwargs):
+        endpoint = args[-1]
+        calls.append(endpoint)
+        if "event=pull_request&" in endpoint:
+            runs = [dict(fixture["pr_runs"][0], id=index,
+                         created_at=f"2026-11-16T12:00:{index:02d}Z") for index in range(8)]
+            return subprocess.CompletedProcess(args, 0, json.dumps({"workflow_runs": runs}))
+        if "actions/runs?branch=" in endpoint:
+            runs = [dict(fixture["branch_runs"][0], head_sha=f"merge{index}",
+                         created_at=f"2026-11-16T12:00:{index:02d}Z") for index in range(8)]
+            return subprocess.CompletedProcess(args, 0, json.dumps({"workflow_runs": runs}))
+        if "/jobs?" in endpoint:
+            return subprocess.CompletedProcess(args, 0, json.dumps({"total_count": 20}))
+        if "/commits/merge" in endpoint:
+            sha = endpoint.split("/commits/")[1].split("/")[0]
+            return subprocess.CompletedProcess(args, 0, json.dumps([{
+                "merged_at": fixture["merged_at"]["merged"],
+                "merge_commit_sha": sha, "base": {"ref": "main"}}]))
+        return gh245(args, **kwargs)
+    with patch.object(subprocess, "run", side_effect=capped_api):
+        assert inspect_repo(str(fixture_path)) == ""
+    assert len([call for call in calls if "/jobs?" in call]) == 5, calls
+    assert not any(f"/runs/{index}/jobs?" in call for index in range(3) for call in calls), calls
+    assert len([call for call in calls if "/commits/" in call]) == 5, calls
+    assert not any(f"/commits/merge{index}/" in call for index in range(3) for call in calls), calls
+    def one_failed_job_api(args, **kwargs):
+        if "/runs/7/jobs?" in args[-1]:
+            raise subprocess.CalledProcessError(1, args)
+        return capped_api(args, **kwargs)
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=one_failed_job_api), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "CalledProcessError" in stderr.getvalue(), stderr.getvalue()
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    clock = [0]
+    def timed_out_api(args, **kwargs):
+        if "/runs/6/jobs?" in args[-1]:
+            clock[0] = 19.3
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        assert clock[0] == 0, args
+        return capped_api(args, **kwargs)
+    stderr = io.StringIO()
+    with patch.object(time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(subprocess, "run", side_effect=timed_out_api), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "TimeoutExpired" in stderr.getvalue(), stderr.getvalue()
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    assert "workflows missing cancel-in-progress=0/1" in stderr.getvalue(), stderr.getvalue()
+    def failed_workflows_api(args, **kwargs):
+        if "actions/workflows?" in args[-1]:
+            raise subprocess.CalledProcessError(1, args)
+        return gh245(args, **kwargs)
+    stderr = io.StringIO()
+    with patch.object(subprocess, "run", side_effect=failed_workflows_api), contextlib.redirect_stderr(stderr):
+        assert inspect_repo(str(fixture_path), debug=True) == ""
+    assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
+    assert "workflows missing cancel-in-progress=0/1" in stderr.getvalue(), stderr.getvalue()
     fixture["workflows"][0]["source"] = "on: push\njobs: {}\n"
     assert "1/1 workflows" in check(fixture)
     assert workflow_policy("on: push\nconcurrency: {group: '${{ github.ref }}', cancel-in-progress: true}\n") == (True, True)
@@ -151,7 +317,8 @@ def self_test():
     fixture["jobs"]["1"] = 21
     fixture["pr_runs"][0]["event"] = "push"
     assert check(fixture) == ""
-    print("checks-budget self-test: PASS (over, under, boundaries, missing concurrency, workflow forms, no release)")
+    directory.cleanup()
+    print("checks-budget self-test: PASS (over, under, boundaries, missing concurrency, workflow forms, no release, gh 2.45 pages, debug metrics, missing workflow, failing API, five-run limits, partial deadline)")
 
 
 def timeout(signum, frame):
@@ -159,17 +326,22 @@ def timeout(signum, frame):
 
 
 if __name__ == "__main__":
+    args = sys.argv[1:]
+    debug = "--debug" in args
+    args = [arg for arg in args if arg != "--debug"]
     signal.signal(signal.SIGALRM, timeout)
     signal.setitimer(signal.ITIMER_REAL, 20)
     try:
-        if sys.argv[1:] == ["--self-test"]:
+        if args == ["--self-test"]:
             self_test()
-        elif len(sys.argv) <= 2:
-            output = inspect_repo(sys.argv[1] if len(sys.argv) == 2 else os.getcwd())
+        elif len(args) <= 1:
+            output = inspect_repo(args[0] if args else os.getcwd(), debug=debug)
             if output:
                 print(output)
     except Exception as error:
-        if sys.argv[1:] == ["--self-test"]:
+        if debug:
+            traceback.print_exc()
+        if args == ["--self-test"]:
             print(f"checks-budget self-test: FAIL ({error})")
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
