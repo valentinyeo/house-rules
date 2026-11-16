@@ -217,7 +217,8 @@ def identity_gap(name, sessions=SESSIONS, exists=Path.is_file):
 
 def loop_watch(chats, panes, state, now):
     """At most one message per chat per tick: the loop ask and the identity ask go out together, and a chat solo-wake
-    woke this tick gets nothing more until the next one."""
+    woke this tick gets nothing more until the next one. Two roster rows that resolve to one chat count once."""
+    seen = set()
     for row in roster.rows():
         if row.get("kind") not in LOOP_KINDS:
             continue
@@ -225,6 +226,11 @@ def loop_watch(chats, panes, state, now):
             log(f"{row['name']} loop: skip, roster row names no chat (no tmux, no multibot); Chief Of Staff: fix the row")
             continue
         session = session_of(row, chats, panes)
+        if session and session["key"] in seen:
+            log(f"{row['name']} loop: skip, same chat as an earlier row ({session['key']}); Chief Of Staff: drop the duplicate row")
+            continue
+        if session:
+            seen.add(session["key"])
         if session and session["via"] == "live":
             session["transcript"] = chats[session["key"]].get("transcript") or session["sid"]
         fire = last_loop_fire(session["transcript"]) if session and session.get("transcript") else None
