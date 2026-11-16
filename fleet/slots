@@ -2,6 +2,7 @@
 import argparse
 from dataclasses import dataclass
 import fcntl
+import json
 from math import floor
 import os
 from pathlib import Path
@@ -16,10 +17,10 @@ CORES_PER_WORKER = 0.5  # CPU allowance while a worker builds.
 MEM_MIN_GB = 8
 PER_WORKER_GB = 1.0  # Worker and its tools.
 RESERVATION_SECONDS = 120
+CLAUDE_MATCHER = re.compile(r"(?:^|/)(?:claude|@anthropic-ai/claude-code/cli\.js)$")
 WORKER_MATCHERS = (
     (re.compile(r"(?:^|/)codex(?:\.js)?$"), ("exec",)),
-    (re.compile(r"(?:^|/)(?:claude|@anthropic-ai/claude-code/cli\.js)$"),
-     ("-p", "--print")),
+    (CLAUDE_MATCHER, ("-p", "--print")),
     (re.compile(r"(?:^|/)hax$"), ("-p",)),
     (re.compile(r"(?:^|/)cursor-agent$"), ()),
     (re.compile(r"(?:^|/)(?:pi|pi-coding-agent/(?:dist/)?cli\.js)$"), ()),
@@ -34,13 +35,21 @@ class Box:
     fleet_workers: int
 
 
-def is_worker(argv):
+def is_worker(argv, pid=None, chat_pids=()):
     if not argv:
         return False
     executable = argv[0]
     args = argv[1:]
     if Path(executable).name in ("node", "nodejs") and args:
         executable, *args = args
+    if CLAUDE_MATCHER.search(executable):
+        stream_input = any(
+            arg == "--input-format=stream-json"
+            or (arg == "--input-format" and args[i + 1:i + 2] == ["stream-json"])
+            for i, arg in enumerate(args)
+        )
+        if stream_input or pid in chat_pids:
+            return False
     flags = {arg.split("=", 1)[0] for arg in args}
     return any(pattern.search(executable)
                and (not required or any(arg in flags for arg in required))
@@ -48,6 +57,14 @@ def is_worker(argv):
 
 
 def fleet_workers():
+    chat_pids = set()
+    for session in (Path.home() / ".claude/sessions").glob("*.json"):
+        try:
+            data = json.loads(session.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("pid"), int):
+            chat_pids.add(data["pid"])
     workers = 0
     for process in Path("/proc").iterdir():
         if not process.name.isdigit():
@@ -56,7 +73,7 @@ def fleet_workers():
             argv = process.joinpath("cmdline").read_bytes().decode(errors="replace").rstrip("\0").split("\0")
         except OSError:
             continue
-        workers += is_worker(argv)
+        workers += is_worker(argv, int(process.name), chat_pids)
     return workers
 
 
@@ -167,6 +184,12 @@ def self_test():
         [], ["codex"], ["claude"],
         ["claude", "--session-id", "chat"],
         ["claude", "--resume", "chat"],
+        ["claude", "--print", "--input-format", "stream-json"],
+        ["claude", "-p", "--input-format=stream-json"],
+        ["node", "/opt/@anthropic-ai/claude-code/cli.js", "--print",
+         "--input-format", "stream-json"],
+        ["node", "/opt/@anthropic-ai/claude-code/cli.js", "-p",
+         "--input-format=stream-json"],
         ["hax", "--provider=codex"],
         ["python3", "fleet/slots", "--running", "0", "--ready", "10"],
         ["fleet/slots", "--running", "0", "--ready", "10"],
@@ -175,6 +198,33 @@ def self_test():
         ["pi-server", "--print"],
     ):
         assert not is_worker(argv), argv
+    with TemporaryDirectory() as fixture_dir:
+        fixture = Path(fixture_dir)
+        sessions = fixture / ".claude/sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "chat.json").write_text(json.dumps({"pid": 101}))
+        (sessions / "broken.json").write_text("{")
+        (sessions / "empty.json").write_text("[]")
+        processes = []
+        for pid, argv in (
+            (101, ["claude", "--print", "task"]),
+            (102, ["claude", "-p", "task"]),
+            (103, ["claude", "--print", "--input-format", "stream-json"]),
+            (104, ["claude", "--print", "--input-format=stream-json"]),
+            (105, ["node", "/opt/@anthropic-ai/claude-code/cli.js", "-p", "task"]),
+            (106, ["codex", "exec", "task"]),
+        ):
+            process = fixture / str(pid)
+            process.mkdir()
+            (process / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
+            processes.append(process)
+        with patch.object(Path, "home", return_value=fixture):
+            with patch.object(Path, "iterdir", return_value=iter(processes)):
+                assert fleet_workers() == 3
+            (sessions / "node-chat.json").write_text(json.dumps({"pid": 105}))
+            (sessions / "non-claude.json").write_text(json.dumps({"pid": 106}))
+            with patch.object(Path, "iterdir", return_value=iter(processes)):
+                assert fleet_workers() == 2
     with TemporaryDirectory() as state_dir:
         with patch.dict(globals(), box=Mock(return_value=Box(0.0, 18, 70, 35))):
             with patch("time.time", return_value=1000):
