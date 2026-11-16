@@ -28,7 +28,7 @@ Disposition codes:
 | 39 | HARD: script first | d | core | `fleet/opus-scan`, `bin/fleet-watch-tick` |
 | 40 | Review picks reviewer by script | e | `reference/engines.md` | `bin/review-switch` |
 | 41 | Codex ladder, helpers | e | `reference/brain-map.md` | hax helpers |
-| 42 | `/deeper` on Opus medium | b | `skills/deeper/` | `/deeper` skill |
+| 42 | `/deeper` on Opus medium | b | `vstack: skills/deeper/` | `/deeper` skill |
 | 43 | Claude workers alone; Codex helpers | e | `reference/engines.md` | hax helpers |
 | 44 | Pace every subscription | e | `reference/pacer.md` | `bin/pacer` |
 | 45 | Triage session may use Claude | e | `reference/engines.md` | triage briefs |
