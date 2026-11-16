@@ -26,13 +26,12 @@ def concurrency_policy(source):
     cancel = re.search(r"(?:^|[\n,{])\s*['\"]?cancel-in-progress['\"]?\s*:\s*(['\"]?)(true|false|\$\{\{.*?\}\})\1[ \t]*(?:[,}\n]|$)", source, re.S | re.I)
     value = cancel[2] if cancel else ""
     valid_group = group and group[1].strip().strip("'\"") not in {"", "null", "~"}
-    normalized = re.sub(r"\s+", "", value).lower()
-    if normalized.startswith("${{"):
-        if normalized == "${{false}}":
+    if value.startswith("${{"):
+        if re.fullmatch(r"\$\{\{\s*false\s*\}\}", value, re.I):
             return False
-        if normalized not in {"${{github.event_name=='pull_request'}}", '${{github.event_name=="pull_request"}}'}:
+        if not re.fullmatch(r"\$\{\{\s*github\.event_name\s*==\s*(['\"])pull_request\1\s*\}\}", value, re.I):
             return None
-    return bool(valid_group and (normalized == "true" or normalized.startswith("${{")))
+    return bool(valid_group and (value.lower() == "true" or value.startswith("${{")))
 
 
 def workflow_policy(source, name="", path="", default_branch="main"):
@@ -409,6 +408,8 @@ def self_test():
         ("${{ false }}", False),
         ("${{FaLsE}}", False),
         ("${{   FALSE   }}", False),
+        ("${{ github.event_name == 'pull_request ' }}", None),
+        ("${{ github.event_name == 'pull_ request' }}", None),
         ("${{ false && github.ref }}", None),
         ("${{ contains(github.event_name, 'push') }}", None),
         ("${{ github.event_name != 'pull_request' }}", None),
