@@ -215,7 +215,7 @@ def identity_gap(name, sessions=SESSIONS, exists=Path.is_file):
     return None if exists(token) else str(token)
 
 
-def loop_watch(chats, panes, state, now):
+def loop_watch(chats, panes, state, now, woken=frozenset()):
     """At most one message per chat per tick: the loop ask and the identity ask go out together, and a chat solo-wake
     woke this tick gets nothing more until the next one. Two roster rows that resolve to one chat count once."""
     seen = set()
@@ -247,7 +247,7 @@ def loop_watch(chats, panes, state, now):
             log(f"{row['name']} identity: gap, missing {gap}")
         parts = ([LOOP_MESSAGE] if verdict == "arm" else []) + \
                 ([IDENTITY_MESSAGE.format(name=name, token=gap)] if ask_identity else [])
-        if not parts or DRY_RUN or state.get(row["name"]) == now:
+        if not parts or DRY_RUN or session["key"] in woken:
             continue
         ok, detail = send(session, " ".join(parts))
         if ok and verdict == "arm":
@@ -311,7 +311,7 @@ def load_state():
 def main():
     rows = [r for r in roster.rows() if r.get("kind") == "solo-dev" or "solo-dev" in (r.get("roles") or [])]
     chats, panes, state, now = roster.hosted_chats(), tmux_states(), load_state(), time.time()
-    boards = {}
+    boards, woken = {}, set()
     for row in rows:
         scope = scope_of(row)
         who = f"{row['name']} ({scope['where']})" if scope else row["name"]
@@ -342,9 +342,10 @@ def main():
         ok, detail = send(session, message(ticket, "view" if scope.get("view") else "board"))
         if ok:
             state[row["name"]] = now
+            woken.add(session["key"])
             STATE.write_text(json.dumps(state))
         log(f"{who}: {'woke' if ok else 'wake failed for'} {session['key']} with {why} via {session['via']} ({detail})")
-    loop_watch(chats, panes, state, now)
+    loop_watch(chats, panes, state, now, woken)
 
 
 def self_test():
