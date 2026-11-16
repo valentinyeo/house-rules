@@ -123,6 +123,7 @@ class OwnershipTests(unittest.TestCase):
         destination = self.state / "lkg"
         gate.PICK_SRC, gate.LKG_DIR = script, destination
         gate.LKG_PICK, gate.RUNNER_STATE = destination / "pick", self.state / "runner"
+        gate.FSW = self.state / "watch"
 
         def hosted_check(served, extra):
             self.assertEqual(served.with_name("ticket_owner.py").read_text(), dependency.read_text())

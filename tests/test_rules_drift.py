@@ -10,8 +10,12 @@ SCRIPT = REPO / "bin/rules-drift"
 
 
 class RulesDriftTest(unittest.TestCase):
+    def setUp(self):
+        self.state = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state.cleanup)
+
     def run_script(self, *args, env=None):
-        merged = {**os.environ, **(env or {})}
+        merged = {**os.environ, "XDG_STATE_HOME": self.state.name, **(env or {})}
         return subprocess.run(
             [os.environ.get("PYTHON", "python3"), str(SCRIPT), *args],
             cwd=REPO,

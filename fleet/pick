@@ -4156,7 +4156,8 @@ def self_test():
     ALLOCATION = STATE / "allocation.json"
     RUNNER_STATE = STATE
     WATCH = STATE
-    global SF_RELEASE_WAIT
+    global SF_RELEASE_WAIT, DEPLOY_WAIT
+    DEPLOY_WAIT = STATE / "no-deploy-wait.json"
     SF_RELEASE_WAIT = STATE / "no-sf-release-wait.json"  # a live wait file on this server must not change test outcomes
     global SECOND_OFF
     SECOND_OFF = STATE / "no-second-ticket.off"  # likewise the live kill switch of the second-ticket lane
