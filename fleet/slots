@@ -5,7 +5,8 @@ pstack Orchestrate: "Keep about ten workers in flight per coordinator, and start
 The drain tick runs this and starts exactly the number it prints. The only reasons to start fewer are the ones below;
 each is printed so a short fleet is never silent.
 
-Usage: slots --running N --ready M  |  --self-test
+Usage: slots --running N --ready M [--cap C]  |  --self-test
+  --cap      this project's own cap when below 10 (a small project); default 10
   --running  workers and subagents this orchestrator has in flight now
   --ready    tickets it could hand a worker now: open, unblocked, not waiting on a person, not sharing files with
              work in flight
@@ -27,11 +28,12 @@ def box():
     return load, mem["MemAvailable"] / 1_048_576
 
 
-def decide(running, ready, load, mem_gb):
+def decide(running, ready, load, mem_gb, cap=CAP):
     """(k, reason) for one tick. Pure."""
-    room = CAP - running
+    cap = min(cap, CAP)
+    room = cap - running
     if room <= 0:
-        return 0, f"at the cap of {CAP}"
+        return 0, f"at the cap of {cap}"
     if ready <= 0:
         return 0, "no ready ticket: board empty, blocked, or waiting on a person"
     if load > LOAD_MAX:
@@ -54,6 +56,8 @@ def self_test():
     assert decide(2, 9, 0.95, 70)[1].startswith("CPU full")
     assert decide(2, 9, 0.3, 5)[1].startswith("memory low")
     assert decide(0, 9, 0.3, 12) == (2, "memory allows 2")
+    assert decide(1, 20, 0.3, 70, cap=3) == (2, ""), "a small project fills to its own cap"
+    assert decide(0, 20, 0.3, 70, cap=50) == (10, ""), "no project goes past 10"
     print("slots self-test ok")
 
 
@@ -62,7 +66,7 @@ def main(argv):
         return self_test()
     args = dict(zip(argv[::2], argv[1::2]))
     load, mem = box()
-    k, why = decide(int(args["--running"]), int(args["--ready"]), load, mem)
+    k, why = decide(int(args["--running"]), int(args["--ready"]), load, mem, int(args.get("--cap", CAP)))
     print(f"start {k}" + (f": {why}" if why else ""))
 
 
