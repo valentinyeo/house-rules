@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+import base64
+import datetime
+import json
+import os
+import re
+import signal
+import statistics
+import subprocess
+import sys
+import textwrap
+import time
+import urllib.parse
+
+
+def workflow_policy(source):
+    source = "\n".join(re.sub(r"('(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\")|#.*",
+                              lambda match: match[1] or "", line)
+                       for line in textwrap.dedent(source).splitlines())
+    blocks = {}
+    matches = list(re.finditer(r"(?m)^['\"]?([\w-]+)['\"]?[ \t]*:[ \t]*(.*)$", source))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        blocks[match[1]] = textwrap.dedent(source[match.start(2):end]).strip()
+    events = blocks.get("on", "")
+    triggered = bool(re.fullmatch(r"['\"]?(push|pull_request|pull_request_target)['\"]?", events))
+    if events.startswith("["):
+        triggered = bool(re.search(r"\b(push|pull_request|pull_request_target)\b", events))
+    elif re.search(r"(?m)^\s*-\s*['\"]?(push|pull_request|pull_request_target)['\"]?\s*$", events):
+        triggered = True
+    elif events.startswith("{"):
+        triggered = bool(re.search(r"(?:^|[,{])\s*['\"]?(push|pull_request|pull_request_target)['\"]?\s*:", events))
+    elif "\n" in events or events.endswith(":"):
+        keys = list(re.finditer(r"(?m)^( *)(?:['\"]?)([\w-]+)['\"]?:", events))
+        if keys:
+            indent = min(len(match[1]) for match in keys)
+            triggered = any(len(match[1]) == indent and match[2] in
+                            {"push", "pull_request", "pull_request_target"} for match in keys)
+    concurrency = blocks.get("concurrency", "")
+    group = re.search(r"(?:^|[\n,{])\s*['\"]?group['\"]?\s*:\s*([^\n,]+)", concurrency)
+    cancel = re.search(r"(?:^|[\n,{])\s*['\"]?cancel-in-progress['\"]?\s*:\s*true[ \t]*(?:[,}\n]|$)", concurrency)
+    valid_group = group and group[1].strip().strip("'\"") not in {"", "null", "~"}
+    return triggered, bool(valid_group and cancel)
+
+
+def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows):
+    problems = []
+    maximum = max((jobs[str(run["id"])] for run in pr_runs
+                   if run["event"] in {"pull_request", "pull_request_target"}), default=0)
+    if maximum > 20:
+        problems.append(f"max PR run {maximum} jobs > 20")
+    releases = {workflow["id"] for workflow in workflows
+                if re.search(r"release|deploy|publish", workflow["name"] + " " + workflow["path"], re.I)}
+    durations = [(datetime.datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00")) -
+                  datetime.datetime.fromisoformat(merged_at[run["head_sha"]].replace("Z", "+00:00"))).total_seconds() / 60
+                 for run in branch_runs if run["workflow_id"] in releases and run["head_sha"] in merged_at]
+    if durations and statistics.median(durations) > 15:
+        problems.append(f"median merge-to-release {statistics.median(durations):.1f} minutes > 15")
+    policies = [workflow_policy(workflow["source"]) for workflow in workflows]
+    checked = sum(triggered for triggered, valid in policies)
+    missing = sum(triggered and not valid for triggered, valid in policies)
+    if missing:
+        problems.append(f"{missing}/{checked} workflows lack concurrency group with cancel-in-progress true")
+    if not problems:
+        return ""
+    return (f"CHECKS OVER BUDGET: {repo}: {', '.join(problems)}. "
+            "Fix the checks before new feature work (valentin-mode Checks).")
+
+
+def inspect_repo(path):
+    deadline = time.monotonic() + 19.5
+
+    def command(args):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        return subprocess.run(args, check=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, text=True, timeout=remaining,
+                              env={**os.environ, "GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat"}).stdout
+
+    origin = command(["git", "-C", path, "remote", "get-url", "origin"]).strip()
+    match = re.fullmatch(r"(?:https?://(?:[^/@]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])([^/]+/[^/]+?)(?:\.git)?/?", origin)
+    if not match:
+        return ""
+    repo = match[1]
+
+    def api(endpoint, paginate=False):
+        args = ["gh", "api", "--hostname", "github.com", f"repos/{repo}/{endpoint}".rstrip("/")]
+        if paginate:
+            args += ["--paginate", "--slurp"]
+        return json.loads(command(args))
+
+    branch = api("")["default_branch"]
+    branch_query = urllib.parse.urlencode({"branch": branch, "status": "completed", "per_page": 10})
+    branch_runs = api(f"actions/runs?{branch_query}")["workflow_runs"]
+    pr_runs = api("actions/runs?event=pull_request&status=completed&per_page=10")["workflow_runs"]
+    target_runs = api("actions/runs?event=pull_request_target&status=completed&per_page=10")["workflow_runs"]
+    pr_runs = sorted(pr_runs + target_runs, key=lambda run: run["created_at"], reverse=True)[:10]
+    jobs = {str(run["id"]): api(f"actions/runs/{run['id']}/jobs?per_page=1")["total_count"]
+            for run in pr_runs}
+    workflows = [workflow for page in api("actions/workflows?per_page=100", paginate=True)
+                 for workflow in page["workflows"] if workflow.get("state") == "active"]
+    for workflow in workflows:
+        content = api(f"contents/{urllib.parse.quote(workflow['path'])}?ref={urllib.parse.quote(branch, safe='')}")
+        workflow["source"] = base64.b64decode(content["content"]).decode("utf-8")
+    releases = {workflow["id"] for workflow in workflows
+                if re.search(r"release|deploy|publish", workflow["name"] + " " + workflow["path"], re.I)}
+    merged_at = {}
+    for sha in dict.fromkeys(run["head_sha"] for run in branch_runs if run["workflow_id"] in releases):
+        pulls = [pull for page in api(f"commits/{sha}/pulls?per_page=100", paginate=True) for pull in page]
+        times = [pull["merged_at"] for pull in pulls if pull.get("merged_at")
+                 and pull.get("merge_commit_sha") == sha and pull["base"]["ref"] == branch]
+        if times:
+            merged_at[sha] = min(times)
+    return report(repo, pr_runs, jobs, branch_runs, merged_at, workflows)
+
+
+def self_test():
+    fixture = json.loads('''{
+      "pr_runs": [{"id": 1, "event": "pull_request"}],
+      "jobs": {"1": 21},
+      "branch_runs": [{"event": "push", "head_sha": "merged", "workflow_id": 7,
+        "updated_at": "2026-11-16T12:16:00Z"}],
+      "merged_at": {"merged": "2026-11-16T12:00:00Z"},
+      "workflows": [{"id": 7, "name": "Release", "path": ".github/workflows/release.yml",
+        "source": "on: [push, pull_request]\\nconcurrency:\\n  group: release-${{ github.ref }}\\n  cancel-in-progress: true\\njobs: {}\\n"}]
+    }''')
+    def check(data):
+        return report("owner/repo", data["pr_runs"], data["jobs"],
+                      data["branch_runs"], data["merged_at"], data["workflows"])
+    output = check(fixture)
+    assert output.startswith("CHECKS OVER BUDGET: owner/repo:"), output
+    assert "21 jobs" in output and "16.0 minutes" in output, output
+    fixture["jobs"]["1"] = 20
+    fixture["branch_runs"][0]["updated_at"] = "2026-11-16T12:15:00Z"
+    assert check(fixture) == ""
+    fixture["workflows"][0]["source"] = "on: push\njobs: {}\n"
+    assert "1/1 workflows" in check(fixture)
+    assert workflow_policy("on: push\nconcurrency: {group: '${{ github.ref }}', cancel-in-progress: true}\n") == (True, True)
+    assert workflow_policy('"on":\n  pull_request:\n    branches: [main]\nconcurrency:\n  group: ci\n  cancel-in-progress: false\n') == (True, False)
+    assert workflow_policy("on: workflow_dispatch\n") == (False, False)
+    assert workflow_policy("on: push\n# concurrency: {group: ci, cancel-in-progress: true}\n") == (True, False)
+    assert workflow_policy("on: push\njobs:\n  test:\n    concurrency:\n      group: test\n      cancel-in-progress: true\n") == (True, False)
+    assert workflow_policy("on:\n  workflow_dispatch:\n  push:\n    branches: [main]\nconcurrency:\n  cancel-in-progress: true\n  group: ci\n") == (True, True)
+    assert workflow_policy("on:\n  - push\n  - pull_request\n") == (True, False)
+    fixture["branch_runs"] += [dict(fixture["branch_runs"][0], updated_at="2026-11-16T12:40:00Z")]
+    fixture["workflows"][0]["source"] = "on: workflow_dispatch\n"
+    assert "27.5 minutes" in check(fixture)
+    fixture["workflows"] = []
+    assert check(fixture) == ""
+    fixture["jobs"]["1"] = 21
+    fixture["pr_runs"][0]["event"] = "push"
+    assert check(fixture) == ""
+    print("checks-budget self-test: PASS (over, under, boundaries, missing concurrency, workflow forms, no release)")
+
+
+def timeout(signum, frame):
+    raise TimeoutError
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGALRM, timeout)
+    signal.setitimer(signal.ITIMER_REAL, 20)
+    try:
+        if sys.argv[1:] == ["--self-test"]:
+            self_test()
+        elif len(sys.argv) <= 2:
+            output = inspect_repo(sys.argv[1] if len(sys.argv) == 2 else os.getcwd())
+            if output:
+                print(output)
+    except Exception as error:
+        if sys.argv[1:] == ["--self-test"]:
+            print(f"checks-budget self-test: FAIL ({error})")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
