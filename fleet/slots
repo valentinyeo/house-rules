@@ -100,8 +100,8 @@ def decide(running, ready, box, cap=CAP, reservations=0):
         return 0, "no ready ticket: board empty, blocked, or waiting on a person"
     if box.busy >= BUSY_MAX:
         return 0, f"CPU full (busy {box.busy:.0%})"
-    cpu_slots = max(0, floor((BUSY_TARGET - box.busy) * box.cores / CORES_PER_WORKER))
-    mem_slots = max(0, floor((box.mem_avail_gb - MEM_MIN_GB) / PER_WORKER_GB))
+    cpu_slots = max(0, floor((BUSY_TARGET - box.busy) * box.cores / CORES_PER_WORKER) - reservations)
+    mem_slots = max(0, floor((box.mem_avail_gb - MEM_MIN_GB) / PER_WORKER_GB) - reservations)
     fleet_max = box.cores * 2
     workers = box.fleet_workers + reservations
     fleet_slots = max(0, fleet_max - workers)
@@ -117,7 +117,7 @@ def decide(running, ready, box, cap=CAP, reservations=0):
     return min(limits, key=lambda limit: limit[0])
 
 
-def reserve(running, ready, cap=CAP, state_dir=None):
+def reserve(running, ready, cap=CAP, state_dir=None, project=None):
     state_dir = Path(state_dir) if state_dir is not None else Path.home() / ".cache/slots"
     state_dir.mkdir(parents=True, exist_ok=True)
     with (state_dir / "lock").open("a") as lock:
@@ -130,13 +130,49 @@ def reserve(running, ready, cap=CAP, state_dir=None):
         except FileNotFoundError:
             reservations = []
         reservations = [epoch for epoch in reservations if now - epoch < RESERVATION_SECONDS]
-        k, why = decide(running, ready, snapshot, cap, len(reservations))
+        projects_file = state_dir / "projects.json"
+        try:
+            projects = json.loads(projects_file.read_text())
+        except FileNotFoundError:
+            projects = {}
+        projects = {name: state for name, state in projects.items()
+                    if now - state["seen"] < RESERVATION_SECONDS}
+        own_pending = []
+        if project is not None:
+            own_pending = [epoch for epoch in projects.get(project, {}).get("pending", [])
+                           if now - epoch < RESERVATION_SECONDS]
+            projects[project] = {"running": running, "cap": min(cap, CAP),
+                                 "seen": now, "pending": own_pending}
+        k, why = decide(running + len(own_pending), ready, snapshot, cap, len(reservations))
+        if project is not None and ready > 0 and running + len(own_pending) < min(cap, CAP):
+            rows = json.loads(Path(__file__).with_name("roster.json").read_text())["rows"]
+            priorities = {row["name"]: row.get("priority", 3) for row in rows}
+            higher = sorted((name for name in priorities
+                             if priorities[name] < priorities.get(project, 3)),
+                            key=lambda name: priorities[name])
+            cpu_slots = max(0, floor((BUSY_TARGET - snapshot.busy) * snapshot.cores
+                                     / CORES_PER_WORKER) - len(reservations))
+            for name in higher:
+                if name not in projects:
+                    continue
+                state = projects[name]
+                pending = sum(now - epoch < RESERVATION_SECONDS
+                              for epoch in state.get("pending", []))
+                deficit = max(0, state.get("cap", CAP) - state.get("running", 0) - pending)
+                if deficit and cpu_slots < deficit + k:
+                    k, why = 0, f"held for {name}"
+                    break
+                cpu_slots -= deficit
+            own_pending.extend([now] * k)
         reservations.extend([now] * k)
+        projects_file.write_text(json.dumps(projects))
         reservations_file.write_text("".join(f"{epoch}\n" for epoch in reservations))
         return snapshot, k, why
 
 
 def self_test():
+    from contextlib import redirect_stdout
+    from io import StringIO
     from tempfile import TemporaryDirectory
     from unittest.mock import Mock, patch
 
@@ -237,6 +273,71 @@ def self_test():
             with patch("time.time", return_value=1120):
                 assert reserve(0, 10, state_dir=state_dir)[1] == 1
             assert reservations_file.read_text().splitlines() == ["1120"]
+    assert decide(0, 20, Box(0.60, 18, 70, 0), reservations=4) == (
+        1, "CPU allows 1 (busy 60%)")
+    assert decide(0, 20, Box(0.0, 18, 12, 0), reservations=3) == (
+        1, "memory allows 1")
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            grants = [reserve(0, 10, state_dir=state_dir)[1] for _ in range(12)]
+            assert grants == [5] + [0] * 11, grants
+    ht, multibot, other = "HT Product Lead", "Multi Bot Opus Runner", "postbox"
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1] == 5, "a silent higher project holds nobody"
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.80, 18, 70, 0))):
+            reserve(0, 0, state_dir=state_dir, project=ht)
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1:] == (
+                0, f"held for {ht}")
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1:] == (
+                0, "CPU allows 0 (busy 80%)")
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            reserve(0, 0, state_dir=state_dir, project=ht)
+            for name in (other, multibot):
+                assert reserve(0, 10, state_dir=state_dir, project=name)[1:] == (
+                    0, f"held for {ht}")
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1] == 5
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1] == 0
+    for ht_cap in (0, 3, CAP):
+        with TemporaryDirectory() as state_dir:
+            with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+                reserve(ht_cap, 0, cap=ht_cap, state_dir=state_dir, project=ht)
+                reserve(0, 0, state_dir=state_dir, project=multibot)
+                assert reserve(0, 10, state_dir=state_dir, project=other)[1:] == (
+                    0, f"held for {multibot}")
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 5
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            reserve(CAP, 0, state_dir=state_dir, project=ht)
+            reserve(CAP, 0, state_dir=state_dir, project=multibot)
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1] == 5
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.0, 36, 100, 0))):
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1] == 10
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1] == 10
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1] == 0
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.0, 18, 70, 0))):
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1] == 10
+            with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 0
+            with patch.dict(globals(), box=Mock(return_value=Box(0.0, 18, 70, 0))):
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 10
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            with patch("time.time", return_value=1000):
+                reserve(CAP, 0, state_dir=state_dir, project=ht)
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 5
+            with patch("time.time", return_value=1120):
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 5, "a stale higher project holds nobody"
+    output = StringIO()
+    with patch.dict(globals(), reserve=Mock(return_value=(idle, 0, f"held for {ht}"))):
+        with redirect_stdout(output):
+            main(["--running", "0", "--ready", "10", "--project", other])
+        reserve.assert_called_once_with(0, 10, CAP, project=other)
+    assert output.getvalue() == f"start 0: held for {ht}\n"
     print("slots self-test ok")
 
 
@@ -245,6 +346,7 @@ def main(argv):
     parser.add_argument("--running", type=int)
     parser.add_argument("--ready", type=int)
     parser.add_argument("--cap", type=int, default=CAP)
+    parser.add_argument("--project")
     parser.add_argument("--why", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
@@ -254,7 +356,7 @@ def main(argv):
         parser.error("--running and --ready are required")
     if min(args.running, args.ready, args.cap) < 0:
         parser.error("--running, --ready and --cap must be nonnegative")
-    snapshot, k, why = reserve(args.running, args.ready, args.cap)
+    snapshot, k, why = reserve(args.running, args.ready, args.cap, project=args.project)
     if args.why:
         print(snapshot, file=sys.stderr)
     print(f"start {k}" + (f": {why}" if why else ""))
