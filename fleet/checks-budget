@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import re
 import signal
-import statistics
 import subprocess
 import sys
 import textwrap
@@ -27,7 +26,11 @@ def concurrency_policy(source):
     cancel = re.search(r"(?:^|[\n,{])\s*['\"]?cancel-in-progress['\"]?\s*:\s*(['\"]?)(true|false|\$\{\{.*?\}\})\1[ \t]*(?:[,}\n]|$)", source, re.S)
     value = cancel[2] if cancel else ""
     valid_group = group and group[1].strip().strip("'\"") not in {"", "null", "~"}
-    return bool(valid_group and (value == "true" or value.startswith("${{"))), value == "false"
+    expression = value[3:-2].strip() if value.startswith("${{") else ""
+    events = re.findall(r"\bgithub\.event_name\s*==\s*['\"]([^'\"]+)['\"]", expression, re.I)
+    valid_expression = bool(expression) and expression.lower() != "false" and all(
+        event.lower() in {"pull_request", "pull_request_target"} for event in events)
+    return bool(valid_group and (value == "true" or valid_expression)), value == "false"
 
 
 def workflow_policy(source, name="", path="", default_branch="main"):
@@ -78,22 +81,20 @@ def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=False, 
                 if re.search(r"release|deploy|publish", workflow["name"] + " " + workflow["path"], re.I)}
     successful = sorted((run for run in branch_runs if run.get("conclusion") == "success"
                          and run["workflow_id"] in releases and run["head_sha"] in merged_at),
-                        key=lambda run: run["created_at"], reverse=True)
+                        key=lambda run: run["created_at"], reverse=True)[:5]
     durations = [(datetime.datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00")) -
                   datetime.datetime.fromisoformat(merged_at[run["head_sha"]].replace("Z", "+00:00"))).total_seconds() / 60
                  for run in successful]
-    median = statistics.median(durations) if durations else None
-    if median is not None and median > 15:
-        problems.append(f"median merge-to-release {median:.1f} minutes > 15")
-    if durations and durations[0] > 15:
-        problems.append(f"newest merge-to-release {durations[0]:.1f} minutes > 15")
+    slowest = max(durations, default=None)
+    if slowest is not None and slowest > 15:
+        problems.append(f"slowest merge-to-release {slowest:.1f} min of last {len(durations)} > 15")
     policies = [workflow_policy(workflow["source"], workflow["name"], workflow["path"], default_branch)
                 for workflow in workflows]
     checked = sum(triggered for triggered, valid in policies)
     missing = sum(triggered and not valid for triggered, valid in policies)
     if debug:
-        ship_minutes = f"{median:.1f}" if median is not None else "unavailable"
-        print(f"checks-budget: {repo}: max jobs={maximum if maximum is not None else 'unavailable'}; median ship minutes={ship_minutes}; "
+        ship_minutes = f"{slowest:.1f}" if slowest is not None else "unavailable"
+        print(f"checks-budget: {repo}: max jobs={maximum if maximum is not None else 'unavailable'}; slowest ship minutes={ship_minutes}; "
               f"workflows missing cancel-in-progress={missing}/{checked}", file=sys.stderr)
     if missing:
         problems.append(f"{missing}/{checked} workflows lack concurrency group with cancel-in-progress true")
@@ -276,7 +277,7 @@ def self_test():
     with patch.object(subprocess, "run", side_effect=gh245):
         assert inspect_repo(str(fixture_path)) == output
     assert output.startswith("CHECKS OVER BUDGET: owner/repo:"), output
-    assert "21 jobs" in output and "16.0 minutes" in output, output
+    assert "21 jobs" in output and "slowest merge-to-release 16.0 min of last 1" in output, output
     fixture["jobs"]["1"] = 20
     fixture["branch_runs"][0]["updated_at"] = "2026-11-16T12:15:00Z"
     assert check(fixture) == ""
@@ -284,7 +285,7 @@ def self_test():
     with patch.object(subprocess, "run", side_effect=gh245), contextlib.redirect_stderr(stderr):
         assert inspect_repo(str(fixture_path), debug=True) == ""
     assert "max jobs=20" in stderr.getvalue(), stderr.getvalue()
-    assert "median ship minutes=15.0" in stderr.getvalue(), stderr.getvalue()
+    assert "slowest ship minutes=15.0" in stderr.getvalue(), stderr.getvalue()
     assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue(), stderr.getvalue()
     source_path.unlink()
     stderr = io.StringIO()
@@ -302,7 +303,7 @@ def self_test():
         assert inspect_repo(str(fixture_path), debug=True) == ""
     assert "CalledProcessError" in stderr.getvalue(), stderr.getvalue()
     assert "max jobs=unavailable" in stderr.getvalue(), stderr.getvalue()
-    assert "median ship minutes=15.0" in stderr.getvalue(), stderr.getvalue()
+    assert "slowest ship minutes=15.0" in stderr.getvalue(), stderr.getvalue()
     calls = []
     def capped_api(args, **kwargs):
         endpoint = args[-1]
@@ -372,14 +373,14 @@ def self_test():
     assert workflow_policy("on:\n  - push\n  - pull_request\n") == (True, False)
     fixture["branch_runs"] += [dict(fixture["branch_runs"][0], updated_at="2026-11-16T12:40:00Z")]
     fixture["workflows"][0].update(name="Release", path=".github/workflows/release.yml", source="on: workflow_dispatch\n")
-    assert "27.5 minutes" in check(fixture)
+    assert "slowest merge-to-release 40.0 min of last 2" in check(fixture)
     fixture["workflows"] = []
     assert check(fixture) == ""
     fixture["jobs"]["1"] = 21
     fixture["pr_runs"][0]["event"] = "push"
     assert check(fixture) == ""
     policy_cases = [
-        ("on: pull_request\njobs:\n  lint:\n    concurrency:\n      group: lint-${{ github.ref }}\n      cancel-in-progress: true\n  test:\n    concurrency:\n      group: test-${{ github.ref }}\n      cancel-in-progress: ${{ false }}\n", (True, True)),
+        ("on: pull_request\njobs:\n  lint:\n    concurrency:\n      group: lint-${{ github.ref }}\n      cancel-in-progress: true\n  test:\n    concurrency:\n      group: test-${{ github.ref }}\n      cancel-in-progress: ${{ false }}\n", (True, False)),
         ("on: pull_request\njobs:\n  lint:\n    concurrency: {group: lint, cancel-in-progress: true}\n  test:\n    runs-on: ubuntu-latest\n", (True, False)),
         ("on: pull_request\nconcurrency:\n  group: ci\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\njobs:\n  test:\n    runs-on: ubuntu-latest\n", (True, True)),
         ("on: pull_request\nconcurrency:\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n", (True, False)),
@@ -395,6 +396,22 @@ def self_test():
     ]
     for source, expected in policy_cases:
         assert workflow_policy(source) == expected, (source, workflow_policy(source), expected)
+    expression_cases = [
+        ("${{ false }}", False),
+        ("${{FaLsE}}", False),
+        ("${{   FALSE   }}", False),
+        ("${{ github.event_name == 'push' }}", False),
+        ('${{github.event_name=="workflow_dispatch"}}', False),
+        ("${{ GITHUB.EVENT_NAME == 'PUSH' }}", False),
+        ("${{ github.event_name == 'pull_request' }}", True),
+        ("${{ github.event_name == 'pull_request_target' }}", True),
+        ("${{ github.event_name != 'push' }}", True),
+        ("${{ !contains(github.ref, 'release/') }}", True),
+        ("${{ true }}", True),
+    ]
+    for expression, valid in expression_cases:
+        source = f"on: pull_request\nconcurrency:\n  group: ci\n  cancel-in-progress: {expression}\n"
+        assert workflow_policy(source) == (True, valid), (expression, workflow_policy(source))
     assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: true, group: ci}\n") == (True, True)
     assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: false, group: ci}\n") == (False, False)
     assert workflow_policy("on:\n  push:\n    tags-ignore: ['v*']\n") == (True, False)
@@ -408,14 +425,15 @@ def self_test():
                      updated_at=f"2026-11-16T12:{minute:02d}:00Z", created_at=f"2026-11-16T12:00:{59-index:02d}Z")
                 for index, minute in enumerate(minutes)]
         return report("owner/repo", [], {}, runs, {"merged": "2026-11-16T12:00:00Z"}, release)
-    assert "newest merge-to-release 16.0" in ship_report([16, 1, 2])
-    assert "median merge-to-release" not in ship_report([16, 1, 2])
-    assert "median merge-to-release 20.0" in ship_report([1, 20, 21])
-    assert "newest merge-to-release" not in ship_report([1, 20, 21])
+    assert "slowest merge-to-release 16.0 min of last 3" in ship_report([16, 1, 2])
+    assert "slowest merge-to-release 16.0 min of last 3" in ship_report([1, 16, 2])
+    assert "slowest merge-to-release 21.0 min of last 3" in ship_report([1, 20, 21])
+    assert "slowest merge-to-release 16.0 min of last 5" in ship_report([1, 16, 2, 3, 4])
+    assert ship_report([1, 2, 3, 4, 5, 16]) == ""
     assert ship_report([40, 50, 1], ["failure", "cancelled", "success"]) == ""
     assert ship_report([40], ["failure"]) == ""
     assert ship_report([15]) == ""
-    print("checks-budget ship-time regression tests: PASS (successful releases, newest, median, fifteen-minute boundary)")
+    print("checks-budget ship-time regression tests: PASS (successful releases, slowest of five, fifteen-minute boundary)")
     fixture["workflows"] = [dict(release[0], path=".github/workflows/release.yml")]
     fixture["pr_runs"][0]["event"] = "pull_request"
     fixture["jobs"]["1"] = 20
