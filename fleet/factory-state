@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
@@ -250,32 +251,58 @@ def view_filter(view, token, run=subprocess.run):
     return labels
 
 
-def pr_counts(repo, run=subprocess.run):
-    counts = {}
-    for checks in (None, "failure", "pending", "success"):
-        command = ["gh", "search", "prs", "--repo", repo, "--state", "open", "--json", "number", "--limit", "1000"]
-        if checks:
-            command.extend(["--checks", checks])
+def search_count(repo, checks, run=subprocess.run, sleep=time.sleep):
+    command = ["gh", "api", "--include", "--method", "GET", "search/issues",
+               "-f", f"q=repo:{repo} is:pr is:open status:{checks}", "-f", "per_page=1"]
+    for attempt in range(2):
         result = run(command, capture_output=True, text=True, timeout=120)
+        parts = re.split(r"\r?\n\r?\n", result.stdout.strip(), maxsplit=1)
+        headers, body = parts if len(parts) == 2 else ("", result.stdout)
+        if result.returncode and "403" in headers + result.stderr and attempt == 0:
+            reset = re.search(r"(?im)^x-ratelimit-reset:\s*(\d+)", headers)
+            retry = re.search(r"(?im)^retry-after:\s*(\d+)", headers)
+            if reset or retry:
+                delay = int(retry[1]) if retry else max(0, int(reset[1]) - time.time()) + 1
+                sleep(delay)
+                continue
         result.check_returncode()
-        prs = json.loads(result.stdout)
-        if not isinstance(prs, list) or len(prs) >= 1000:
+        data = json.loads(body)
+        if data.get("incomplete_results") is not False or type(data.get("total_count")) is not int:
             raise ValueError("incomplete PR search")
-        counts[{None: "open", "failure": "red", "pending": "pending", "success": "green"}[checks]] = len(prs)
+        return data["total_count"]
+
+
+def pr_counts(repo, run=subprocess.run):
     result = run(["gh", "pr", "list", "-R", repo, "--state", "open", "--json",
                   "number,comments", "--limit", "1000"], capture_output=True, text=True, timeout=120)
     result.check_returncode()
     prs = json.loads(result.stdout)
     if not isinstance(prs, list) or len(prs) >= 1000:
         raise ValueError("incomplete PR comments")
+    counts = dict(open=len(prs))
+    for checks, key in (("failure", "red"), ("pending", "pending"), ("success", "green")):
+        counts[key] = search_count(repo, checks, run) if prs else 0
     counts["waiting"] = sum(not any(re.search(r"(?im)^\s*(?:\#{1,6}\s*)?(?:(?:verdict|pstack verifier)\s*:\s*)?(?:\*\*)?(?:PASS\+NOTES|PASS|FAIL)(?=\s|[:.,*]|$)", c["body"])
                                     for c in pr["comments"]) for pr in prs)
     return counts
 
 
-def transcript_model(home, sid):
-    model = "?"
-    for path in sorted((home / ".claude/projects").glob(f"*/{sid}.jsonl")) if sid else []:
+def transcript_state(home, sid, now, codex_cwd=None):
+    paths = list((home / ".claude/projects").glob(f"*/{sid}.jsonl")) if sid else []
+    if sid and not paths:
+        paths = list((home / ".codex/sessions").glob(f"**/*{sid}.jsonl"))
+    if not paths and not sid and codex_cwd:
+        for path in sorted((home / ".codex/sessions").glob("**/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                with path.open() as transcript:
+                    meta = json.loads(next(transcript))
+                if meta.get("type") == "session_meta" and meta.get("payload", {}).get("cwd") == codex_cwd:
+                    paths = [path]
+                    break
+            except (OSError, ValueError, StopIteration):
+                continue
+    model, fire = "unavailable", None
+    for path in sorted(paths):
         with path.open(errors="replace") as transcript:
             for line in transcript:
                 try:
@@ -284,11 +311,22 @@ def transcript_model(home, sid):
                     continue
                 if not isinstance(record, dict):
                     continue
+                payload = record.get("payload")
                 message = record.get("message")
-                value = record.get("model") or (message.get("model") if isinstance(message, dict) else None)
+                data = payload if isinstance(payload, dict) else record
+                value = data.get("model") or (message.get("model") if isinstance(message, dict) else None)
                 if isinstance(value, str):
                     model = value
-    return model
+                if data.get("turnOrigin") == "scheduled" or data.get("turn_origin") == "scheduled":
+                    stamp = data.get("timestamp") or record.get("timestamp")
+                    if isinstance(stamp, str):
+                        try:
+                            fired = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+                            if fired <= now + 60:
+                                fire = max(fire or fired, fired)
+                        except ValueError:
+                            pass
+    return model, fire, bool(paths)
 
 
 def git_identity(run=subprocess.run):
@@ -379,18 +417,28 @@ def gather(solo, now, roster_path=HERE / "roster.json", home=None, proc=Path("/p
     prs = prs or pr_counts
     view_cache, board_view_cache, row_tickets, scoped_boards = {}, {}, {}, set()
     for row in roster:
-        session, sid, loop, why, model = None, None, "unknown", "no transcript", "?"
+        session, sid, loop, why, model = None, None, "no chat", "no chat", "no chat"
         try:
             session = solo.session_of(row, chats, panes)
             if session and session["via"] == "live":
                 sid = chats[session["key"]].get("transcript") or session.get("sid")
             elif session:
                 sid = solo.tmux_transcript(session["key"])
-            model = transcript_model(home, sid)
-            if sid and list((home / ".claude/projects").glob(f"*/{sid}.jsonl")):
-                fire = solo.last_loop_fire(sid)
-                verdict, why = solo.loop_verdict(session, fire, [], now.timestamp())
-                loop = "on" if verdict == "ok" else "off"
+            if session is None:
+                pane = panes.get(row.get("tmux") or row["name"])
+                if pane and pane.get("harness") not in (None, "bash", "other"):
+                    session = dict(pane, via="tmux", key=row.get("tmux") or row["name"])
+                    sid = pane.get("sid") or pane.get("sessionId")
+            if session:
+                codex_cwd = session.get("cwd") if session.get("harness") == "codex" else None
+                model, fire, found = transcript_state(home, sid, now.timestamp(), codex_cwd)
+                if found:
+                    verdict, why = solo.loop_verdict(session, fire, [], now.timestamp())
+                    loop = "on" if verdict == "ok" else "off"
+                else:
+                    provider = chats.get(session["key"], {}).get("provider")
+                    model = provider or "unavailable"
+                    loop, why = "unavailable", "session found, transcript unavailable"
         except (OSError, ValueError, KeyError, TypeError):
             why = "transcript failed"
             snapshot.failed(f"transcript {row['name']} failed")
@@ -424,6 +472,7 @@ def gather(solo, now, roster_path=HERE / "roster.json", home=None, proc=Path("/p
                     if board_view not in view_cache:
                         view_cache[board_view] = views(board_view)
                     tickets = [t for t in tickets if solo.scopes.in_view(t, view_cache[board_view])]
+                ticket_counts(tickets, now)
                 selected.extend(tickets)
                 row_tickets.setdefault(row["name"], {})[board] = tickets
                 snapshot.ticket_sets.setdefault(board, {}).update({str(t.get("id", t.get("ticketNumber", json.dumps(t, sort_keys=True)))): t for t in tickets})
@@ -467,19 +516,22 @@ def total(values):
 def render(rows, now, why=False):
     lines = []
     if rows.all_rows:
-        good = bool(rows) and all(r.left is not None for r in rows)
         tasks = [t for board in rows.ticket_sets.values() for t in board.values()]
-        shipped, left = ticket_counts(tasks, now) if good else (dict.fromkeys(WINDOWS), None)
+        shipped, left = ticket_counts(tasks, now)
+        board_unknown = sum(r.left is None for r in rows)
+        pr_unknown = sum(r.prs is None for r in rows)
+        board_note = f" ({board_unknown} rows unknown)" if board_unknown else ""
+        pr_note = f" ({pr_unknown} rows unknown)" if pr_unknown else ""
         live = sum(r.live for r in rows) if rows.live_known else None
-        loops = sum(r.live and r.loop == "on" for r in rows) if rows.live_known and not any(r.live and r.loop == "unknown" for r in rows) else None
-        counts = {key: total(p[key] if p else None for p in rows.prs.values())
-                  if all(r.repo for r in rows) else None for key in ("open", "red", "pending", "green", "waiting")}
+        loops = sum(r.live and r.loop == "on" for r in rows) if rows.live_known and not any(r.live and r.loop in ("unknown", "unavailable") for r in rows) else None
+        counts = {key: sum(p[key] for p in rows.prs.values() if p is not None)
+                  for key in ("open", "red", "pending", "green", "waiting")}
         clock = now.astimezone(ZoneInfo("Europe/London")).strftime("%H:%M")
         lines.append(f"Factory {clock} (Europe/London): {len(rows)} orchestrators, {number(live)} live, "
                      f"loops on {number(loops)}/{number(live)}, workers {number(total(r.active for r in rows))}/"
                      f"{sum(r.allowed for r in rows)}, server workers {number(rows.server_workers)}, unattributed {number(rows.unattributed)}. "
-                     f"Shipped 1h/3h/12h: {'/'.join(number(shipped[h]) for h in WINDOWS)}. Left: {number(left)}. "
-                     f"PRs open/red/pending/green/waiting verifier: {'/'.join(number(counts[k]) for k in ('open', 'red', 'pending', 'green', 'waiting'))}.")
+                     f"Shipped 1h/3h/12h: {'/'.join(number(shipped[h]) for h in WINDOWS)}{board_note}. Left: {number(left)}{board_note}. "
+                     f"PRs open/red/pending/green/waiting verifier: {'/'.join(number(counts[k]) for k in ('open', 'red', 'pending', 'green', 'waiting'))}{pr_note}.")
     lines.append("name | model | loop | workers active/allowed | shipped 1h/3h/12h (Done, last update) | left | PRs open/red/pending/green/waiting verifier")
     for row in sorted(rows, key=lambda r: not r.live):
         ranking = "" if row.ranked else " not ranked"
@@ -532,18 +584,18 @@ def self_test():
             pr_calls.append(repo)
             return pr_counts(repo, run=fake_pr_run)
         def fake_pr_run(command, **kwargs):
-            fields = command[command.index("--json") + 1]
             if command[1:3] == ["pr", "list"]:
-                if "statusCheckRollup" in fields:
-                    return subprocess.CompletedProcess(command, 1, "", "HTTP 504: Gateway Timeout")
+                fields = command[command.index("--json") + 1]
                 assert fields == "number,comments"
-                data = fixture["prs"]
-            else:
-                assert command[:3] == ["gh", "search", "prs"] and fields == "number"
-                checks = command[command.index("--checks") + 1] if "--checks" in command else None
-                numbers = {None: range(7), "failure": range(2), "pending": range(3), "success": range(1)}[checks]
-                data = [dict(number=n) for n in numbers]
-            return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
+                data = fixture["prs"] + [dict(number=n + 100, comments=[]) for n in range(7 - len(fixture["prs"]))]
+                for pr in data[len(fixture["prs"]):]:
+                    pr["comments"] = [dict(body="PASS")]
+                return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
+            assert command[:3] == ["gh", "api", "--include"]
+            query = command[command.index("-f") + 1]
+            checks = query.rsplit("status:", 1)[1]
+            data = dict(total_count={"failure": 2, "pending": 3, "success": 1}[checks], incomplete_results=False)
+            return subprocess.CompletedProcess(command, 0, "HTTP/2.0 200 OK\n\n" + json.dumps(data), "")
         def collect(**kwargs):
             return gather(solo, now, roster, home, proc, tasks, views, prs, list_views=lambda board: [], **kwargs)
         with patch.object(solo, "HOME", home), patch.object(solo.roster, "hosted_chats", return_value=chats), patch.object(solo, "tmux_states", return_value={}):
@@ -561,6 +613,11 @@ def self_test():
             assert "server workers 5, unattributed 1" in output
             assert "Loop:" in output and "2 not ranked" in output
             assert "session process A failed" not in output
+            header = output.splitlines()[0]
+            assert "Shipped 1h/3h/12h: 1/2/3 (1 rows unknown)" in header
+            assert "Left: 2 (1 rows unknown)" in header
+            assert "PRs open/red/pending/green/waiting verifier: 7/2/3/1/1 (1 rows unknown)" in header
+            assert rows[1].model == "no chat" and rows[1].loop == "no chat"
             before = json.dumps([asdict(r) for r in rows])
             assert render(rows, now, True) == output
             assert before == json.dumps([asdict(r) for r in rows])
@@ -589,22 +646,55 @@ def self_test():
             assert collect()[0].active == 3
             stale.unlink()
             chats["live-a"]["transcript"] = "missing"
-            assert collect()[0].loop == "unknown"
+            assert collect()[0].loop == "unavailable"
             chats["live-a"]["transcript"] = "native-a"
             (transcripts / "native-a.jsonl").write_text('{"turnOrigin":"scheduled","timestamp":"2026-11-16T10:00:00Z"}\n')
             assert collect()[0].loop == "off"
             record.write_text(json.dumps(dict(pid=10, tmux="plain:0", sessionId="native-a")))
             assert session_records(home)["plain"][0]["pid"] == 10
+            codex = home / ".codex/sessions/2026/11/16"
+            codex.mkdir(parents=True)
+            (codex / "rollout-codex-a.jsonl").write_text('\n'.join(json.dumps(r) for r in [
+                dict(type="turn_context", payload=dict(model="gpt-6.1-sol")),
+                dict(type="event_msg", timestamp="2026-11-16T11:50:00Z", payload=dict(turn_origin="scheduled"))]))
+            chats["live-a"]["transcript"] = "codex-a"
+            codex_rows = collect()
+            assert codex_rows[0].model == "gpt-6.1-sol" and codex_rows[0].loop == "on"
+            (codex / "rollout-codex-a.jsonl").write_text(json.dumps(dict(type="session_meta", payload=dict(cwd="/fixture/codex"))) + '\n' +
+                json.dumps(dict(type="turn_context", payload=dict(model="codex-tmux-model"))) + '\n' +
+                json.dumps(dict(type="event_msg", timestamp="2026-11-16T12:05:00Z", payload=dict(turn_origin="scheduled"))))
+            chats["live-a"]["transcript"] = "native-a"
+            with patch.object(solo, "tmux_states", return_value={"B": dict(harness="codex", state="idle", cwd="/fixture/codex")}):
+                tmux_rows = collect()
+            assert tmux_rows[1].model == "codex-tmux-model" and tmux_rows[1].loop == "off"
             record.write_text("invalid")
             assert "session records failed" in collect().failures
             roster.write_text(json.dumps({"rows": fixture["roster"][:2]}))
             totals = collect()
             assert "Shipped 1h/3h/12h: 1/2/3. Left: 2." in render(totals, now)
             assert "PRs open/red/pending/green/waiting verifier: 7/2/3/1/1." in render(totals, now)
+            duplicate = dict(fixture["roster"][0], name="shared-board", tmux="no-chat")
+            roster.write_text(json.dumps({"rows": [fixture["roster"][0], duplicate]}))
+            pr_calls.clear()
+            shared = collect()
+            assert "Shipped 1h/3h/12h: 1/2/3. Left: 1." in render(shared, now)
+            assert "PRs open/red/pending/green/waiting verifier: 7/2/3/1/1." in render(shared, now)
+            assert pr_calls == ["owner/app"]
+            failed_pr_calls = []
+            def failed_prs(repo):
+                failed_pr_calls.append(repo)
+                raise ValueError("fixture PR failure")
+            failed_repo = gather(solo, now, roster, home, proc, tasks, views, failed_prs)
+            assert failed_pr_calls == ["owner/app"]
+            assert "PRs open/red/pending/green/waiting verifier: 0/0/0/0/0 (2 rows unknown)" in render(failed_repo, now)
+            roster.write_text(json.dumps({"rows": fixture["roster"][:2]}))
             def failed(board):
                 raise ValueError("fixture failure")
             broken = gather(solo, now, roster, home, proc, failed, views, prs)
             assert broken[0].left is None and "board 2060 failed" in render(broken, now)
+            malformed = gather(solo, now, roster, home, proc,
+                               lambda board: [dict(id=1, labels=[dict(id="a")])], views, prs)
+            assert "Shipped 1h/3h/12h: 0/0/0" in render(malformed, now)
         worker_proc = home / "real-workers"
         worker_proc.mkdir()
         for case in fixture["reparented_workers"]:
@@ -658,15 +748,42 @@ def self_test():
         searches = []
         def big_repo(command, **kwargs):
             searches.append(command)
-            assert "statusCheckRollup" not in command[command.index("--json") + 1], "504 rollup must never be requested"
             if command[1:3] == ["pr", "list"]:
+                assert command[command.index("--json") + 1] == "number,comments"
                 data = [dict(number=n, comments=[]) for n in range(77)]
-            else:
-                checks = command[command.index("--checks") + 1] if "--checks" in command else None
-                data = [dict(number=n) for n in range({None: 77, "failure": 23, "pending": 51, "success": 3}[checks])]
-            return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
+                return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
+            checks = command[command.index("-f") + 1].rsplit("status:", 1)[1]
+            data = dict(total_count={"failure": 23, "pending": 51, "success": 3}[checks], incomplete_results=False)
+            return subprocess.CompletedProcess(command, 0, "HTTP/2.0 200 OK\n\n" + json.dumps(data), "")
         assert pr_counts("hypertask-ai/hypertask", big_repo) == dict(open=77, red=23, pending=51, green=3, waiting=77)
-        assert len(searches) == 5
+        assert len(searches) == 4
+        searches.clear()
+        for i in range(9):
+            pr_counts(f"owner/repo-{i}", big_repo)
+        assert sum(c[1] == "api" for c in searches) == 27
+        attempts, delays = [], []
+        def limited(command, **kwargs):
+            attempts.append(command)
+            if len(attempts) == 1:
+                return subprocess.CompletedProcess(command, 1, "HTTP/2.0 403 Forbidden\nx-ratelimit-reset: 105\n\n{}", "HTTP 403: API rate limit exceeded")
+            return subprocess.CompletedProcess(command, 0, 'HTTP/2.0 200 OK\n\n{"total_count":1200,"incomplete_results":false}', "")
+        with patch("time.time", return_value=100):
+            assert search_count("owner/app", "failure", limited, delays.append) == 1200
+        assert len(attempts) == 2 and delays == [6]
+        attempts.clear()
+        def always_limited(command, **kwargs):
+            attempts.append(command)
+            return subprocess.CompletedProcess(command, 1, "HTTP/2.0 403 Forbidden\nretry-after: 1\n\n{}", "HTTP 403")
+        try:
+            search_count("owner/app", "failure", always_limited, delays.append)
+            assert False, "a second 403 must fail"
+        except subprocess.CalledProcessError:
+            pass
+        assert len(attempts) == 2
+        def empty_repo(command, **kwargs):
+            assert command[1:3] == ["pr", "list"], "empty repo needs no search"
+            return subprocess.CompletedProcess(command, 0, "[]", "")
+        assert pr_counts("owner/empty", empty_repo) == dict(open=0, red=0, pending=0, green=0, waiting=0)
         pairs = [dict(name="one", cwd="/same", repo="owner/repo", tmux="live-one"),
                  dict(name="two", cwd="/same", repo="owner/repo", tmux="live-two")]
         assert select_rows(pairs, "/same", "owner/repo", keys=("live-two",))[0] == [pairs[1]]
@@ -725,7 +842,7 @@ def self_test():
         token_file.write_text("fixture-token")
         with patch.dict(os.environ, {"HT_TOKEN": str(token_file)}):
             assert read_token(home) == "fixture-token"
-    print("factory-state self-test ok: 21 reparented workers, ticket/cwd attribution, unattributed totals, saved views, 504-safe PR checks, verifier counts, loops, scope, failures")
+    print("factory-state self-test ok: 21 reparented workers, ticket/cwd attribution, unattributed totals, saved views, 504-safe PR checks, reset retry, partial totals, shared sources, Codex sessions, verifier counts, loops, scope, failures")
 
 
 def main():
