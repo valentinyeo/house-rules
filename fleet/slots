@@ -1,25 +1,80 @@
 #!/usr/bin/env python3
-"""slots: how many more workers an orchestrator starts now, and why when fewer than the cap of 10.
-
-pstack Orchestrate: "Keep about ten workers in flight per coordinator, and start the next one as each finishes."
-The drain tick runs this and starts exactly the number it prints. The only reasons to start fewer are the ones below;
-each is printed so a short fleet is never silent.
-CPU capacity uses busy share sampled from /proc/stat over one second.
-
-Usage: slots --running N --ready M [--cap C]  |  --self-test
-  --cap      this project's own cap when below 10 (a small project); default 10
-  --running  workers and subagents this orchestrator has in flight now
-  --ready    tickets it could hand a worker now: open, unblocked, not waiting on a person, not sharing files with
-             work in flight
-Prints one line: "start K" or "start K: <reason>".
-"""
+import argparse
+from dataclasses import dataclass
+import fcntl
+import json
+from math import floor
+import os
+from pathlib import Path
+import re
 import sys
 import time
 
 CAP = 10
-BUSY_MAX = 0.85      # CPU busy share above this: the box is full
-MEM_MIN_GB = 8       # available memory below this: the box is full
-PER_WORKER_GB = 2
+BUSY_TARGET = 0.75
+BUSY_MAX = 0.85
+CORES_PER_WORKER = 0.5  # CPU allowance while a worker builds.
+MEM_MIN_GB = 8
+PER_WORKER_GB = 1.0  # Worker and its tools.
+RESERVATION_SECONDS = 120
+CLAUDE_MATCHER = re.compile(r"(?:^|/)(?:claude|@anthropic-ai/claude-code/cli\.js)$")
+WORKER_MATCHERS = (
+    (re.compile(r"(?:^|/)codex(?:\.js)?$"), ("exec",)),
+    (CLAUDE_MATCHER, ("-p", "--print")),
+    (re.compile(r"(?:^|/)hax$"), ("-p",)),
+    (re.compile(r"(?:^|/)cursor-agent$"), ()),
+    (re.compile(r"(?:^|/)(?:pi|pi-coding-agent/(?:dist/)?cli\.js)$"), ()),
+)
+
+
+@dataclass(frozen=True)
+class Box:
+    busy: float
+    cores: int
+    mem_avail_gb: float
+    fleet_workers: int
+
+
+def is_worker(argv, pid=None, chat_pids=()):
+    if not argv:
+        return False
+    executable = argv[0]
+    args = argv[1:]
+    if Path(executable).name in ("node", "nodejs") and args:
+        executable, *args = args
+    if CLAUDE_MATCHER.search(executable):
+        stream_input = any(
+            arg == "--input-format=stream-json"
+            or (arg == "--input-format" and args[i + 1:i + 2] == ["stream-json"])
+            for i, arg in enumerate(args)
+        )
+        if stream_input or pid in chat_pids:
+            return False
+    flags = {arg.split("=", 1)[0] for arg in args}
+    return any(pattern.search(executable)
+               and (not required or any(arg in flags for arg in required))
+               for pattern, required in WORKER_MATCHERS)
+
+
+def fleet_workers():
+    chat_pids = set()
+    for session in (Path.home() / ".claude/sessions").glob("*.json"):
+        try:
+            data = json.loads(session.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("pid"), int):
+            chat_pids.add(data["pid"])
+    workers = 0
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            argv = process.joinpath("cmdline").read_bytes().decode(errors="replace").rstrip("\0").split("\0")
+        except OSError:
+            continue
+        workers += is_worker(argv, int(process.name), chat_pids)
+    return workers
 
 
 def box():
@@ -29,52 +84,281 @@ def box():
     with open("/proc/stat") as f:
         after = list(map(int, f.readline().split()[1:9]))
     delta = [end - start for start, end in zip(before, after)]
-    busy = 1 - (delta[3] + delta[4]) / (sum(delta) or 1)
+    total = sum(delta)
+    busy = 1 - (delta[3] + delta[4]) / total if total else 0.0
     with open("/proc/meminfo") as f:
         mem = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in f)}
-    return busy, mem["MemAvailable"] / 1_048_576
+    return Box(busy, os.cpu_count() or 1, mem["MemAvailable"] / 1_048_576, fleet_workers())
 
 
-def decide(running, ready, busy, mem_gb, cap=CAP):
-    """(k, reason) for one tick. Pure."""
+def decide(running, ready, box, cap=CAP, reservations=0):
     cap = min(cap, CAP)
     room = cap - running
     if room <= 0:
         return 0, f"at the cap of {cap}"
     if ready <= 0:
         return 0, "no ready ticket: board empty, blocked, or waiting on a person"
-    if busy > BUSY_MAX:
-        return 0, f"CPU full (busy {busy:.0%}, max {BUSY_MAX:.0%})"
-    if mem_gb < MEM_MIN_GB:
-        return 0, f"memory low ({mem_gb:.0f} GB free, min {MEM_MIN_GB})"
-    k = min(room, ready, int((mem_gb - MEM_MIN_GB) // PER_WORKER_GB) or 1)
-    if k == room:
-        return k, ""
-    why = "only {} ready ticket(s)".format(ready) if k == ready else f"memory allows {k}"
-    return k, why
+    if box.busy >= BUSY_MAX:
+        return 0, f"CPU full (busy {box.busy:.0%})"
+    cpu_slots = max(0, floor((BUSY_TARGET - box.busy) * box.cores / CORES_PER_WORKER) - reservations)
+    mem_slots = max(0, floor((box.mem_avail_gb - MEM_MIN_GB) / PER_WORKER_GB) - reservations)
+    fleet_max = box.cores * 2
+    workers = box.fleet_workers + reservations
+    fleet_slots = max(0, fleet_max - workers)
+    memory_reason = (f"memory low ({box.mem_avail_gb:.0f} GB free, min {MEM_MIN_GB})"
+                     if box.mem_avail_gb < MEM_MIN_GB else f"memory allows {mem_slots}")
+    limits = (
+        (room, ""),
+        (ready, f"only {ready} ready ticket(s)"),
+        (cpu_slots, f"CPU allows {cpu_slots} (busy {box.busy:.0%})"),
+        (mem_slots, memory_reason),
+        (fleet_slots, f"server holds {workers} workers (max {fleet_max})"),
+    )
+    return min(limits, key=lambda limit: limit[0])
+
+
+def reserve(running, ready, cap=CAP, state_dir=None, project=None):
+    state_dir = Path(state_dir) if state_dir is not None else Path.home() / ".cache/slots"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with (state_dir / "lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        snapshot = box()
+        now = time.time()
+        reservations_file = state_dir / "reservations"
+        try:
+            reservations = [float(epoch) for epoch in reservations_file.read_text().splitlines()]
+        except FileNotFoundError:
+            reservations = []
+        reservations = [epoch for epoch in reservations if now - epoch < RESERVATION_SECONDS]
+        projects_file = state_dir / "projects.json"
+        try:
+            projects = json.loads(projects_file.read_text())
+        except FileNotFoundError:
+            projects = {}
+        projects = {name: state for name, state in projects.items()
+                    if now - state["seen"] < RESERVATION_SECONDS}
+        own_pending = []
+        if project is not None:
+            own_pending = [epoch for epoch in projects.get(project, {}).get("pending", [])
+                           if now - epoch < RESERVATION_SECONDS]
+            projects[project] = {"running": running, "cap": min(cap, CAP),
+                                 "seen": now, "pending": own_pending}
+        k, why = decide(running + len(own_pending), ready, snapshot, cap, len(reservations))
+        if project is not None and ready > 0 and running + len(own_pending) < min(cap, CAP):
+            rows = json.loads(Path(__file__).with_name("roster.json").read_text())["rows"]
+            priorities = {row["name"]: row.get("priority", 3) for row in rows}
+            higher = sorted((name for name in priorities
+                             if priorities[name] < priorities.get(project, 3)),
+                            key=lambda name: priorities[name])
+            cpu_slots = max(0, floor((BUSY_TARGET - snapshot.busy) * snapshot.cores
+                                     / CORES_PER_WORKER) - len(reservations))
+            for name in higher:
+                if name not in projects:
+                    continue
+                state = projects[name]
+                pending = sum(now - epoch < RESERVATION_SECONDS
+                              for epoch in state.get("pending", []))
+                deficit = max(0, state.get("cap", CAP) - state.get("running", 0) - pending)
+                if deficit and cpu_slots < deficit + k:
+                    k, why = 0, f"held for {name}"
+                    break
+                cpu_slots -= deficit
+            own_pending.extend([now] * k)
+        reservations.extend([now] * k)
+        projects_file.write_text(json.dumps(projects))
+        reservations_file.write_text("".join(f"{epoch}\n" for epoch in reservations))
+        return snapshot, k, why
 
 
 def self_test():
-    assert decide(0, 20, 0.3, 70) == (10, ""), "empty orchestrator with work fills to 10"
-    assert decide(4, 20, 0.3, 70) == (6, ""), "HT Product Lead at 4 must start 6 more"
-    assert decide(10, 5, 0.3, 70)[0] == 0
-    assert decide(2, 3, 0.3, 70) == (3, "only 3 ready ticket(s)")
-    assert decide(2, 0, 0.3, 70)[1].startswith("no ready ticket")
-    assert decide(2, 9, 0.91, 70) == (0, "CPU full (busy 91%, max 85%)")
-    assert decide(2, 10, 0.5, 70) == (8, ""), "50% busy leaves CPU room for workers"
-    assert decide(2, 9, 0.3, 5)[1].startswith("memory low")
-    assert decide(0, 9, 0.3, 12) == (2, "memory allows 2")
-    assert decide(1, 20, 0.3, 70, cap=3) == (2, ""), "a small project fills to its own cap"
-    assert decide(0, 20, 0.3, 70, cap=50) == (10, ""), "no project goes past 10"
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from tempfile import TemporaryDirectory
+    from unittest.mock import Mock, patch
+
+    idle = Box(0.0, 18, 70, 0)
+    assert decide(0, 20, idle) == (10, "")
+    assert decide(4, 20, idle) == (6, "")
+    assert decide(10, 5, idle) == (0, "at the cap of 10")
+    assert decide(2, 3, idle) == (3, "only 3 ready ticket(s)")
+    assert decide(2, 0, idle) == (0, "no ready ticket: board empty, blocked, or waiting on a person")
+    assert decide(0, 20, Box(0.60, 18, 70, 0)) == (5, "CPU allows 5 (busy 60%)")
+    assert decide(0, 20, Box(0.80, 18, 70, 0)) == (0, "CPU allows 0 (busy 80%)")
+    assert decide(0, 20, Box(0.85, 18, 70, 0)) == (0, "CPU full (busy 85%)")
+    assert decide(0, 20, Box(0.91, 18, 70, 0)) == (0, "CPU full (busy 91%)")
+    assert decide(0, 20, Box(0.0, 18, 70, 36)) == (0, "server holds 36 workers (max 36)")
+    assert decide(0, 20, Box(0.0, 18, 70, 40)) == (0, "server holds 40 workers (max 36)")
+    assert decide(0, 20, Box(0.0, 18, 70, 33)) == (3, "server holds 33 workers (max 36)")
+    assert decide(0, 20, Box(0.0, 18, 5, 0)) == (0, "memory low (5 GB free, min 8)")
+    assert decide(0, 20, Box(0.0, 18, 8, 0)) == (0, "memory allows 0")
+    assert decide(0, 20, Box(0.0, 18, 8.5, 0)) == (0, "memory allows 0")
+    assert decide(0, 20, Box(0.0, 18, 12, 0)) == (4, "memory allows 4")
+    assert decide(1, 20, idle, cap=3) == (2, "")
+    assert decide(0, 20, idle, cap=50) == (10, "")
+    for argv in (
+        ["/usr/bin/codex", "exec", "task"],
+        ["node", "/opt/codex/bin/codex.js", "exec", "task"],
+        ["claude", "--print", "task"],
+        ["/home/valentin/.local/bin/claude", "-p", "--model", "opus", "--effort", "high",
+         "--permission-mode", "bypassPermissions", "--output-format", "text",
+         "--disallowedTools", "Agent", "Task", "--session-id", "worker-id"],
+        ["claude", "--print", "--session-id", "worker-id"],
+        ["claude", "--print", "--session-id=worker-id"],
+        ["claude", "--print", "--resume", "worker-id"],
+        ["claude", "--print", "--resume=worker-id"],
+        ["node", "/opt/@anthropic-ai/claude-code/cli.js", "--print", "task"],
+        ["node", "/opt/@anthropic-ai/claude-code/cli.js", "-p", "--session-id", "worker-id"],
+        ["/home/valentin/.local/bin/hax", "--provider=codex", "--model=gpt-6.1-sol",
+         "--effort=high", "--no-session", "-p"],
+        ["/home/valentin/.local/bin/hax", "--provider=opencode-go", "--model=glm-5",
+         "--effort=high", "--no-session", "-p"],
+        ["cursor-agent", "-p", "task"],
+        ["pi", "--print", "task"],
+    ):
+        assert is_worker(argv), argv
+    for argv in (
+        [], ["codex"], ["claude"],
+        ["claude", "--session-id", "chat"],
+        ["claude", "--resume", "chat"],
+        ["claude", "--print", "--input-format", "stream-json"],
+        ["claude", "-p", "--input-format=stream-json"],
+        ["node", "/opt/@anthropic-ai/claude-code/cli.js", "--print",
+         "--input-format", "stream-json"],
+        ["node", "/opt/@anthropic-ai/claude-code/cli.js", "-p",
+         "--input-format=stream-json"],
+        ["hax", "--provider=codex"],
+        ["python3", "fleet/slots", "--running", "0", "--ready", "10"],
+        ["fleet/slots", "--running", "0", "--ready", "10"],
+        ["bash", "-c", "codex exec task"],
+        ["python3", "task.py", "cursor-agent"],
+        ["pi-server", "--print"],
+    ):
+        assert not is_worker(argv), argv
+    with TemporaryDirectory() as fixture_dir:
+        fixture = Path(fixture_dir)
+        sessions = fixture / ".claude/sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "chat.json").write_text(json.dumps({"pid": 101}))
+        (sessions / "broken.json").write_text("{")
+        (sessions / "empty.json").write_text("[]")
+        processes = []
+        for pid, argv in (
+            (101, ["claude", "--print", "task"]),
+            (102, ["claude", "-p", "task"]),
+            (103, ["claude", "--print", "--input-format", "stream-json"]),
+            (104, ["claude", "--print", "--input-format=stream-json"]),
+            (105, ["node", "/opt/@anthropic-ai/claude-code/cli.js", "-p", "task"]),
+            (106, ["codex", "exec", "task"]),
+        ):
+            process = fixture / str(pid)
+            process.mkdir()
+            (process / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
+            processes.append(process)
+        with patch.object(Path, "home", return_value=fixture):
+            with patch.object(Path, "iterdir", return_value=iter(processes)):
+                assert fleet_workers() == 3
+            (sessions / "node-chat.json").write_text(json.dumps({"pid": 105}))
+            (sessions / "non-claude.json").write_text(json.dumps({"pid": 106}))
+            with patch.object(Path, "iterdir", return_value=iter(processes)):
+                assert fleet_workers() == 2
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.0, 18, 70, 35))):
+            with patch("time.time", return_value=1000):
+                grants = [reserve(0, 10, state_dir=state_dir)[1] for _ in range(4)]
+            assert grants == [1, 0, 0, 0], grants
+            reservations_file = Path(state_dir) / "reservations"
+            assert reservations_file.read_text().splitlines() == ["1000.0"]
+            with patch("time.time", return_value=1119):
+                assert reserve(0, 10, state_dir=state_dir)[1] == 0
+            with patch("time.time", return_value=1120):
+                assert reserve(0, 10, state_dir=state_dir)[1] == 1
+            assert reservations_file.read_text().splitlines() == ["1120"]
+    assert decide(0, 20, Box(0.60, 18, 70, 0), reservations=4) == (
+        1, "CPU allows 1 (busy 60%)")
+    assert decide(0, 20, Box(0.0, 18, 12, 0), reservations=3) == (
+        1, "memory allows 1")
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            grants = [reserve(0, 10, state_dir=state_dir)[1] for _ in range(12)]
+            assert grants == [5] + [0] * 11, grants
+    ht, multibot, other = "HT Product Lead", "Multi Bot Opus Runner", "postbox"
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1] == 5, "a silent higher project holds nobody"
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.80, 18, 70, 0))):
+            reserve(0, 0, state_dir=state_dir, project=ht)
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1:] == (
+                0, f"held for {ht}")
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1:] == (
+                0, "CPU allows 0 (busy 80%)")
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            reserve(0, 0, state_dir=state_dir, project=ht)
+            for name in (other, multibot):
+                assert reserve(0, 10, state_dir=state_dir, project=name)[1:] == (
+                    0, f"held for {ht}")
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1] == 5
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1] == 0
+    for ht_cap in (0, 3, CAP):
+        with TemporaryDirectory() as state_dir:
+            with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+                reserve(ht_cap, 0, cap=ht_cap, state_dir=state_dir, project=ht)
+                reserve(0, 0, state_dir=state_dir, project=multibot)
+                assert reserve(0, 10, state_dir=state_dir, project=other)[1:] == (
+                    0, f"held for {multibot}")
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 5
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            reserve(CAP, 0, state_dir=state_dir, project=ht)
+            reserve(CAP, 0, state_dir=state_dir, project=multibot)
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1] == 5
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.0, 36, 100, 0))):
+            assert reserve(0, 10, state_dir=state_dir, project=other)[1] == 10
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1] == 10
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1] == 0
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.0, 18, 70, 0))):
+            assert reserve(0, 10, state_dir=state_dir, project=ht)[1] == 10
+            with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 0
+            with patch.dict(globals(), box=Mock(return_value=Box(0.0, 18, 70, 0))):
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 10
+    with TemporaryDirectory() as state_dir:
+        with patch.dict(globals(), box=Mock(return_value=Box(0.60, 18, 70, 0))):
+            with patch("time.time", return_value=1000):
+                reserve(CAP, 0, state_dir=state_dir, project=ht)
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 5
+            with patch("time.time", return_value=1120):
+                assert reserve(0, 10, state_dir=state_dir, project=multibot)[1] == 5, "a stale higher project holds nobody"
+    output = StringIO()
+    with patch.dict(globals(), reserve=Mock(return_value=(idle, 0, f"held for {ht}"))):
+        with redirect_stdout(output):
+            main(["--running", "0", "--ready", "10", "--project", other])
+        reserve.assert_called_once_with(0, 10, CAP, project=other)
+    assert output.getvalue() == f"start 0: held for {ht}\n"
     print("slots self-test ok")
 
 
 def main(argv):
-    if argv == ["--self-test"]:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--running", type=int)
+    parser.add_argument("--ready", type=int)
+    parser.add_argument("--cap", type=int, default=CAP)
+    parser.add_argument("--project")
+    parser.add_argument("--why", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args(argv)
+    if args.self_test:
         return self_test()
-    args = dict(zip(argv[::2], argv[1::2]))
-    busy, mem = box()
-    k, why = decide(int(args["--running"]), int(args["--ready"]), busy, mem, int(args.get("--cap", CAP)))
+    if args.running is None or args.ready is None:
+        parser.error("--running and --ready are required")
+    if min(args.running, args.ready, args.cap) < 0:
+        parser.error("--running, --ready and --cap must be nonnegative")
+    snapshot, k, why = reserve(args.running, args.ready, args.cap, project=args.project)
+    if args.why:
+        print(snapshot, file=sys.stderr)
     print(f"start {k}" + (f": {why}" if why else ""))
 
 

@@ -27,7 +27,8 @@
     "lead",
     "expert",
     "solo-dev"
-   ]
+   ],
+   "priority": 1
   },
   {
    "name": "Infra Lead",
@@ -117,7 +118,8 @@
     "Doing": 0,
     "AI Review": 0
    },
-   "notes": "Ticket writer first (Valentin 2026-11-10: \"should write more tickets and do less himself we are overburning claude\"; \"he can still do some stuff the hard or immediate stuff himself but runners should work on multibot too\"). Turn what Valentin asks into tickets and leave them unassigned in Todo: the runner pool builds them. Build yourself only hard tickets (brain-hard or brain-extra-hard) or immediate ones Valentin is waiting on live; assign yourself first. solo-wake wakes you only for your own Doing and AI Review tickets, never to drain Todo."
+   "notes": "Ticket writer first (Valentin 2026-11-10: \"should write more tickets and do less himself we are overburning claude\"; \"he can still do some stuff the hard or immediate stuff himself but runners should work on multibot too\"). Turn what Valentin asks into tickets and leave them unassigned in Todo: the runner pool builds them. Build yourself only hard tickets (brain-hard or brain-extra-hard) or immediate ones Valentin is waiting on live; assign yourself first. solo-wake wakes you only for your own Doing and AI Review tickets, never to drain Todo.",
+   "priority": 2
   },
   {
    "name": "multiprompt-android",
