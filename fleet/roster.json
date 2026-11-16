@@ -147,15 +147,16 @@
   },
   {
    "name": "Pecunia",
-   "kind": "view-lead",
-   "role_skill": "/view-lead",
-   "login": null,
+   "multibot": "Pecunia Ratstack Transitioner",
+   "kind": "solo-dev",
+   "role_skill": "/solo-dev",
+   "login": "Ratstack Transitioner",
    "board": "2060",
-   "view": null,
+   "view": "2060/pecunia",
+   "tmux": "live-10707105",
    "app": "pecunia",
-   "fallback": "Mini Boss CEO",
-   "status": "unknown",
-   "notes": "Has its own session (Valentin, 2026-11-07). No board view and no login found yet; create the view at the switch, reuse its login if one exists."
+   "status": "live",
+   "notes": "Pecunia Ratstack Transitioner owns the Pecunia view, not Software Factory Lead (Valentin, 2026-11-16)."
   },
   {
    "name": "chromescribe",

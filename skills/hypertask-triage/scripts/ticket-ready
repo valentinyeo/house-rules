@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+"""One-run readiness of every pickable ticket. No model call, ever.
+
+Valentin, 2026-11-14:
+> can't this be predicted already when the ticket is written? There needs to be a triage of the tickets ... you need to
+> review the tickets every hour at least to basically make sure that any new ticket is actually written in a way where
+> it's doable to do it in one run. If it's like a multistep thing, then, obviously, this won't work.
+
+A runner run holds one ticket and ends with one PR. A ticket that holds several deliverables, waits on Valentin, is
+blocked, has no brain tag, no done line or too few words cannot ship in one run, so no runner may pick it. This file
+is the one definition: fleet/pick imports assess() and skips a Not Ready ticket (log "not-ready: KEY reason"), the
+hourly tick reads the verdicts and wakes one Sonnet fixer for the ones a script cannot repair, and filing-gate warns
+when a new ticket would be Not Ready.
+
+Reasons, one code each:
+  multi-step      more than one deliverable: a plan or tracker, phases, many sub-tickets, many done lines, many
+                  checkboxes, a migrate or rewrite, several apps or repos
+  needs-valentin  money, a paid service, a key only he holds, going public, deleting data, "Valentin decides", or a
+                  ticket that already waits on him. His call comes first (Valentin Review plus one Question).
+  blocked         an open BlockedBy link
+  brain-tag       no brain label, or more than one
+  no-done         no "Done when" or acceptance line
+  too-vague       fewer than MIN_WORDS words in title and description
+
+usage:
+  ticket-ready                        all pickable columns of boards 15, 2060 and 11514: table and counts
+  ticket-ready --board 15             one board
+  ticket-ready --ticket HTPR-1        one ticket, read by key
+  ticket-ready --json                 machine output (also the shape of the state file)
+  ticket-ready --write                also write ~/.local/state/fleet/ticket-ready.json (the hourly tick does)
+  ticket-ready --fixable              print the keys the fixer should work (not blocked, not brain-missing), one per line
+  ticket-ready --check-create ARGS    for filing-gate: ARGS are `vcc task create` arguments; print a warning, exit 0
+  ticket-ready --self-test
+"""
+import argparse
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+os.environ.setdefault("SHIP_SESSION_NAME", "Chief Of Staff")
+os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
+
+HOME = Path.home()
+VCC = str(HOME / ".local/bin/vcc")
+STATE = Path(os.environ.get("TICKET_READY_STATE", HOME / ".local/state/fleet/ticket-ready.json"))
+
+# Pickable (new-work) columns: the same table as fleet/pick BOARDS. fleet/pick's self-test asserts they match.
+COLUMNS = {"15": ("Backlog", "Bugs", "Improvements", "Features"), "2060": ("Todo",), "11514": ("Backlog",)}
+
+MULTI, VALENTIN, BLOCKED, BRAIN, NODONE, VAGUE = "multi-step", "needs-valentin", "blocked", "brain-tag", "no-done", "too-vague"
+TITLES = {MULTI: "Multi-step", VALENTIN: "Needs Valentin", BLOCKED: "Blocked", BRAIN: "Brain tag", NODONE: "No done condition",
+          VAGUE: "Too vague"}
+ORDER = (MULTI, VALENTIN, BLOCKED, BRAIN, NODONE, VAGUE)
+# What the hourly fixer may work: a script cannot split, rewrite or word a Question. Blocked waits on its blocker; a missing
+# brain tag is bin/brain-tagger's job (every 30 minutes).
+FIXABLE = (MULTI, VALENTIN, NODONE, VAGUE)
+
+# ---- thresholds, tuned on the run ledger (see ticket-ready-backtest) ----
+MIN_WORDS = 25            # title + description, markup removed
+SUB_TASKS_MAX = 4         # more sub-tickets than this: a plan, not a deliverable
+DONE_LINES_MAX = 6        # more done lines than this: several deliverables
+CHECKBOXES_MAX = 5
+THEN_MAX = 3              # "then" / "after that" in the fix text
+FIX_LINES_MAX = 14
+BIG_VERB_WORDS = 400
+WORDS_MAX = 700          # a ticket this long holds more than one run's work, together with one more signal
+EXEMPT_LABELS = {"incident"}  # the incident lane runs whatever the text says
+PLAN_LABELS = {"tracker", "plan", "epic", "umbrella", "roadmap", "master plan"}
+
+BRAIN_LABEL = re.compile(r"^brain-(light|medium|hard|extra-hard)$", re.I)
+DONE_OR_CLOSED = re.compile(r"^(done|archive|archived|flag:|no flag)", re.I)
+LABEL_LINE = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*|__)?(problem|fix|done when|acceptance(?: criteria)?|risk|decision|now|result|"
+                        r"not in this ticket|what this is)(?:\*\*|__)?\s*:?\s*(?:\*\*|__)?\s*(.*)$", re.I)
+
+
+# ------------------------------------------------------------------ text
+
+def plain(markup):
+    """HTML description to plain lines. Block ends and list items become line breaks; checkboxes keep a marker."""
+    h = markup or ""
+    h = re.sub(r"<input[^>]*type=\"checkbox\"[^>]*>", "[ ] ", h, flags=re.I)
+    h = re.sub(r"<li[^>]*data-type=\"taskItem\"[^>]*>", "\n[ ] ", h, flags=re.I)
+    h = re.sub(r"<li[^>]*>", "\n- ", h, flags=re.I)
+    h = re.sub(r"</(p|h\d|div|ul|ol|blockquote|tr)>|<br\s*/?>|<h\d[^>]*>|<hr\s*/?>", "\n", h, flags=re.I)
+    h = html.unescape(re.sub(r"<[^>]+>", "", h))
+    return [" ".join(line.split()) for line in h.split("\n") if line.strip()]
+
+
+def sections(lines):
+    """{section: [lines]} from heading or "Label:" lines. Text before the first label is section "".
+
+    Quoted text and "Flag: <url>" lines are plain lines; only the known labels open a section."""
+    out, cur = {"": []}, ""
+    for line in lines:
+        m = LABEL_LINE.match(line)
+        if m and (len(line) < 60 or ":" in line[: len(m.group(1)) + 3]):
+            cur = {"acceptance": "done when", "acceptance criteria": "done when"}.get(m.group(1).lower(), m.group(1).lower())
+            out.setdefault(cur, [])
+            if m.group(2).strip():
+                out[cur].append(m.group(2).strip())
+        else:
+            out.setdefault(cur, []).append(line)
+    return out
+
+
+def bullets(lines):
+    return [l for l in lines if l.startswith("- ") or l.startswith("[ ]") or l.startswith("[x]")]
+
+
+def words(text):
+    return len(re.findall(r"[A-Za-z0-9£$][\w'’-]*", text))
+
+
+# ------------------------------------------------------------------ rules
+
+PHASED = re.compile(r"\b(phase|stage|step|slice|milestone|wave)\s*(?:#|no\.?)?\s*(\d+|one|two|three|four|five|[a-d])\b|\bpart\s*(\d+|[ivx]+)\b|\bin\s+(?:two|three|four|five|\d)\s+(?:phases|stages|steps|parts|slices)\b", re.I)
+PLAN_TITLE = re.compile(r"\b(umbrella|epic|roadmap|master plan|meta[- ]ticket)\b|^\s*\[?(plan|tracker|epic)\]?\s*[:\]-]|\b(?:tracker|plan) ticket\b|\btracker for\b", re.I)
+BIG_VERB = re.compile(r"\b(migrate|migration of|rewrite|re-?platform|overhaul|port\b.{0,40}\bto\b|move\b.{0,60}\bto rat stack)", re.I)
+THEN = re.compile(r"\b(then|after that|afterwards|only after|once (?:that|this|it) (?:is|works|ships|lands)|next,|finally)\b", re.I)
+REPO = re.compile(r"github\.com/([\w.-]+/[\w.-]+)", re.I)
+APPS = ("multiprompt", "wazig", "postbox", "chromescribe", "pecunia", "screencast2", "upwork", "token ladder", "hypertask.app",
+        "yeoux.net", "help.hypertask.ai", "docs.hypertask.ai", "hypertask.ai", "crolab")
+FOLLOW = re.compile(r"\b(follow-?up (?:ticket|work|slice)s?|next slices?|later slices?|not in this ticket)\b", re.I)
+
+MONEY = re.compile(r"\b(?:costs?|pay|paying|spend|spending|charged?|billed?|budget|subscription)\b.{0,25}[£$€]\s?\d|"
+                   r"[£$€]\s?\d[\d,.]*\s*(?:/|a |per )\s*(?:month|year|mo|yr|week|seat|user)|"
+                   r"\b(?:buy|purchase|subscribe to|sign up for|upgrade to)\b.{0,25}\b(?:plan|licen[cs]e|domain|seat|tier|credits?|account|subscription)\b|"
+                   r"\bpaid (?:api|key|plan|tier|service|account|licen[cs]e|seat)s?\b|\b(?:needs?|requires?) (?:a )?(?:budget|payment)\b", re.I)
+KEYS = re.compile(r"\bneeds? (?:a |an |the )?(?:new |fresh |paid )?(?:api )?(?:key|token|credential|secret|login|password)s?\b"
+                  r"|\b(?:key|token|credential|secret)s? only (?:valentin|an? admin|the owner)\b|\bfrom 1password\b", re.I)
+PUBLIC = re.compile(r"\b(?:go(?:ing)? public|make (?:it|the repo|this|the app|the page) public|publish(?:ing)? (?:publicly|to the public)|"
+                    r"open[- ]sourc(?:e|ing) (?:the|this|it)|launch(?:ing)? publicly|public launch)\b", re.I)
+DELETE = re.compile(r"\b(?:delete|drop|wipe|purge|truncate|erase)\b.{0,40}\b(?:prod(?:uction)?|live|customer|user|account|real)\b.{0,20}\b(?:data|database|db|accounts?|tables?|rows?|records?)\b", re.I)
+VALENTIN_CALL = re.compile(r"\bvalentin (?:decides|must decide|to decide|chooses|picks|signs off|approves)\b|\bvalentin'?s (?:call|decision|yes|go|approval|sign-?off)\b|"
+                           r"\b(?:needs?|waits? (?:on|for)|waiting (?:on|for)|blocked (?:on|by)|ask) valentin\b|\b(?:needs?|waits? for) (?:his|valentin'?s) (?:go|yes|ok|approval|decision)\b", re.I)
+HEADING_CALL = re.compile(r"^\W*(?:what )?valentin (?:must|has to|needs to|should) decide\W*$", re.I)
+# A look after the build ("check the Figma frame", "look at it live") is QA he does behind a flag, not a call that stops the build.
+SOFT_CHECK = re.compile(r"^\W*(?:just )?(?:check|look at|review|see|open|confirm)\b.*\b(?:figma|frame|screenshot|live|flag|design)\b", re.I)
+NEGATED = re.compile(r"\b(nothing|none|no decision|not needed|no need|n/a|not required|no (?:money|cost|key|call)|no paid|free)\b", re.I)
+DONE_WORDS = re.compile(r"\b(done when|done means|acceptance|definition of done|success (?:looks like|criteria)|expected (?:result|behaviou?r))\b", re.I)
+
+
+def brain_labels(labels):
+    return sorted({n.lower() for n in labels if n.lower().startswith("brain-")})
+
+
+def label_names(t):
+    return [(l.get("name") if isinstance(l, dict) else str(l) or "").strip() for l in t.get("labels") or []]
+
+
+def assess(t):
+    """Verdict for one ticket as the board returns it (list or get payload).
+
+    {"ready": bool, "reasons": [{"code", "why"}...]}. Reasons come in ORDER. A record with no description key is an
+    unread ticket, not an empty one: it is Ready (fail open, nothing blocks on data it could not read)."""
+    if "description" not in t:
+        return {"ready": True, "reasons": []}
+    labels = [n.lower() for n in label_names(t)]
+    if set(labels) & EXEMPT_LABELS:
+        return {"ready": True, "reasons": []}
+    title = " ".join((t.get("title") or "").split())
+    lines = plain(t.get("description"))
+    sec = sections(lines)
+    body = " ".join(lines)
+    text = f"{title}. {body}"
+    reasons = []
+
+    def add(code, why):
+        reasons.append({"code": code, "why": why})
+
+    # ---- multi-step
+    why = []
+    if set(labels) & PLAN_LABELS:
+        why.append("labelled " + "/".join(sorted(set(labels) & PLAN_LABELS)))
+    if PLAN_TITLE.search(title):
+        why.append("title says plan or tracker")
+    big = BIG_VERB.search(title)  # weak: "Help site rewrite: chat history" is one slice of a rewrite; see below
+    subs = len(t.get("sub_tasks") or [])
+    if subs > SUB_TASKS_MAX:
+        why.append(f"{subs} sub-tickets")
+    phases = {m.group(0).lower() for m in PHASED.finditer(text)}
+    if len(phases) >= 2:
+        why.append("phases or steps: " + ", ".join(sorted(phases)[:3]))
+    done = sec.get("done when", [])
+    done_n = len(bullets(done)) or len(done)
+    if done_n > DONE_LINES_MAX:
+        why.append(f"{done_n} done lines")
+    boxes = sum(1 for l in lines if l.startswith("[ ]") or l.startswith("[x]"))
+    if boxes > CHECKBOXES_MAX:
+        why.append(f"{boxes} checkboxes")
+    fix = sec.get("fix", [])
+    then_n = len(THEN.findall(" ".join(fix)))
+    if then_n > THEN_MAX:
+        why.append(f"{then_n} sequence words in the fix")
+    if len(bullets(fix)) > FIX_LINES_MAX:
+        why.append(f"{len(bullets(fix))} fix bullets")
+    repos = {r.lower() for r in REPO.findall(text)}
+    apps = {a for a in APPS if a in text.lower() and not any(a != b and a in b and b in text.lower() for b in APPS)}
+    if len(repos) >= 3:
+        why.append(f"{len(repos)} repos")
+    if len(apps) >= 3:
+        why.append("apps: " + ", ".join(sorted(apps)[:4]))
+    if words(text) > WORDS_MAX and (why or FOLLOW.search(body)):
+        why.append(f"{words(text)} words")
+    if big and not why and (subs >= 2 or words(text) > BIG_VERB_WORDS):
+        why.append(f"title says \"{big.group(0).strip()[:30]}\" and the ticket is large")
+    if why:
+        add(MULTI, "; ".join(why))
+
+    # ---- needs Valentin
+    need = []
+    if t.get("waitingOnUserId") or t.get("blockerCommentId"):
+        need.append("already waits on Valentin")
+    decision = " ".join(sec.get("decision", []))
+    if decision and not NEGATED.search(decision) and re.search(r"\bvalentin\b|\bquestion\b|\bdecide\b|\byes\b|\bno\b\?", decision, re.I):
+        need.append("Decision section is open")
+    for i, line in enumerate(lines):
+        if NEGATED.search(line):
+            continue
+        inline = re.match(r"^\W*(?:what )?valentin (?:must|has to|needs to|should) decide\s*:\s*(\S.*)$", line, re.I)
+        if inline and SOFT_CHECK.match(inline.group(1)):
+            continue
+        if HEADING_CALL.match(line):  # "What Valentin must decide:" is a heading; its answer is the next line
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            if not nxt or NEGATED.search(nxt) or SOFT_CHECK.match(nxt) or LABEL_LINE.match(nxt):
+                continue
+        for rx, name in ((MONEY, "money or a paid service"), (KEYS, "a key or secret"), (PUBLIC, "going public"),
+                         (DELETE, "deleting live data"), (VALENTIN_CALL, "Valentin decides")):
+            if rx.search(line) and name not in need:
+                need.append(name)
+    if need:
+        add(VALENTIN, "; ".join(need))
+
+    # ---- blocked
+    open_blockers = [b.get("ticketNumber") for b in t.get("blockingTasks") or []
+                     if (b.get("status") or "Normal") != "Archive" and not DONE_OR_CLOSED.match(b.get("section") or "")]
+    if open_blockers:
+        add(BLOCKED, "BlockedBy " + ", ".join(k for k in open_blockers if k))
+
+    # ---- brain tag
+    brains = brain_labels(label_names(t))
+    if not brains:
+        add(BRAIN, "no brain tag")
+    elif len(brains) > 1:
+        add(BRAIN, "two brain tags: " + ", ".join(brains))
+    elif not BRAIN_LABEL.match(brains[0]):
+        add(BRAIN, f"unknown brain tag {brains[0]}")
+
+    # ---- done condition
+    if not (done or DONE_WORDS.search(body)):
+        add(NODONE, "no Done when line")
+
+    # ---- vague
+    n = words(text)
+    if n < MIN_WORDS:
+        add(VAGUE, f"{n} words, under {MIN_WORDS}")
+    return {"ready": not reasons, "reasons": reasons}
+
+
+def codes(t):
+    return [r["code"] for r in assess(t)["reasons"]]
+
+
+# ------------------------------------------------------------------ board reads
+
+def payload(text):
+    start = min(i for i in (text.find("["), text.find("{")) if i >= 0)
+    return json.loads(text[start:])
+
+
+def vcc(*args):
+    done = subprocess.run([VCC, "--json", *args], capture_output=True, text=True, timeout=300)
+    if done.returncode:
+        raise RuntimeError(f"vcc {' '.join(args)} failed: {(done.stderr or done.stdout).strip()[-300:]}")
+    return payload(done.stdout)
+
+
+def column(board, name):
+    rows, offset = [], 0
+    while True:
+        page = vcc("task", "list", "--project", board, "--section", name, "--limit", "100", "--offset", str(offset)).get("tasks", [])
+        rows += page
+        if len(page) < 100:
+            return rows
+        offset += 100
+
+
+def read_boards(boards):
+    out = []
+    for b in boards:
+        for name in COLUMNS[b]:
+            for t in column(b, name):
+                if t.get("status", "Normal") == "Normal" and t.get("ticketNumber"):
+                    out.append((b, t))
+    return out
+
+
+def verdicts(rows):
+    res = {}
+    for board, t in rows:
+        a = assess(t)
+        res[t["ticketNumber"]] = {"board": board, "title": " ".join((t.get("title") or "").split())[:140], "section": t.get("section"),
+                                  "updated": t.get("updatedAt"), "ready": a["ready"], "codes": [r["code"] for r in a["reasons"]],
+                                  "why": {r["code"]: r["why"] for r in a["reasons"]}, "priority": t.get("priority")}
+    return res
+
+
+def counts(res):
+    out = {"total": len(res), "ready": sum(1 for v in res.values() if v["ready"]), "not_ready": sum(1 for v in res.values() if not v["ready"]),
+           "by_reason": {c: sum(1 for v in res.values() if c in v["codes"]) for c in ORDER}, "by_board": {}}
+    for b in COLUMNS:
+        mine = [v for v in res.values() if v["board"] == b]
+        out["by_board"][b] = {"total": len(mine), "ready": sum(1 for v in mine if v["ready"]),
+                              "by_reason": {c: sum(1 for v in mine if c in v["codes"]) for c in ORDER}}
+    return out
+
+
+def fixable(res):
+    """Keys the fixer should work: Not Ready for a reason a script cannot repair. A ticket whose only fault is a
+    missing brain tag or an open blocker is not one."""
+    return sorted((k for k, v in res.items() if set(v["codes"]) & set(FIXABLE)),
+                  key=lambda k: ({"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}.get(res[k].get("priority"), 2), k))
+
+
+def write_state(res, path=None):
+    path = Path(path or STATE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "counts": counts(res), "tickets": res}
+    tmp = path.with_suffix(f".{os.getpid()}")
+    tmp.write_text(json.dumps(doc, indent=1))
+    os.replace(tmp, path)
+    return doc
+
+
+def report(res):
+    c = counts(res)
+    lines = []
+    for key, v in sorted(res.items(), key=lambda kv: (kv[1]["board"], kv[0])):
+        mark = "Ready    " if v["ready"] else "Not Ready"
+        why = "; ".join(f"{TITLES[c]}: {v['why'][c]}" for c in v["codes"])
+        lines.append(f"{mark} {v['board']:>5} {key:<10} {v['title'][:60]}" + (f"  [{why}]" if why else ""))
+    lines.append("")
+    lines.append(f"Ready {c['ready']}  Not Ready {c['not_ready']}  of {c['total']}")
+    lines.append("By reason (a ticket can carry several): " + ", ".join(f"{TITLES[k]} {n}" for k, n in c["by_reason"].items()))
+    for b, d in c["by_board"].items():
+        lines.append(f"  board {b}: Ready {d['ready']} of {d['total']}; " + ", ".join(f"{TITLES[k]} {n}" for k, n in d["by_reason"].items() if n))
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ filing-gate hook
+
+def create_fields(argv):
+    """(title, description, labels) from `vcc task create` arguments, else None."""
+    words_, flags, i = [], {}, 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg.startswith("--"):
+            name, eq, value = arg[2:].partition("=")
+            if eq:
+                flags.setdefault(name, []).append(value)
+            elif name in ("json", "human", "markdown", "help", "html") or i + 1 >= len(argv):
+                flags.setdefault(name, []).append("")
+            else:
+                flags.setdefault(name, []).append(argv[i + 1])
+                i += 1
+        else:
+            words_.append(arg)
+        i += 1
+    if words_[:2] not in (["task", "create"], ["tasks", "create"]) or "help" in flags:
+        return None
+    desc = (flags.get("description") or flags.get("desc") or flags.get("body") or [""])[-1]
+    if not desc and flags.get("description-file"):
+        try:
+            desc = Path(flags["description-file"][-1]).read_text()
+        except OSError:
+            return None
+    labels = [l.strip() for v in flags.get("labels", []) + flags.get("label", []) for l in v.split(",") if l.strip()]
+    try:
+        board = int(flags.get("project", [""])[-1])
+    except ValueError:
+        return None
+    return board, (flags.get("title") or [""])[-1], desc, labels
+
+
+def check_create(argv):
+    """The warning filing-gate prints for a new ticket that would be Not Ready, or "". Never blocks."""
+    parsed = create_fields(argv)
+    if not parsed or str(parsed[0]) not in COLUMNS:
+        return ""
+    board, title, desc, labels = parsed
+    if not desc.strip():
+        return ""  # the description may arrive some other way (stdin, a later edit): nothing to judge
+    a = assess({"title": title, "description": desc, "labels": [{"name": l} for l in labels], "sub_tasks": []})
+    if a["ready"]:
+        return ""
+    return ("ticket-ready: this ticket would be Not Ready, so no runner will pick it until it is fixed:\n"
+            + "\n".join(f"  - {TITLES[r['code']]}: {r['why']}" for r in a["reasons"])
+            + "\nOne ticket, one run: one deliverable, one done line, one brain tag, not blocked, no open Valentin call.")
+
+
+# ------------------------------------------------------------------ self-test
+
+GOOD = ("<h2>Problem</h2><p>The board header hides the ticket count on small screens, so people cannot see how full a column is.</p>"
+        "<h2>Fix</h2><p>Show the count next to the column name at every width.</p>"
+        "<h2>Done when</h2><ul><li><p>The count shows on a phone-sized screen.</p></li></ul>"
+        "<h2>Risk</h2><p>Low. Undo: revert the change.</p><h2>Decision</h2><p>None.</p>")
+
+
+def mk(**kw):
+    t = {"ticketNumber": "HTPR-1", "title": "Show the ticket count on small screens", "description": GOOD, "sub_tasks": [],
+         "blockingTasks": [], "labels": [{"name": "brain-medium"}], "section": "Backlog"}
+    t.update(kw)
+    return t
+
+
+def self_test():
+    ok = assess(mk())
+    assert ok["ready"] and not ok["reasons"], ok
+    assert assess({"ticketNumber": "X-1", "title": "x"})["ready"], "an unread ticket (no description key) fails open"
+    assert assess(mk(labels=[{"name": "incident"}], description=""))["ready"], "an incident always runs"
+
+    def only(t, code):
+        got = [r["code"] for r in assess(t)["reasons"]]
+        assert got == [code], (code, got, assess(t))
+
+    only(mk(sub_tasks=[{}] * 5), MULTI)
+    assert assess(mk(sub_tasks=[{}] * 4))["ready"], "a short checklist of sub-tasks is one runner's checklist"
+    only(mk(title="Tracker: move every app to Rat Stack"), MULTI)
+    only(mk(labels=[{"name": "brain-hard"}, {"name": "Epic"}]), MULTI)
+    only(mk(description=GOOD.replace("Show the count next to the column name at every width.",
+                                    "Phase 1: show the count. Phase 2: show it in the menu.")), MULTI)
+    only(mk(description=GOOD.replace("<li><p>The count shows on a phone-sized screen.</p></li>",
+                                    "".join(f"<li><p>Outcome {i} is visible on a phone.</p></li>" for i in range(7)))), MULTI)
+    only(mk(description=GOOD + "<ul>" + "".join(f"<li data-type=\"taskItem\"><p>step {i}</p></li>" for i in range(6)) + "</ul>"), MULTI)
+    only(mk(description=GOOD + "<p>Touches github.com/a/one, github.com/a/two and github.com/a/three.</p>"), MULTI)
+    only(mk(labels=[{"name": "brain-medium"}], description=GOOD.replace("<h2>Decision</h2><p>None.</p>", "<h2>Decision</h2><p>Valentin decides the colour.</p>")),
+         VALENTIN)
+    only(mk(description=GOOD + "<p>This costs £40 a month and needs a paid plan.</p>"), VALENTIN)
+    assert assess(mk(description=GOOD + "<p>What Valentin must decide: nothing.</p>"))["ready"], "a negated decision line is no call"
+    only(mk(waitingOnUserId=6), VALENTIN)
+    only(mk(blockingTasks=[{"ticketNumber": "HTPR-2", "status": "Normal", "section": "Backlog"}]), BLOCKED)
+    assert assess(mk(blockingTasks=[{"ticketNumber": "HTPR-2", "status": "Normal", "section": "Done"}]))["ready"], "a done blocker is closed"
+    assert assess(mk(blockingTasks=[{"ticketNumber": "HTPR-2", "status": "Archive", "section": "Backlog"}]))["ready"], "an archived blocker is closed"
+    only(mk(labels=[]), BRAIN)
+    only(mk(labels=[{"name": "brain-medium"}, {"name": "brain-hard"}]), BRAIN)
+    only(mk(description=GOOD.replace("<h2>Done when</h2><ul><li><p>The count shows on a phone-sized screen.</p></li></ul>", "")), NODONE)
+    assert assess(mk(description=GOOD.replace("<h2>Done when</h2>", "<p>Done when:</p>")))["ready"], "the older paragraph label also counts"
+    only(mk(title="Fix header", description="<h2>Done when</h2><p>It works.</p>"), VAGUE)
+    both = [r["code"] for r in assess(mk(labels=[], sub_tasks=[{}] * 9))["reasons"]]
+    assert both == [MULTI, BRAIN], both
+    soft = mk(description="<p>What Valentin must decide: check the Figma frame.</p>" + GOOD)
+    assert assess(soft)["ready"], "a look at the Figma frame after the build is QA, not a call"
+    hard = mk(description="<p>What Valentin must decide: pick option A or B.</p>" + GOOD)
+    assert [r["code"] for r in assess(hard)["reasons"]] == [VALENTIN], "a real pick still stops the build"
+    c = check_create(["task", "create", "--project", "15", "--title", "x", "--description", "<p>short</p>", "--labels", "Bug"])
+    assert "Not Ready" in c and "Brain tag" in c, c
+    assert check_create(["task", "create", "--project", "15", "--title", "Show the ticket count on small screens", "--description", GOOD,
+                         "--labels", "Bug,brain-medium"]) == "", "a ready new ticket prints nothing"
+    assert check_create(["task", "create", "--project", "7", "--title", "x", "--description", "short"]) == "", "other boards are not asked"
+    assert check_create(["task", "list", "--project", "15"]) == "", "other commands are not asked"
+    res = verdicts([("15", mk()), ("15", mk(ticketNumber="HTPR-2", labels=[])), ("11514", mk(ticketNumber="HYCI-3", sub_tasks=[{}] * 9))])
+    c = counts(res)
+    assert (c["ready"], c["not_ready"]) == (1, 2) and c["by_reason"][MULTI] == 1 and c["by_reason"][BRAIN] == 1, c
+    assert fixable(res) == ["HYCI-3"], "a missing brain tag is the tagger's, not the fixer's"
+    with tempfile.TemporaryDirectory() as d:
+        doc = write_state(res, Path(d) / "s.json")
+        assert json.loads((Path(d) / "s.json").read_text())["counts"]["total"] == 3 and doc["tickets"]["HTPR-1"]["ready"]
+    print("ticket-ready self-test ok")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--board", choices=sorted(COLUMNS))
+    ap.add_argument("--ticket")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    ap.add_argument("--fixable", action="store_true")
+    ap.add_argument("--check-create", nargs=argparse.REMAINDER)
+    ap.add_argument("--self-test", action="store_true")
+    a = ap.parse_args()
+    if a.self_test:
+        return self_test()
+    if a.check_create is not None:
+        msg = check_create(a.check_create[1:] if a.check_create[:1] == ["--"] else a.check_create)
+        if msg:
+            print(msg, file=sys.stderr)
+        return 0
+    if a.ticket:
+        t = vcc("task", "get", a.ticket)["tasks"][0]
+        res = verdicts([(str(t.get("boardId") or t.get("projectId")), t)])
+    else:
+        res = verdicts(read_boards([a.board] if a.board else list(COLUMNS)))
+    if a.write:
+        write_state(res)
+    if a.fixable:
+        print("\n".join(fixable(res)))
+    elif a.json:
+        print(json.dumps({"counts": counts(res), "tickets": res}, indent=1))
+    else:
+        print(report(res))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
