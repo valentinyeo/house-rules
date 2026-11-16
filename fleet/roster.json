@@ -150,7 +150,7 @@
    "multibot": "Pecunia Ratstack Transitioner",
    "kind": "solo-dev",
    "role_skill": "/solo-dev",
-   "login": null,
+   "login": "Ratstack Transitioner",
    "board": "2060",
    "view": "2060/pecunia",
    "tmux": "live-10707105",
