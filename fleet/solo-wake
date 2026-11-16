@@ -24,6 +24,7 @@ log ESCALATE for Chief Of Staff.
 Usage: solo-wake [--dry-run] | --self-test
 Log: ~/.local/state/fleet-switch/log.txt. State: ~/.local/state/fleet-switch/solo-wake.json.
 """
+import calendar
 import json
 import os
 import subprocess
@@ -180,7 +181,7 @@ def last_loop_fire(transcript_sid, tail=3_000_000):
                 stamp = json.loads(line)["timestamp"]
             except (ValueError, KeyError):
                 continue
-            return time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+            return calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
     return None
 
 
