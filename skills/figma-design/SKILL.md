@@ -30,6 +30,8 @@ Valentin, 2026-11-05, after a new Multiprompt screen ignored its style guide:
 3. Something missing? Name it in the people comment as a new piece. Wait for his yes, unless his own ticket asked for it.
 4. Cite the design system page link in the agent-lane comment for every proposal.
 
+- At gate 3, accept only Valentin's own reply as yes and leave builders unstarted while that Question is open.
+
 ## Work
 1. **Capture first.** Rebuild the current screen from his screenshot (screencast2 link) and trace every value to code. Real app colours can differ from the code theme; sample the capture.
 2. **Propose by cloning** the capture frame. Name it `... / PROPOSAL <what>`. Subtract before adding: "Everything needs to earn its place."

@@ -123,6 +123,7 @@ Sentence over 8 words, or has a path? Rewrite it.
 Dev words out: caret, composer, rail, deploy, commit, branch, flag key. Say what he sees.
 
 ## Guard
+- Write files with the file tool, then read the token and run `hypertask` in a separate command.
 `scripts/ticket-lint` checks human-lane text before it posts.
 It bounces: sentences over 12 words, paths, file names,
 code names, commit hashes, logs, robot status lines.
