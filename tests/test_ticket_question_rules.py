@@ -28,11 +28,11 @@ class QuestionLintTest(unittest.TestCase):
         self.assertIn("no amount", self.bad(body))
 
     def test_money_ask_with_amount_passes(self):
-        body = "Question: **Should we keep the paid plan at $20 a month?**\n\nMy recommendation: Yes.\n\nWhy: it saves money."
+        body = "What this is: the paid plan for storing monthly reports. It needs your spending approval before renewal. Yes keeps the reports online. No cancels storage after this month.\n\nQuestion: **Should we keep the paid plan at $20 a month?**\n\nMy recommendation: Yes.\n\nWhy: it saves money."
         self.assertEqual(self.bad(body), "")
 
     def test_free_is_an_amount(self):
-        body = "Question: **Should we move the logs to the free bucket?**\n\nWhy: no charge."
+        body = "What this is: the log storage for our app errors. It needs your approval to move live data. Yes moves logs into free storage. No keeps the current paid bucket.\n\nQuestion: **Should we move the logs to the free bucket?**\n\nMy recommendation: Yes.\n\nWhy: no charge."
         self.assertEqual(self.bad(body), "")
 
     # Real asks from SOFT-2293, SOFT-2290, SOFT-1878 and SOFT-2308 that sat in his blockers until 2026-11-15.
@@ -63,7 +63,7 @@ class QuestionLintTest(unittest.TestCase):
         self.assertIn("once X", self.bad(body))
 
     def test_his_own_words_are_not_refused(self):
-        body = 'Question: **Should we cut the paid calls?**\n\n> "this costs money once a month"\n\nWhy: no charge.'
+        body = 'What this is: the paid calls for reading receipt photos. It needs your spending approval before renewal. Yes removes the paid photo reading. No keeps the monthly photo charges.\n\nQuestion: **Should we cut the paid calls?**\n\nMy recommendation: Yes.\n\n> "this costs money once a month"\n\nWhy: no charge.'
         self.assertEqual(self.bad(body), "")
 
     def test_plain_comment_is_not_checked(self):
