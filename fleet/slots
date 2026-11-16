@@ -4,6 +4,7 @@
 pstack Orchestrate: "Keep about ten workers in flight per coordinator, and start the next one as each finishes."
 The drain tick runs this and starts exactly the number it prints. The only reasons to start fewer are the ones below;
 each is printed so a short fleet is never silent.
+CPU capacity uses busy share sampled from /proc/stat over one second.
 
 Usage: slots --running N --ready M [--cap C]  |  --self-test
   --cap      this project's own cap when below 10 (a small project); default 10
@@ -12,23 +13,29 @@ Usage: slots --running N --ready M [--cap C]  |  --self-test
              work in flight
 Prints one line: "start K" or "start K: <reason>".
 """
-import os
 import sys
+import time
 
 CAP = 10
-LOAD_MAX = 0.85      # 1-minute load per core above this: the box is full
+BUSY_MAX = 0.85      # CPU busy share above this: the box is full
 MEM_MIN_GB = 8       # available memory below this: the box is full
 PER_WORKER_GB = 2
 
 
 def box():
-    load = os.getloadavg()[0] / (os.cpu_count() or 1)
+    with open("/proc/stat") as f:
+        before = list(map(int, f.readline().split()[1:9]))
+    time.sleep(1)
+    with open("/proc/stat") as f:
+        after = list(map(int, f.readline().split()[1:9]))
+    delta = [end - start for start, end in zip(before, after)]
+    busy = 1 - (delta[3] + delta[4]) / (sum(delta) or 1)
     with open("/proc/meminfo") as f:
         mem = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in f)}
-    return load, mem["MemAvailable"] / 1_048_576
+    return busy, mem["MemAvailable"] / 1_048_576
 
 
-def decide(running, ready, load, mem_gb, cap=CAP):
+def decide(running, ready, busy, mem_gb, cap=CAP):
     """(k, reason) for one tick. Pure."""
     cap = min(cap, CAP)
     room = cap - running
@@ -36,8 +43,8 @@ def decide(running, ready, load, mem_gb, cap=CAP):
         return 0, f"at the cap of {cap}"
     if ready <= 0:
         return 0, "no ready ticket: board empty, blocked, or waiting on a person"
-    if load > LOAD_MAX:
-        return 0, f"CPU full (load {load:.2f} per core, max {LOAD_MAX})"
+    if busy > BUSY_MAX:
+        return 0, f"CPU full (busy {busy:.0%}, max {BUSY_MAX:.0%})"
     if mem_gb < MEM_MIN_GB:
         return 0, f"memory low ({mem_gb:.0f} GB free, min {MEM_MIN_GB})"
     k = min(room, ready, int((mem_gb - MEM_MIN_GB) // PER_WORKER_GB) or 1)
@@ -53,7 +60,8 @@ def self_test():
     assert decide(10, 5, 0.3, 70)[0] == 0
     assert decide(2, 3, 0.3, 70) == (3, "only 3 ready ticket(s)")
     assert decide(2, 0, 0.3, 70)[1].startswith("no ready ticket")
-    assert decide(2, 9, 0.95, 70)[1].startswith("CPU full")
+    assert decide(2, 9, 0.91, 70) == (0, "CPU full (busy 91%, max 85%)")
+    assert decide(2, 10, 0.5, 70) == (8, ""), "50% busy leaves CPU room for workers"
     assert decide(2, 9, 0.3, 5)[1].startswith("memory low")
     assert decide(0, 9, 0.3, 12) == (2, "memory allows 2")
     assert decide(1, 20, 0.3, 70, cap=3) == (2, ""), "a small project fills to its own cap"
@@ -65,8 +73,8 @@ def main(argv):
     if argv == ["--self-test"]:
         return self_test()
     args = dict(zip(argv[::2], argv[1::2]))
-    load, mem = box()
-    k, why = decide(int(args["--running"]), int(args["--ready"]), load, mem, int(args.get("--cap", CAP)))
+    busy, mem = box()
+    k, why = decide(int(args["--running"]), int(args["--ready"]), busy, mem, int(args.get("--cap", CAP)))
     print(f"start {k}" + (f": {why}" if why else ""))
 
 
