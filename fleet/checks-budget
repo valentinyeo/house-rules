@@ -23,14 +23,16 @@ def yaml_blocks(source):
 
 def concurrency_policy(source):
     group = re.search(r"(?:^|[\n,{])\s*['\"]?group['\"]?\s*:\s*([^\n,]+)", source)
-    cancel = re.search(r"(?:^|[\n,{])\s*['\"]?cancel-in-progress['\"]?\s*:\s*(['\"]?)(true|false|\$\{\{.*?\}\})\1[ \t]*(?:[,}\n]|$)", source, re.S)
+    cancel = re.search(r"(?:^|[\n,{])\s*['\"]?cancel-in-progress['\"]?\s*:\s*(['\"]?)(true|false|\$\{\{.*?\}\})\1[ \t]*(?:[,}\n]|$)", source, re.S | re.I)
     value = cancel[2] if cancel else ""
     valid_group = group and group[1].strip().strip("'\"") not in {"", "null", "~"}
-    expression = value[3:-2].strip() if value.startswith("${{") else ""
-    events = re.findall(r"\bgithub\.event_name\s*==\s*['\"]([^'\"]+)['\"]", expression, re.I)
-    valid_expression = bool(expression) and expression.lower() != "false" and all(
-        event.lower() in {"pull_request", "pull_request_target"} for event in events)
-    return bool(valid_group and (value == "true" or valid_expression)), value == "false"
+    normalized = re.sub(r"\s+", "", value).lower()
+    if normalized.startswith("${{"):
+        if normalized == "${{false}}":
+            return False
+        if normalized not in {"${{github.event_name=='pull_request'}}", '${{github.event_name=="pull_request"}}'}:
+            return None
+    return bool(valid_group and (normalized == "true" or normalized.startswith("${{")))
 
 
 def workflow_policy(source, name="", path="", default_branch="main"):
@@ -38,8 +40,8 @@ def workflow_policy(source, name="", path="", default_branch="main"):
                               lambda match: match[1] or "", line)
                        for line in textwrap.dedent(source).splitlines())
     blocks = yaml_blocks(source)
-    concurrency, exempt = concurrency_policy(blocks.get("concurrency", ""))
-    if exempt or re.search(r"release|deploy|publish", name + " " + path + " " + blocks.get("name", ""), re.I):
+    concurrency = concurrency_policy(blocks.get("concurrency", ""))
+    if re.search(r"release|deploy|publish", name + " " + path + " " + blocks.get("name", ""), re.I):
         return False, concurrency
     events = blocks.get("on", "")
     event_blocks = yaml_blocks(events)
@@ -65,9 +67,10 @@ def workflow_policy(source, name="", path="", default_branch="main"):
         elif not tags_only:
             triggered = True
     jobs = yaml_blocks(blocks.get("jobs", ""))
-    valid_jobs = bool(jobs) and all(concurrency_policy(yaml_blocks(job).get("concurrency", ""))[0]
-                                   for job in jobs.values())
-    return triggered, concurrency or valid_jobs
+    job_policies = [concurrency_policy(yaml_blocks(job).get("concurrency", "")) for job in jobs.values()]
+    if concurrency is None or any(policy is None for policy in job_policies):
+        return triggered, None
+    return triggered, concurrency or (bool(jobs) and all(job_policies))
 
 
 def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=False, default_branch="main"):
@@ -90,9 +93,12 @@ def report(repo, pr_runs, jobs, branch_runs, merged_at, workflows, debug=False, 
         problems.append(f"slowest merge-to-release {slowest:.1f} min of last {len(durations)} > 15")
     policies = [workflow_policy(workflow["source"], workflow["name"], workflow["path"], default_branch)
                 for workflow in workflows]
-    checked = sum(triggered for triggered, valid in policies)
-    missing = sum(triggered and not valid for triggered, valid in policies)
+    checked = sum(triggered and valid is not None for triggered, valid in policies)
+    missing = sum(triggered and valid is False for triggered, valid in policies)
     if debug:
+        for workflow, (triggered, valid) in zip(workflows, policies):
+            if valid is None:
+                print(f"checks-budget: unchecked expression: {workflow['path']}", file=sys.stderr)
         ship_minutes = f"{slowest:.1f}" if slowest is not None else "unavailable"
         print(f"checks-budget: {repo}: max jobs={maximum if maximum is not None else 'unavailable'}; slowest ship minutes={ship_minutes}; "
               f"workflows missing cancel-in-progress={missing}/{checked}", file=sys.stderr)
@@ -365,7 +371,7 @@ def self_test():
     fixture["workflows"][0].update(name="CI", path=".github/workflows/ci.yml", source="on: push\njobs: {}\n")
     assert "1/1 workflows" in check(fixture)
     assert workflow_policy("on: push\nconcurrency: {group: '${{ github.ref }}', cancel-in-progress: true}\n") == (True, True)
-    assert workflow_policy('"on":\n  pull_request:\n    branches: [main]\nconcurrency:\n  group: ci\n  cancel-in-progress: false\n') == (False, False)
+    assert workflow_policy('"on":\n  pull_request:\n    branches: [main]\nconcurrency:\n  group: ci\n  cancel-in-progress: false\n') == (True, False)
     assert workflow_policy("on: workflow_dispatch\n") == (False, False)
     assert workflow_policy("on: push\n# concurrency: {group: ci, cancel-in-progress: true}\n") == (True, False)
     assert workflow_policy("on: push\njobs:\n  test:\n    concurrency:\n      group: test\n      cancel-in-progress: true\n") == (True, True)
@@ -385,7 +391,7 @@ def self_test():
         ("on: pull_request\nconcurrency:\n  group: ci\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\njobs:\n  test:\n    runs-on: ubuntu-latest\n", (True, True)),
         ("on: pull_request\nconcurrency:\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n", (True, False)),
         ("name: Deploy production\non: pull_request\n", (False, False)),
-        ("on: pull_request\nconcurrency: {group: deploy, cancel-in-progress: false}\n", (False, False)),
+        ("on: pull_request\nconcurrency: {group: deploy, cancel-in-progress: false}\n", (True, False)),
         ("on:\n  push:\n    branches: [main]\n", (False, False)),
         ("on:\n  push:\n    branches:\n      - main\n", (False, False)),
         ("on: {push: {branches: [main]}}\n", (False, False)),
@@ -397,23 +403,45 @@ def self_test():
     for source, expected in policy_cases:
         assert workflow_policy(source) == expected, (source, workflow_policy(source), expected)
     expression_cases = [
+        ("true", True),
+        ('"true"', True),
+        ("false", False),
         ("${{ false }}", False),
         ("${{FaLsE}}", False),
         ("${{   FALSE   }}", False),
-        ("${{ github.event_name == 'push' }}", False),
-        ('${{github.event_name=="workflow_dispatch"}}', False),
-        ("${{ GITHUB.EVENT_NAME == 'PUSH' }}", False),
+        ("${{ false && github.ref }}", None),
+        ("${{ contains(github.event_name, 'push') }}", None),
+        ("${{ github.event_name != 'pull_request' }}", None),
+        ("${{ github.event_name == 'pull_request' || github.event_name == 'push' }}", None),
+        ("${{ github.event_name == 'push' }}", None),
+        ('${{github.event_name=="workflow_dispatch"}}', None),
+        ("${{ GITHUB.EVENT_NAME == 'PUSH' }}", None),
         ("${{ github.event_name == 'pull_request' }}", True),
-        ("${{ github.event_name == 'pull_request_target' }}", True),
-        ("${{ github.event_name != 'push' }}", True),
-        ("${{ !contains(github.ref, 'release/') }}", True),
-        ("${{ true }}", True),
+        ('${{ GITHUB.EVENT_NAME == "PULL_REQUEST" }}', True),
+        ("${{ github.event_name == 'pull_request_target' }}", None),
+        ("${{ github.event_name != 'push' }}", None),
+        ("${{ !contains(github.ref, 'release/') }}", None),
+        ("${{ true }}", None),
     ]
-    for expression, valid in expression_cases:
-        source = f"on: pull_request\nconcurrency:\n  group: ci\n  cancel-in-progress: {expression}\n"
-        assert workflow_policy(source) == (True, valid), (expression, workflow_policy(source))
+    expression_workflows = []
+    for index, (expression, valid) in enumerate(expression_cases):
+        for concurrency_source in [
+                f"concurrency:\n  group: ci\n  cancel-in-progress: {expression}\n",
+                f"jobs:\n  test:\n    concurrency:\n      group: ci\n      cancel-in-progress: {expression}\n"]:
+            source = "on: pull_request\n" + concurrency_source
+            assert workflow_policy(source) == (True, valid), (expression, workflow_policy(source))
+            expression_workflows.append(dict(id=index, name="CI", path=f"ci-{len(expression_workflows)}.yml", source=source))
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        output = report("owner/repo", [], {}, [], {}, expression_workflows, debug=True)
+    checked = 2 * sum(valid is not None for expression, valid in expression_cases)
+    missing = 2 * sum(valid is False for expression, valid in expression_cases)
+    assert f"{missing}/{checked} workflows" in output, output
+    for workflow in expression_workflows:
+        unknown = workflow_policy(workflow["source"])[1] is None
+        assert (f"unchecked expression: {workflow['path']}\n" in stderr.getvalue()) == unknown
     assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: true, group: ci}\n") == (True, True)
-    assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: false, group: ci}\n") == (False, False)
+    assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: false, group: ci}\n") == (True, False)
     assert workflow_policy("on:\n  push:\n    tags-ignore: ['v*']\n") == (True, False)
     assert workflow_policy("on: push\n", path=".github/workflows/publish.yml")[0] is False
     assert workflow_policy("on: push\n", name="Release production")[0] is False
