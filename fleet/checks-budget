@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from collections.abc import Mapping
 import datetime
 import json
 import os
@@ -13,60 +14,56 @@ import traceback
 import urllib.parse
 
 
-def yaml_blocks(source):
-    source = textwrap.dedent(source).strip("\n")
-    matches = list(re.finditer(r"(?m)^['\"]?([\w-]+)['\"]?[ \t]*:[ \t]*(.*)$", source))
-    return {match[1]: textwrap.dedent(source[match.start(2):
-            matches[index + 1].start() if index + 1 < len(matches) else len(source)]).strip()
-            for index, match in enumerate(matches)}
-
-
-def concurrency_policy(source):
-    group = re.search(r"(?:^|[\n,{])\s*['\"]?group['\"]?\s*:\s*([^\n,]+)", source)
-    cancel = re.search(r"(?:^|[\n,{])\s*['\"]?cancel-in-progress['\"]?\s*:\s*(['\"]?)(true|false|\$\{\{.*?\}\})\1[ \t]*(?:[,}\n]|$)", source, re.S | re.I)
-    value = cancel[2] if cancel else ""
-    valid_group = group and group[1].strip().strip("'\"") not in {"", "null", "~"}
-    if value.startswith("${{"):
+def concurrency_policy(concurrency):
+    if not isinstance(concurrency, Mapping):
+        return False
+    group = concurrency.get("group")
+    valid_group = isinstance(group, (str, int, float, bool)) and str(group).strip() not in {"", "null", "~"}
+    value = concurrency.get("cancel-in-progress")
+    if isinstance(value, str):
+        value = value.strip()
         if re.fullmatch(r"\$\{\{\s*false\s*\}\}", value, re.I):
             return False
-        if not re.fullmatch(r"\$\{\{\s*github\.event_name\s*==\s*(['\"])pull_request\1\s*\}\}", value, re.I):
-            return None
-    return bool(valid_group and (value.lower() == "true" or value.startswith("${{")))
+        if "${{" in value:
+            if not re.fullmatch(r"\$\{\{\s*github\.event_name\s*==\s*(['\"])pull_request\1\s*\}\}", value, re.I):
+                return None
+            return bool(valid_group)
+        value = value.lower() == "true"
+    return bool(valid_group and value is True)
 
 
 def workflow_policy(source, name="", path="", default_branch="main"):
-    source = "\n".join(re.sub(r"('(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\")|#.*",
-                              lambda match: match[1] or "", line)
-                       for line in textwrap.dedent(source).splitlines())
-    blocks = yaml_blocks(source)
-    concurrency = concurrency_policy(blocks.get("concurrency", ""))
-    if re.search(r"release|deploy|publish", name + " " + path + " " + blocks.get("name", ""), re.I):
+    try:
+        import yaml
+        workflow = yaml.safe_load(textwrap.dedent(source))
+    except Exception:
+        return False, None
+    if not isinstance(workflow, Mapping):
+        return False, None
+    concurrency = concurrency_policy(workflow.get("concurrency"))
+    if re.search(r"release|deploy|publish", name + " " + path + " " + str(workflow.get("name", "")), re.I):
         return False, concurrency
-    events = blocks.get("on", "")
-    event_blocks = yaml_blocks(events)
-    if events.startswith("{"):
-        triggered = bool(re.search(r"[,{]\s*['\"]?(pull_request|pull_request_target)['\"]?\s*:", events))
-        push = re.search(r"[,{]\s*['\"]?push['\"]?\s*:", events)
-        push_source = events[push.end():] if push else ""
-    elif event_blocks:
-        triggered = bool({"pull_request", "pull_request_target"} & event_blocks.keys())
-        push = "push" in event_blocks
-        push_source = event_blocks.get("push", "")
-    else:
-        triggered = bool(re.search(r"\b(pull_request|pull_request_target)\b", events))
-        push = bool(re.search(r"\bpush\b", events))
-        push_source = ""
-    if push:
-        branches = re.search(r"(?:^|[\n,{])\s*['\"]?branches['\"]?\s*:\s*(\[[^]]*\]|[^\n}]+(?:\n[ \t]+-[^\n]+)*)", push_source)
-        tags_only = bool(re.search(r"(?:^|[\n,{])\s*['\"]?tags['\"]?\s*:", push_source))
-        if branches:
-            names = [value.strip().strip("'\"") for value in re.split(r"[,\n]", branches[1].strip().strip("[]"))]
-            names = [value.removeprefix("- ").strip().strip("'\"") for value in names if value.strip()]
-            triggered |= not names or any(value != default_branch and not value.startswith("!") for value in names)
-        elif not tags_only:
+    events = workflow.get("on", workflow.get(True, {}))
+    if isinstance(events, str):
+        events = {events: None}
+    elif isinstance(events, list):
+        events = {event: None for event in events if isinstance(event, str)}
+    elif not isinstance(events, Mapping):
+        events = {}
+    triggered = bool({"pull_request", "pull_request_target"} & events.keys())
+    if "push" in events:
+        push = events["push"]
+        push = push if isinstance(push, Mapping) else {}
+        if "branches" in push:
+            branches = push["branches"]
+            names = branches if isinstance(branches, list) else [branches] if branches is not None else []
+            triggered |= not names or any(value != default_branch and not str(value).startswith("!") for value in names)
+        elif "tags" not in push:
             triggered = True
-    jobs = yaml_blocks(blocks.get("jobs", ""))
-    job_policies = [concurrency_policy(yaml_blocks(job).get("concurrency", "")) for job in jobs.values()]
+    jobs = workflow.get("jobs")
+    jobs = jobs if isinstance(jobs, Mapping) else {}
+    job_policies = [concurrency_policy(job.get("concurrency") if isinstance(job, Mapping) else None)
+                    for job in jobs.values()]
     if concurrency is None or any(policy is None for policy in job_policies):
         return triggered, None
     return triggered, concurrency or (bool(jobs) and all(job_policies))
@@ -441,6 +438,37 @@ def self_test():
     for workflow in expression_workflows:
         unknown = workflow_policy(workflow["source"])[1] is None
         assert (f"unchecked expression: {workflow['path']}\n" in stderr.getvalue()) == unknown
+    for style in [">-", "|"]:
+        for expression, valid in [
+                ("${{ github.event_name == 'pull_request' }}", True),
+                ("${{ github.event_name == 'push' }}", None)]:
+            concurrency_source = f"concurrency:\n  group: ci\n  cancel-in-progress: {style}\n    {expression}\n"
+            for scope in ["workflow", "job"]:
+                source = "on: pull_request\n" + (concurrency_source if scope == "workflow" else
+                         "jobs:\n  test:\n" + textwrap.indent(concurrency_source, "    "))
+                assert workflow_policy(source) == (True, valid), (source, workflow_policy(source))
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    output = report("owner/repo", [], {}, [], {}, [dict(
+                        id=1, name="CI", path="block.yml", source=source)], debug=True)
+                assert output == "", output
+                assert f"workflows missing cancel-in-progress=0/{int(valid is True)}" in stderr.getvalue()
+                assert ("unchecked expression: block.yml" in stderr.getvalue()) == (valid is None)
+    for source in ["on: [pull_request\n", "- pull_request\n", "null\n", ""]:
+        assert workflow_policy(source) == (False, None), source
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            assert report("owner/repo", [], {}, [], {}, [dict(
+                id=1, name="CI", path="invalid.yml", source=source)], debug=True) == ""
+        assert "unchecked expression: invalid.yml" in stderr.getvalue()
+        assert "workflows missing cancel-in-progress=0/0" in stderr.getvalue()
+    with patch.dict(sys.modules, {"yaml": None}):
+        assert workflow_policy("on: pull_request\n") == (False, None)
+    with patch("yaml.safe_load", side_effect=ValueError("invalid YAML")):
+        assert workflow_policy("on: pull_request\n") == (False, None)
+    assert workflow_policy("on: pull_request\nconcurrency: ci\n") == (True, False)
+    assert workflow_policy("on: pull_request\njobs:\n  test:\n    concurrency: ci\n") == (True, False)
+    print("checks-budget YAML regression tests: PASS (folded and literal scalars, workflow and job concurrency, unchecked YAML, missing parser)")
     assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: true, group: ci}\n") == (True, True)
     assert workflow_policy("on: pull_request\nconcurrency: {cancel-in-progress: false, group: ci}\n") == (True, False)
     assert workflow_policy("on:\n  push:\n    tags-ignore: ['v*']\n") == (True, False)
