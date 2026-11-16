@@ -1,0 +1,1056 @@
+#!/usr/bin/env python3
+"""One scorecard for a board: GREEN only when every house-rules invariant holds.
+
+The fleet chief runs it every loop and is not done until it prints GREEN.
+Each red line names its owner and the fix. An invariant red for over a day
+prints ESCALATE; with --apply it files or bumps one Urgent alarm.
+
+Invariants come from flow-check (work in flight, CI, brain tags),
+wrong-status (columns against PRs and the live deploy), blocker-review
+(tickets on Valentin and in Agent Blocked), ticket-check (chatter) and
+agent-identities. The assignee owns a ticket. Tickets being built never
+exceed workers; QA has its own cap. --fix runs the safe fixes first.
+
+Valentin, 2026-11-06: "the outcome of the skill is to force the chief of
+staff to fix all of this, and make sure that the system is running smoothly".
+
+Free the queue (YPER4-1371): a runner holds one ticket until it is live. --fix
+unassigns every worker from the tickets it holds in a column nobody builds in
+(Bugs, Features, Improvements, Backlog, Todo, UX needed, Later (parked) and the
+like) and notes each one in the agent lane. Agent Blocked and Valentin Review
+holds stay: those wait on something else. --plan prints every fix and writes
+nothing. --only queue limits --plan or --fix to this one.
+
+Send back abandoned work (Valentin 2026-11-07: "what do we do with abandoned
+tickets? we have 5 runners"). Closest to live stays for fleet/pick's orphan
+lane: QA (merged, the live check) and AI Review or In Progress with a green,
+mergeable PR. A ticket in In Progress or AI Review whose PR is red, has merge
+conflicts or sat untouched 48 hours, or that has no open PR, goes back: the PR
+is closed with a comment linking the ticket (runner App token), the ticket
+moves to its home column and every agent is unassigned, one agent-lane note
+each. It re-enters the queue by priority. A live runner's ticket that moved in
+the last 3 hours, incidents, design-pass, tickets waiting on a person and
+merged tickets (wrong-status) stay. --only sendback limits it to this one.
+
+Close dead PRs (board 15, Valentin 2026-11-10: "pr count climbing again why?"). pr-queue only
+reads, so --fix --apply closes, as the runner App, with a comment: the older of two PRs for one
+ticket (DUPLICATE), a PR whose ticket is archived or in Done (TICKET-CLOSED), and a NO-TICKET or
+ORPHAN PR GitHub shows untouched for 48 hours. Bot PRs never. --fix alone and --plan print them.
+--only prs limits it to this one.
+
+Clear CI waits (board 15, Valentin 2026-11-07: board health red over a day). A ticket blocked by CI links
+BlockedBy its board 11514 ticket, so only that relation can block it: nothing cleared either end, and the ci
+line could not go green. --fix --only links unlinks a CI ticket that is Done, and links one that is open
+and only named in the log; --plan prints them and writes nothing.
+
+usage: board-health [--board 15] [--plan] [--fix [--only queue|sendback|prs|links]] [--apply] [--alarm-board 11514] [--self-test]
+Exit 0 GREEN, 1 RED.
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import scopes  # noqa: E402
+STATE = Path.home() / ".local/state/board-health"
+ESCALATE_HOURS = 24
+LEADS = {15: "HT Product Lead", 11514: "Chief Of Staff", 2060: "Mini Boss CEO"}
+CHATTER_LINE = 10
+FLOW_BOARDS = {15, 11514, 2060}
+
+# key: (what must hold, owner role, fix). Owner "lead" means the board's lead.
+INVARIANTS = {
+    "wip": ("tickets being built (In Progress, AI Review) at most the workers", "lead",
+            "runners finish one ticket before the next; send extras back to the queue"),
+    "qa": ("merged tickets waiting for the live check at or under the QA cap", "lead",
+           "prove live and close, LIVE-READY ones first"),
+    "shipped": ("no QA ticket whose change is already live", "lead",
+                "the runner checks it live, then Done; --fix posts the ready-to-close note"),
+    "orphans": ("every ticket being built has a live assigned worker", "lead",
+                "assign a live runner, or move it to its home column"),
+    "doubles": ("no worker is assigned two tickets being built", "lead",
+                "keep its most recent ticket, unassign the rest; --fix does it"),
+    "outside": ("only runners, Design Builder and Speed Runner hold tickets being built", "lead",
+                "leads hand the ticket to a runner"),
+    "stale": ("every In Progress ticket moved in the last 3 hours", "lead", "wake the runner or reassign"),
+    "overdue": ("no ticket over its wait limit in QA, AI Review or Agent Blocked", "lead",
+                "drive the PR or live proof today"),
+    "blocked_cap": ("Agent Blocked at or under its cap", "lead", "clear the column today; only broken tools stay"),
+    "brain": ("every open ticket has one brain tag", "lead",
+              "the brain tagger (poteto-2-advisor bin/brain-tagger, every 30 min) tags it; make the writer named here set it"),
+    "ci": ("no ticket waits on a slow, closed or missing CI ticket", "Chief Of Staff",
+           "the shared pool's CI lane (fleet/pick) takes Urgent and app-blocking CI tickets first; triage files the missing ones"),
+    "pristine": ("every ticket on Valentin breaks no ticket rule", "lead",
+                 "rewrite per skills/tickets, then fix what wrote it"),
+    "parked_clean": ("every Agent Blocked ticket breaks no ticket rule", "lead",
+                     "rewrite per skills/tickets, then fix what wrote it"),
+    "chatter": (f"under {CHATTER_LINE} agent rule breaks a day", "fleet chief",
+                "fix the rule or code behind the top writer, /house-rules-update"),
+    "idle": ("no live runner idles while work waits", "lead",
+             "run /runner-update and /runner-list; give each idle runner an orphan first, then the queue, or fix why it idles"),
+    "status": ("no merged, closed or PR-less ticket in a pre-merge column", "lead",
+               "merged: QA on board 15, Done elsewhere after the live check; closed or no PR: home column; "
+               "--fix does board 15 and 11514"),
+    "prq": ("open PRs at most the workers, each on a ticket a live worker is building", "lead",
+            "hand each orphan PR's ticket to an idle runner; close duplicates and PRs of closed tickets; "
+            "red three runs: fix the runner picker's PR queue step"),
+    "identities": ("runner logins match live runner sessions, no duplicate names", "Chief Of Staff",
+                   "--fix deletes dismantled runner logins after 24h (agent-identities --apply); "
+                   "duplicates: delete the unused one; sync logins whenever runners change"),
+}
+
+
+def run_json(cmd):
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        path = f.name
+    subprocess.run(cmd + ["--json", path], capture_output=True, text=True)
+    try:
+        return json.load(open(path))
+    except ValueError:
+        return None
+    finally:
+        os.unlink(path)
+
+
+def run_text(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+
+def number(pattern, text):
+    m = re.search(pattern, text, re.M)
+    return tuple(int(g) for g in m.groups()) if m else None
+
+
+def measure(flow, blockers, chatter, identities=None, status=None, board=None, prq=None):
+    """Turn the three checks into {key: (bad count, detail)}; None means not measured on this board."""
+    m = {}
+    if flow:
+        m.update(measure_flow(flow))
+    m.update(measure_rest(blockers, chatter, identities, status, board, prq))
+    return m
+
+
+def ci_waiting(r):
+    """Only a BlockedBy relation is a CI wait. A CI ticket named in the log and since Done leaves nothing to wait on."""
+    if r.get("verdict") == "CI-WAIT":
+        return False
+    return not (r.get("verdict") == "CI-DONE" and not r.get("ci_linked", True))
+
+
+def measure_flow(flow):
+    s, rows = flow["summary"], flow["rows"]
+    o = s.get("ownership")
+    m = {}
+    if s.get("qa_cap"):
+        m["qa"] = (max(0, s["qa"] - s["qa_cap"]), f"{s['qa']} in QA, cap {s['qa_cap']}")
+    if o:
+        m["wip"] = (max(0, o["active"] - o["live"]), f"{o['active']} being built for {o['live']} workers")
+        m["orphans"] = (len(o["orphans"]), " ".join(n for n, _ in o["orphans"]))
+        m["doubles"] = (len(o["doubles"]), " ".join(f"{w}: {','.join(n)}" for w, n in o["doubles"].items()))
+        m["outside"] = (len(o["outside"]), " ".join(f"{n} ({w})" for n, w in o["outside"]))
+        waiting = len(o["orphans"]) + s.get("queue", 0)
+        idle = o.get("idle_runners", [])
+        m["idle"] = (len(idle) if waiting else 0,
+                     f"idle: {', '.join(idle) or 'none'}; waiting: {len(o['orphans'])} orphans, {s.get('queue', 0)} queued")
+    stale = [r["ticket"] for r in rows if r["verdict"] == "STALE"]
+    m["stale"] = (len(stale), " ".join(stale))
+    over = [r["ticket"] for r in rows if r["verdict"] == "OVERDUE"]
+    m["overdue"] = (len(over), " ".join(over))
+    m["blocked_cap"] = (int(bool(s["blocked_over_cap"])), "")
+    writers = Counter(t.get("writer") or "unknown" for t in s["no_brain"])
+    m["brain"] = (len(s["no_brain"]), "written by " + ", ".join(f"{w} {n}" for w, n in writers.most_common())
+                  + ": " + " ".join(t["ticket"] for t in s["no_brain"]) if s["no_brain"] else "")
+    ci_bad = [r for r in s.get("ci_blocked", []) if ci_waiting(r)]
+    m["ci"] = (len(ci_bad), " ".join(f"{r['ticket']}>{r['ci_ticket'] or 'none'}" for r in ci_bad))
+    return m
+
+
+def pristine_on(board, blockers):
+    """blocker-review lists his whole inbox, every board. Score only this board's rows."""
+    rows = re.findall(rf"^[A-Z-]+ +\S+ .* (\d+) defects +https://app\.hypertask\.ai/detail/project-{board}/", blockers, re.M)
+    return (sum(n == "0" for n in rows), len(rows))
+
+
+def measure_rest(blockers, chatter, identities, status, board=None, prq=None):
+    m = {}
+    blockers = blockers or ""
+    pristine = (pristine_on(board, blockers) if board else number(r"^PRISTINE (\d+) of (\d+)", blockers)) if blockers else None
+    if pristine:
+        m["pristine"] = (pristine[1] - pristine[0], f"{pristine[0]} of {pristine[1]} clean")
+    parked = number(r"^PARKED SUMMARY (\d+) parked .* (\d+) break no ticket rule", blockers)
+    if parked:
+        m["parked_clean"] = (parked[0] - parked[1], f"{parked[1]} of {parked[0]} clean")
+    if chatter is not None:
+        agent = len({(r["ticket"], r["item"]) for r in chatter if r["origin"] == "agent"})
+        m["chatter"] = (int(agent >= CHATTER_LINE), f"{agent} agent items in 24h")
+    if status is not None:
+        wrong = [r for r in status["rows"] if r["verdict"] != "LIVE-READY"]
+        live = [r["ticket"] for r in status["rows"] if r["verdict"] == "LIVE-READY"]
+        m["status"] = (len(wrong), " ".join(f"{r['ticket']}({r['verdict']})" for r in wrong))
+        m["shipped"] = (len(live), " ".join(live))
+    if prq is not None:
+        bad = prq["bad"]
+        kinds = {}
+        for b in bad:
+            kinds.setdefault(b["verdict"], []).append(f"#{b['number']}")
+        detail = f"{prq['open']} open PRs for {prq['workers']} workers. " + " ".join(
+            f"{v} {' '.join(n)}" for v, n in sorted(kinds.items()))
+        m["prq"] = (len(bad) + max(0, prq["open"] - prq["workers"] - len(bad)), detail.strip())
+    if identities is not None:
+        extra ={p: v["extra"] for p, v in identities["pools"].items() if v.get("extra")}
+        detail = " ".join(f"{p}: {len(e)} extra" for p, e in extra.items())
+        if identities["duplicates"]:
+            detail += f" duplicates: {', '.join(identities['duplicates'])}"
+        m["identities"] = (identities["extra"] + len(identities["duplicates"]), detail.strip())
+    return m
+
+
+def track(board, measured, numbers, now):
+    """Returns (hours red per key, bad count per key last run, headline numbers last run, last run time)."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    path = STATE / f"{board}.json"
+    old = json.load(open(path)) if path.exists() else {}
+    if "first" not in old:
+        old = {"first": old, "last": {}}
+    first = {k: old["first"].get(k, now.isoformat()) for k, (bad, _) in measured.items() if bad}
+    json.dump({"first": first, "last": {k: bad for k, (bad, _) in measured.items()}, "numbers": numbers,
+               "at": now.isoformat()}, open(path, "w"), indent=1)
+    red_for = {k: (now - datetime.fromisoformat(v)).total_seconds() / 3600 for k, v in first.items()}
+    return red_for, old["last"], old.get("numbers", {}), old.get("at")
+
+
+def headline(numbers, before, at):
+    parts = [f"{name} {before[name]} to {n}" if name in before else f"{name} {n}" for name, n in numbers.items()]
+    return "TREND " + ", ".join(parts) + (f" (since {at[:16].replace('T', ' ')} UTC)" if at else " (first run)")
+
+
+def trend(bad, before):
+    return "" if before is None or before == bad else f" Was {before}, now {bad}."
+
+
+def scorecard(board, measured, red_for, last=None, lead=None):
+    last = last or {}
+    lead = lead or LEADS.get(board, "the board lead")
+    lines, escalate = [], []
+    for key, (rule, owner, fix) in INVARIANTS.items():
+        if key not in measured:
+            continue
+        bad, detail = measured[key]
+        who = lead if owner == "lead" else owner
+        moved = trend(bad, last.get(key))
+        if not bad:
+            lines.append(f"OK        {key:<13} {rule}.{moved}")
+            continue
+        hours = red_for.get(key, 0)
+        tag = "ESCALATE" if hours > ESCALATE_HOURS else "RED"
+        (escalate.append(key) if tag == "ESCALATE" else None)
+        lines.append(f"{tag:<9} {key:<13} {rule}. {detail}. Owner {who}: {fix}. Red {hours:.0f}h.{moved}")
+    red = sum(1 for k in measured if measured[k][0])
+    verdict = "GREEN" if not red else f"RED {red} of {len(measured)}"
+    return lines, f"BOARD-HEALTH board {board}: {verdict}", escalate
+
+
+def alarm(board, alarm_board, lines, escalate):
+    title = f"Board health: board {board} red over a day"
+    found = next((t for t in json.loads(run_text(["hypertask", "--json", "task", "list", "--project", str(alarm_board),
+                                                  "--status", "Normal", "--search", "Board health", "--limit", "50"])
+                                        or "{}").get("tasks", []) if t.get("title") == title), None)
+    red = [l for l in lines if l.startswith(("RED", "ESCALATE"))]
+    if found:
+        mark = STATE / f"alarm-bump-{str(board).replace('/', '-')}"
+        if mark.exists() and time.time() - mark.stat().st_mtime < 86400:
+            return f"ALARM {found['ticketNumber']} already bumped today"
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.touch()
+        subprocess.run(["vcc", "activity", "add", found["ticketNumber"],
+                        f"board-health: still red over a day: {', '.join(escalate)}."], check=False)
+        return f"ALARM bumped {found['ticketNumber']}"
+    body = (f"## Problem\n- Board health has been red for over a day.\n- {len(red)} checks are red.\n"
+            "- The agent lane lists each one.\n\n"
+            "## Fix\n- The fleet chief works each red line.\n- Each owner fixes its line today.\n\n"
+            "## Done when\n- Board health shows green.\n\n## Risk\n- None. Only tickets move.\n\n## Decision\nnone\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(body)
+    r = subprocess.run(["vcc", "task", "create", "--project", str(alarm_board), "--priority", "urgent", "--labels",
+                        "brain-medium", "--title", title, "--description-file", f.name, "--markdown"],
+                       capture_output=True, text=True)
+    if r.returncode:
+        return f"ALARM failed: {(r.stderr or r.stdout)[:160]}"
+    num = re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", r.stdout)
+    if num:
+        subprocess.run(["vcc", "activity", "add", num.group(0), "board-health red over a day:\n" + "\n".join(red)],
+                       capture_output=True, text=True)
+    return f"ALARM filed {num.group(0) if num else ''}".strip()
+
+
+def self_test():
+    global run_text, run_fix
+    flow = {"rows": [{"ticket": "HTPR-1", "verdict": "STALE"}, {"ticket": "HTPR-2", "verdict": "OK"}],
+            "summary": {"ownership": {"active": 12, "live": 10, "orphans": [("HTPR-1", "no claim")], "doubles": {},
+                                      "outside": []},
+                        "blocked_over_cap": False, "no_brain": [], "ci_blocked": [], "ci_boss_h": None}}
+    blockers = "PRISTINE 3 of 25 tickets that wait on Valentin break no ticket rule\n" \
+               "PARKED SUMMARY 12 parked over 1d, 6 belong in another column, 12 break no ticket rule\n"
+    m = measure(flow, blockers, [{"ticket": "A", "item": "ticket", "origin": "agent"}])
+    assert m["wip"][0] == 2 and m["orphans"][0] == 1 and m["stale"][0] == 1 and m["pristine"][0] == 22, m
+    assert m["parked_clean"][0] == 0 and m["chatter"][0] == 0 and m["doubles"][0] == 0, m
+    lines, head, esc = scorecard(15, m, {"wip": 30})
+    assert head == "BOARD-HEALTH board 15: RED 4 of 13" and esc == ["wip"], (head, esc)
+    assert any(l.startswith("ESCALATE  wip") and "HT Product Lead" in l for l in lines), lines
+    rows = "HIS-OK            HTPR-1   R1  money 0 defects  https://app.hypertask.ai/detail/project-15/1  t\n" \
+           "HIS-BADLY-WRITTEN HYCI-2  R2  keys  3 defects  https://app.hypertask.ai/detail/project-11514/2  t\n"
+    assert pristine_on(15, rows) == (1, 1) and pristine_on(2108, rows) == (0, 0), "pristine must stay on its board"
+    assert measure(flow, rows, None, board=2108)["pristine"][0] == 0, "other boards' blockers turned this one red"
+    busy = {"rows": [], "summary": {**flow["summary"], "queue": 0, "ownership": {
+        **flow["summary"]["ownership"], "orphans": [], "idle_runners": ["runner 3"]}}}
+    assert measure(busy, "", None)["idle"][0] == 0, "idle with nothing waiting is fine"
+    flow["summary"]["ownership"]["idle_runners"] = ["runner 3"]
+    assert measure(flow, "", None)["idle"][0] == 1, "idle runner beside an orphan passed"
+    ids = {"pools": {"Runner N": {"extra": ["11", "12"]}}, "duplicates": ["mini boss ceo"], "extra": 2}
+    assert measure(flow, blockers, None, ids)["identities"][0] == 3
+    st = {"rows": [{"ticket": "IGSH-1", "verdict": "MERGED-NOT-MOVED"}]}
+    assert measure(flow, blockers, None, None, st)["status"] == (1, "IGSH-1(MERGED-NOT-MOVED)")
+    clean = {k: (0, "") for k in m}
+    assert scorecard(15, clean, {})[1] == "BOARD-HEALTH board 15: GREEN"
+    assert any("Was 2, now 0." in l for l in scorecard(15, clean, {}, {"wip": 2})[0]), "trend missing"
+    assert headline({"being built": 41}, {"being built": 51}, "2026-11-06T01:00:00") \
+        == "TREND being built 51 to 41 (since 2026-11-06 01:00 UTC)"
+    qa = {"rows": [], "summary": {**flow["summary"], "qa": 20, "qa_cap": 15}}
+    assert measure(qa, "", None)["qa"][0] == 5 and measure(qa, "", None)["wip"][0] == 2, "QA must not count as building"
+    st = {"rows": [{"ticket": "HTPR-5", "verdict": "LIVE-READY", "pr": "a#1", "column": "QA"},
+                   {"ticket": "HTPR-6", "verdict": "MERGED-NOT-MOVED", "pr": "a#2", "column": "AI Review"},
+                   {"ticket": "HTPR-7", "verdict": "NO-PR", "pr": None, "column": "AI Review", "title": "[BUG] x", "labels": []}]}
+    sm = measure(None, "", None, None, st)
+    assert sm["shipped"][0] == 1 and sm["status"][0] == 2, sm
+    ci = lambda n, v, rel, **kw: dict({"ticket": n, "verdict": v, "ci_ticket": "HYCI-" + n[-1], "ci_linked": rel}, **kw)
+    cif = {"rows": [], "summary": {**flow["summary"], "ci_blocked": [
+        ci("HTPR-11", "CI-DONE", True), ci("HTPR-12", "CI-DONE", False),
+        ci("HTPR-13", "CI-NO-LINK", False), ci("HTPR-14", "CI-WAIT", True), dict(ci("HTPR-15", "CI-NO-TICKET", False), ci_ticket=None)]}}
+    assert measure(cif, "", None)["ci"] == (3, "HTPR-11>HYCI-1 HTPR-13>HYCI-3 HTPR-15>none"), measure(cif, "", None)["ci"]
+    cip = {t: (c, note) for t, c, note in plan_ci_fixes(cif)}
+    assert sorted(cip) == ["HTPR-11", "HTPR-13"], cip
+    assert cip["HTPR-11"][0] == [["vcc", "task", "unlink", "HTPR-11", "HYCI-1"]] and "waits on nothing" in cip["HTPR-11"][1]
+    assert cip["HTPR-13"][0] == [["vcc", "task", "link", "HTPR-13", "HYCI-3", "--type", "BlockedBy"]], cip["HTPR-13"]
+    assert plan_ci_fixes(None) == [] and plan_ci_fixes(busy) == [], "no CI rows, no CI fix"
+    assert ci_waiting(ci("X", "CI-DONE", False)) is False and ci_waiting(ci("X", "CI-DONE", True)) is True
+    assert measure(flow, "", None)["ci"][0] == 0, "an unlinked Done CI ticket is not a wait"
+    fl = {"rows": [{"ticket": "A", "idle_h": 1}, {"ticket": "B", "idle_h": 9}],
+          "summary": {"no_brain": [{"ticket": "C", "writer": "app feedback reporter"}],
+                      "ownership": {"doubles": {"Runner 1": ["A", "B"]}}}}
+    plan = {n: (c, note) for n, c, note in plan_fixes(15, fl, st)}
+    assert plan["HTPR-6"][0] == [["vcc", "task", "move", "HTPR-6", "QA"]]
+    # HTPR-9080 (13 Nov 23:07): the runner had just moved it to Flag: Only Me + QA, the sendback moved it back to QA, a third run started
+    at = datetime(2026, 11, 13, 23, 7, 9, tzinfo=timezone.utc)
+    got = lambda col, moved: {"section": col, "updatedAt": moved}
+    assert merged_move_skip(got("Flag: Only Me + QA", "2026-11-13T23:06:45Z"), at), "replay: a ticket the runner moved on is left alone"
+    assert merged_move_skip(got("In Progress", "2026-11-13T23:04:00Z"), at), "a ticket a runner moved 3 minutes ago is left alone"
+    assert merged_move_skip(got("QA", "2026-11-13T21:00:00Z"), at), "already in QA: nothing to move"
+    assert merged_move_skip(None, at), "an unreadable ticket is not moved"
+    for col in ("In Progress", "AI Review", "Agent Blocked (Infra)", "Valentin Review"):
+        assert merged_move_skip(got(col, "2026-11-13T21:00:00Z"), at) == "", f"{col} for hours: the sendback still moves it"
+    assert merged_move_skip(got("In Progress", "2026-11-13T22:50:00Z"), at) == "", "17 minutes quiet is enough"
+    assert is_qa_move(plan["HTPR-6"][0]) and not is_qa_move([["vcc", "task", "move", "X", "Done"]]) and not is_qa_move([])
+    real_run_text, real_run_fix, real_sub, ran = run_text, run_fix, subprocess.run, []
+    try:
+        subprocess.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")  # the agent-lane note is not written by a test
+        run_text = lambda cmd: json.dumps({"tasks": [got("Flag: Only Me + QA", "2026-11-13T23:06:45Z")]})
+        run_fix = lambda cmd: (ran.append(cmd), subprocess.CompletedProcess(cmd, 0, "", ""))[1]
+        apply_fixes([("HTPR-9080", [["vcc", "task", "move", "HTPR-9080", "QA"]], f"{NOTE} moved to QA. Its PR is merged: a#2.")])
+        assert ran == [], "apply_fixes does not run the move on a ticket that already left the column"
+        run_text = lambda cmd: json.dumps({"tasks": [got("AI Review", "2026-11-13T12:00:00Z")]})
+        apply_fixes([("HTPR-9081", [["vcc", "task", "move", "HTPR-9081", "QA"]], f"{NOTE} moved to QA. Its PR is merged: a#2.")])
+        assert ran == [["vcc", "task", "move", "HTPR-9081", "QA"]], "a ticket still in AI Review for hours is moved"
+    finally:
+        run_text, run_fix, subprocess.run = real_run_text, real_run_fix, real_sub
+    assert plan["HTPR-7"][0] == [["vcc", "task", "update", "HTPR-7", "--section", "4389"]]
+    assert plan["HTPR-5"][0] == [] and "ready to close" in plan["HTPR-5"][1]
+    assert "C" not in plan, "board-health must not default-tag: the brain tagger owns untagged tickets"
+    assert "A" not in plan and plan["B"][0] == [["vcc", "task", "unassign", "B", "--agent", "Runner 1"]], "kept the wrong ticket"
+    assert "HTPR-6" not in {n for n, _, _ in plan_fixes(11514, None, st)}, "merged moves to QA only on board 15"
+    solo = {"rows": [{"ticket": "P1", "idle_h": 1}, {"ticket": "P2", "idle_h": 5}],
+            "summary": {"ownership": {"doubles": {"Postbox Dev": ["P1", "P2"]}}}}
+    assert plan_fixes(2060, solo, None)[0][:2] == ("P2", [["vcc", "task", "move", "P2", "Todo"],
+                                                          ["vcc", "task", "unassign", "P2", "--agent", "Postbox Dev"]]), \
+        "a solo dev's extra ticket goes to the queue: no pool runner adopts it from Doing"
+    live_st = {"rows": [{"ticket": "HYCI-6", "verdict": "MERGED-NOT-MOVED", "pr": "a#2", "column": "AI Review", "live": True},
+                        {"ticket": "HYCI-7", "verdict": "NO-PR", "pr": None, "column": "AI Review", "title": "x", "labels": []}]}
+    assert plan_fixes(11514, None, live_st) == [
+        ("HYCI-6", [["vcc", "task", "move", "HYCI-6", "Done"]],
+         f"{NOTE} moved to Done. Its PR a#2 is merged and live."),
+        ("HYCI-7", [["vcc", "task", "update", "HYCI-7", "--section", "32923"]],
+         f"{NOTE} back to the queue. No PR linked while it sat in AI Review.")], \
+        "board 11514 sends PR-less tickets to Backlog and closes only live merged ones"
+    alarm_st = {"rows": [{"ticket": "HYCI-277", "verdict": "MERGED-NOT-MOVED", "pr": "a#9", "column": "In Progress",
+                          "live": True, "title": "Board health: board 11514 red over a day", "labels": []}]}
+    assert plan_fixes(11514, None, alarm_st) == [
+        ("HYCI-277", [["vcc", "task", "update", "HYCI-277", "--section", "32923"]],
+         f"{NOTE} back to the queue. A board-health alarm stays open until the board is green.")], \
+        "a board-health alarm with a live partial fix returns to Backlog, it does not close"
+    closed_11514 = {"rows": [{"ticket": "HYCI-8", "verdict": "PR-CLOSED", "pr": "a#3", "column": "In Progress"}]}
+    assert plan_fixes(11514, None, closed_11514) == [
+        ("HYCI-8", [["vcc", "task", "update", "HYCI-8", "--section", "32923"]],
+         f"{NOTE} back to the queue. Its PR closed unmerged while it sat in In Progress.")], \
+        "HYCI-219 case: a closed PR on the fleet board returns its ticket to Backlog"
+    pats = [scopes._pattern(p) for p in ("Runner {n}", "HT Design Builder")]
+    tk = lambda num, sec, *names: {"ticketNumber": num, "section": sec, "title": "t",
+                                   "assignees": [{"agent": {"displayName": n}} for n in names]}
+    held = queue_rows([tk("A", "Bugs", "Runner 1"), tk("B", "In Progress", "Runner 1"), tk("C", "Later (parked)", "Runner 2"),
+                       tk("D", "Agent Blocked (Infra)", "Runner 2"), tk("E", "Valentin Review", "Runner 3"),
+                       tk("F", "QA", "Runner 3"), tk("G", "Doing", "Runner 4"), tk("H", "AI Review", "Runner 4"),
+                       tk("I", "Flag: Everyone", "Runner 5"), tk("J", "Backlog", "HT Product Lead"), tk("K", "Todo"),
+                       tk("L", "UX needed", "Runner 6", "HT Design Builder", "HT Product Lead"), tk("M", None, "Runner 7")], pats)
+    assert [(r["ticket"], r["worker"]) for r in held] == [("A", "Runner 1"), ("C", "Runner 2"), ("L", "Runner 6")], held
+    qp = plan_queue_fixes(held)
+    assert qp[0] == ("A", [["vcc", "task", "unassign", "A", "--agent", "Runner 1"]],
+                     "board-health fix: Unassigned from Runner 1: runners hold one ticket until live. YPER4-1371."), qp[0]
+    assert len(qp) == 3 and plan_queue_fixes([]) == [], qp
+    assert [c for c, n in queue_counts(held)] == ["Runner 1", "Runner 2", "Runner 6"]
+    task = {"assignees": [{"agent": {"id": "u-1", "displayName": "Runner 1"}}, {"agent": {"id": "u-2", "displayName": "Runner 2"}}]}
+    un = ["vcc", "task", "unassign", "A", "--agent", "Runner 2"]
+    assert uuid_retry(un, task) == ["vcc", "task", "unassign", "A", "--agent", "u-2"], "uuid fallback"
+    assert uuid_retry(un, {"assignees": []}) is None and uuid_retry(["vcc", "task", "move", "A", "QA"], task) is None
+    calls, real_run, real_text = [], subprocess.run, globals()["run_text"]
+    fake = lambda c, **k: (calls.append(c), subprocess.CompletedProcess(
+        c, 1 if "Runner 2" in c else 0, "", "no agent named Runner 2 on this board"))[1]
+    subprocess.run, globals()["run_text"] = fake, lambda c: json.dumps({"tasks": [task]})
+    try:
+        assert run_fix(un).returncode == 0 and calls[-1][-1] == "u-2", calls
+    finally:
+        subprocess.run, globals()["run_text"] = real_run, real_text
+    now = datetime(2026, 11, 7, 23, 0, tzinfo=timezone.utc)
+    sb = lambda num, sec, *names, labels=(), moved="2026-11-07T10:00:00Z", **kw: dict(
+        {"ticketNumber": num, "section": sec, "title": "[BUG] x", "updatedAt": moved,
+         "labels": [{"name": n} for n in labels], "assignees": [{"agent": {"displayName": n}} for n in names]}, **kw)
+    fresh, old = "2026-11-07T20:00:00Z", "2026-11-04T20:00:00Z"
+    prs = {"A": {"url": "https://github.com/hypertask-ai/h/pull/1", "red": True, "conflicting": False, "updated": fresh},
+           "B": {"url": "u/2", "red": False, "conflicting": True, "updated": fresh},
+           "C": {"url": "u/3", "red": False, "conflicting": False, "updated": old},
+           "D": {"url": "u/4", "red": False, "conflicting": False, "updated": fresh},
+           "K": {"url": "u/5", "red": True, "conflicting": False, "updated": fresh}}
+    tickets = [sb("A", "AI Review", "Runner 9"), sb("B", "In Progress", "Runner 9"), sb("C", "AI Review"),
+               sb("D", "AI Review", "Runner 9"), sb("E", "In Progress", "Runner 7"), sb("F", "QA", "Runner 9"),
+               sb("G", "In Progress", "Runner 1", moved="2026-11-07T22:00:00Z"), sb("H", "In Progress", labels=["incident"]),
+               sb("I", "In Progress", blockerCommentId=5), sb("J", "In Progress", "HT Design Builder"),
+               sb("K", "AI Review", "Runner 9"), sb("L", "AI Review", "Runner 1")]
+    assert "A" not in {r["ticket"] for r in sendback_rows(15, tickets, prs, {"A"}, set(), now)}, \
+        "held (running, just claimed, or BlockedBy open): its red PR stays"
+    rows = {r["ticket"]: r for r in sendback_rows(15, tickets, prs, {"K"}, {"runner 1"}, now)}
+    assert set(rows) == {"A", "B", "C", "D", "E", "L"}, sorted(rows)
+    assert not rows["D"]["why"], "a green, mergeable, fresh PR stays for the orphan lane to merge"
+    assert rows["A"]["why"] == "its PR is red" and rows["B"]["why"] == "its PR has merge conflicts"
+    assert rows["C"]["why"].startswith("its PR sat untouched 75h"), rows["C"]
+    assert rows["E"]["why"] == "In Progress with no open PR" and rows["L"]["why"] == "AI Review with no open PR"
+    assert rows["E"]["home"] == "Backlog" and home_column(2060, [], "x") == "Todo" and home_column(11514, [], "x") == "Backlog"
+    sp = {t: (c, note) for t, c, note in plan_sendback(list(rows.values()))}
+    assert "D" not in sp and len(sp) == 5
+    assert sp["A"][0][0][:4] == ["gh", "pr", "close", "https://github.com/hypertask-ai/h/pull/1"] and "project-15/A" in sp["A"][0][0][-1]
+    assert sp["A"][0][1:] == [["vcc", "task", "move", "A", "Backlog"], ["vcc", "task", "unassign", "A", "--agent", "Runner 9"]]
+    assert sp["E"][0] == [["vcc", "task", "move", "E", "Backlog"], ["vcc", "task", "unassign", "E", "--agent", "Runner 7"]]
+    assert sp["C"][0][-1] == ["vcc", "task", "move", "C", "Backlog"], "nobody to unassign"
+    assert sp["A"][1].startswith(NOTE) and "pull/1 closed" in sp["A"][1] and sp["B"][0][0][:3] == ["vcc", "task", "move"], "the App cannot close a PR outside hypertask-ai"
+    waits = plan_sendback([dict(rows["A"], why="it waits on an open BlockedBy ticket", waits=True)])
+    assert waits[0][1] == [["vcc", "task", "move", "A", "Backlog"], ["vcc", "task", "unassign", "A", "--agent", "Runner 9"]], \
+        "a ticket that waits on a blocker goes home like fleet/park --waits-on; its PR stays open"
+    gh = "https://github.com/hypertask-ai/hypertask/pull/"
+    at = lambda h: (now - timedelta(hours=h)).isoformat().replace("+00:00", "Z")
+    bad = lambda n, v, ticket=None, h=1, **kw: dict({"pr": gh + str(n), "number": n, "ticket": ticket, "verdict": v,
+                                                     "updated": at(h), "author": "runner-bot"}, **kw)
+    rows = [bad(1, "DUPLICATE", "HTPR-1", newer=gh + "2"),
+            bad(3, "TICKET-CLOSED", "HTPR-3", ticket_status="Archive", ticket_section="Backlog"),
+            bad(4, "TICKET-CLOSED", "HTPR-4", ticket_status="Normal", ticket_section="Done"),
+            bad(5, "TICKET-CLOSED", "HTPR-5", ticket_status="Normal", ticket_section="AI Review"),
+            bad(6, "TICKET-CLOSED", "HTPR-6", ticket_status="Normal", ticket_section="Flag: Everyone"),
+            bad(7, "TICKET-CLOSED", "HTPR-7", h=500),  # ticket not found: a hypertask outage looks the same
+            bad(8, "NO-TICKET", h=48), bad(9, "NO-TICKET", h=47.9), bad(10, "ORPHAN", "HTPR-10", h=72),
+            bad(11, "ORPHAN", "HTPR-11", h=47.9), bad(12, "ORPHAN", "HTPR-12", updated=None),
+            bad(13, "BOT", h=900, author="app/dependabot"), bad(14, "NO-TICKET", h=900, author="app/dependabot"),
+            bad(15, "PARKED", "HTPR-15", h=900), bad(16, "STALE-TICKET", "HTPR-16", h=900),
+            bad(17, "NOT-A-WORKER", "HTPR-17", h=900), bad(18, "WRONG-COLUMN", "HTPR-18", h=900),
+            dict(bad(19, "NO-TICKET", h=900), pr="https://github.com/valentinyeo/x/pull/19"),
+            bad(20, "ORPHAN", "HTPR-20", h=900)]
+    closes = {c[0][3].rsplit("/", 1)[-1]: (t, c[0], note) for t, c, note in plan_pr_closes(15, rows, now, {gh + "20"})}
+    assert sorted(closes, key=int) == ["1", "3", "4", "8", "10"], sorted(closes, key=int)
+    assert "pull/2 is the newer PR for HTPR-1" in closes["1"][1][-1], "duplicate names the newer PR"
+    assert "archived" in closes["3"][1][-1] and "project-15/3" in closes["3"][1][-1] and "done" in closes["4"][1][-1]
+    assert closes["8"][0] is None and closes["8"][1][-1] == \
+        "Closed by board-health: no owner for 48h. Reopen and assign the ticket to continue.", closes["8"]
+    assert closes["10"][1][:4] == ["gh", "pr", "close", gh + "10"] and "project-15/10" in closes["10"][1][-1]
+    assert plan_pr_closes(15, None, now) == [], "pr-queue failed: close nothing"
+    calls = []
+    real_run, real_fix = subprocess.run, globals()["run_fix"]
+    try:
+        globals()["run_fix"] = lambda c: calls.append(c) or subprocess.CompletedProcess(c, 0, "", "")
+        subprocess.run = lambda c, **kw: calls.append(c) or subprocess.CompletedProcess(c, 0, "", "")
+        apply_fixes([(t, [c], note) for t, c, note in (closes["8"], closes["10"])])
+    finally:
+        subprocess.run, globals()["run_fix"] = real_run, real_fix
+    assert [c[:3] for c in calls] == [["gh", "pr", "close"], ["gh", "pr", "close"], ["vcc", "activity", "add"]], calls
+    assert calls[2][3] == "HTPR-10", "a PR with no ticket closes without an agent-lane note"
+    print("SELF_TEST_OK")
+
+
+QUEUE_FIX_BOARDS = {15, 2060, 11514}
+KEEP_COLUMNS = re.compile(r"^(in progress|doing|ai review|qa|agent blocked.*|valentin review)$", re.I)
+SHIPPED = re.compile(r"^(done|flag:|no flag)", re.I)
+# View leads and specialists keep their holds: they are not runners (Chief Of Staff, 2026-11-07).
+OWNER_KINDS = {"chief", "lead", "solo-dev", "view-lead", "specialist"}
+
+
+def roster_owners():
+    """Board logins of sessions that own their tickets (leads, experts, solo devs): never queue-sendback work."""
+    try:
+        d = json.load(open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../../fleet/roster.json")))
+    except (OSError, ValueError):
+        return set()
+    rows = d["rows"] if isinstance(d, dict) else d
+    return {r["login"].lower() for r in rows if r.get("login") and r.get("kind") in OWNER_KINDS}
+
+
+QUEUE_EXEMPT = {"postbox dev", "multiprompt android dev", "ht design builder"} | roster_owners()
+QUEUE_NOTE = "Unassigned from {who}: runners hold one ticket until live. YPER4-1371."
+HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734},
+        11514: {"other": 32923}}
+NOTE = "board-health fix:"
+
+
+def home(t, board):
+    names = " ".join([t.get("title") or ""] + list(t.get("labels") or []))
+    cols = HOME[board]
+    if re.search(r"\bbug", names, re.I) and "bug" in cols:
+        return cols["bug"]
+    if re.search(r"feature", names, re.I) and "feature" in cols:
+        return cols["feature"]
+    return cols["other"]
+
+
+def plan_fixes(board, flow, status):
+    """Safe, reversible fixes as (ticket, commands, agent-lane note). Pure: reads results, writes nothing."""
+    plan = []
+    for r in (status or {}).get("rows", []):
+        n = r["ticket"]
+        if r["verdict"] == "MERGED-NOT-MOVED" and board == 15:
+            plan.append((n, [["vcc", "task", "move", n, "QA"]],
+                         f"{NOTE} moved to QA. Its PR is merged: {r['pr']}. Runner proves it live, then Done."))
+        elif r["verdict"] == "MERGED-NOT-MOVED" and r.get("live") and str(r.get("title") or "").startswith("Board health:"):
+            plan.append((n, [["vcc", "task", "update", n, "--section", str(home(r, board))]],
+                         f"{NOTE} back to the queue. A board-health alarm stays open until the board is green."))
+        elif r["verdict"] == "MERGED-NOT-MOVED" and r.get("live"):
+            plan.append((n, [["vcc", "task", "move", n, "Done"]],
+                         f"{NOTE} moved to Done. Its PR {r['pr']} is merged and live."))
+        elif r["verdict"] in ("NO-PR", "PR-CLOSED") and board in HOME:
+            plan.append((n, [["vcc", "task", "update", n, "--section", str(home(r, board))]],
+                         f"{NOTE} back to the queue. {'No PR linked' if r['verdict'] == 'NO-PR' else 'Its PR closed unmerged'}"
+                         f" while it sat in {r['column']}."))
+        elif r["verdict"] == "LIVE-READY":
+            plan.append((n, [], f"{NOTE} ready to close. Its merged PR {r['pr']} is in the live production deploy. "
+                                "Runner checks it live, then Done."))
+    if flow:
+        s = flow["summary"]
+        # No default brain tag here: bin/brain-tagger judges every untagged ticket. A blanket brain-medium would hide them from it.
+        idle = {r["ticket"]: r.get("idle_h") for r in flow["rows"]}
+        for who, nums in ((s.get("ownership") or {}).get("doubles") or {}).items():
+            keep = min(nums, key=lambda n: idle.get(n) if idle.get(n) is not None else 1e9)
+            pool = re.fullmatch(r"runner \d+", who.lower())
+            for n in nums:
+                if n == keep:
+                    continue
+                if pool:
+                    plan.append((n, [["vcc", "task", "unassign", n, "--agent", who]],
+                                 f"{NOTE} unassigned {who}: one runner, one ticket. It keeps {keep}. "
+                                 "The orphan sweep hands this one to a free runner."))
+                else:  # no pool runner takes a solo dev's ticket from a building column, so it waits in the queue
+                    plan.append((n, [["vcc", "task", "move", n, home_column(board, [], "")],
+                                     ["vcc", "task", "unassign", n, "--agent", who]],
+                                 f"{NOTE} back to the queue, unassigned {who}: one worker, one ticket. It keeps {keep}."))
+    return plan
+
+
+def queue_rows(tickets, patterns):
+    """One row per worker holding an open ticket in a column nobody builds in. Pure.
+    Building columns, Agent Blocked and Valentin Review stay; shipped columns, people and QUEUE_EXEMPT stay."""
+    rows = []
+    for t in tickets:
+        col = t.get("section") or ""
+        if not col or KEEP_COLUMNS.match(col) or SHIPPED.match(col):
+            continue
+        for a in t.get("assignees") or []:
+            who = (a.get("agent") or {}).get("displayName")
+            if who and who.lower() not in QUEUE_EXEMPT and scopes.is_worker(who, patterns):
+                rows.append({"ticket": t["ticketNumber"], "worker": who, "column": col, "title": (t.get("title") or "")[:70]})
+    return rows
+
+
+def queue_holds(board):
+    """Read only: the queue rows for one whole board. A runner holds one ticket until live on any board, so
+    workers come from every scope on the four fleet boards, as fleet/snapshot counts them (app runners
+    hold Backlog tickets on board 11514)."""
+    live = scopes.sessions()
+    patterns = [p for b in sorted(QUEUE_FIX_BOARDS) for k in scopes.for_board(b) for p in scopes.workers(scopes.get(k), live)[0]]
+    return queue_rows(board_tickets(board), patterns)
+
+
+def board_tickets(board):
+    tickets, offset = [], 0
+    while True:
+        page = json.loads(run_text(["hypertask", "--json", "task", "list", "--project", str(board), "--status", "Normal",
+                                    "--limit", "100", "--offset", str(offset)]) or "{}").get("tasks", [])
+        tickets += page
+        if len(page) < 100:
+            return tickets
+        offset += 100
+
+
+def plan_queue_fixes(rows):
+    """One unassign and one agent-lane note per held ticket and worker. Pure."""
+    return [(r["ticket"], [["vcc", "task", "unassign", r["ticket"], "--agent", r["worker"]]],
+             f"{NOTE} {QUEUE_NOTE.format(who=r['worker'])}") for r in rows]
+
+
+# Clear CI waits (house rule 2026-11-06: an app ticket blocked by CI links BlockedBy its HYCI ticket).
+# Nothing cleared the two dead ends, so the ci line could not go green: a Done CI ticket left linked
+# blocks the ticket for good, and a CI ticket named only in the log is no block at all.
+def plan_ci_fixes(flow):
+    """Safe CI link fixes as (ticket, commands, agent-lane note): unlink a Done CI ticket, link an open one. Pure."""
+    plan = []
+    for r in ((flow or {}).get("summary") or {}).get("ci_blocked") or []:
+        n, ci = r["ticket"], r.get("ci_ticket")
+        if not ci:
+            continue
+        if r["verdict"] == "CI-DONE" and r.get("ci_linked", True):
+            plan.append((n, [["vcc", "task", "unlink", n, ci]],
+                         f"{NOTE} unlinked {ci}: it is Done, so this ticket waits on nothing."))
+        elif r["verdict"] == "CI-NO-LINK":
+            plan.append((n, [["vcc", "task", "link", n, ci, "--type", "BlockedBy"]],
+                         f"{NOTE} linked BlockedBy {ci}: its CI failure is open and the board never saw it."))
+    return plan
+
+
+def queue_counts(rows):
+    return sorted(Counter(r["worker"] for r in rows).items(), key=lambda x: x[0].lower())
+
+
+# Send back abandoned work (Valentin 2026-11-07: "what do we do with abandoned tickets? we have 5 runners").
+# Closest to live stays for the orphan lane in fleet/pick: QA (merged, the live check) and a green, mergeable PR.
+# The rest of the building columns goes back to the queue, unassigned, and re-enters it by priority.
+BUILD_COLUMNS = {15: ("In Progress", "AI Review"), 2060: ("Doing", "AI Review"),
+                 11514: ("In Progress", "AI Review")}
+SENDBACK_IDLE_H = 48
+WORKING_H = 3  # a live runner's ticket that moved within this many hours is being worked
+SENDBACK_SKIP_LABELS = {"incident", "design-pass"}
+SENDBACK_NOTE = "Sent back to the queue: {why}. Unassigned; it re-enters the queue by priority. Valentin 2026-11-07, abandoned tickets."
+TICKET_URL = "https://app.hypertask.ai/detail/project-{b}/{n}"
+
+
+def home_column(board, labels, title):
+    """fleet/park's home_section: the board's intake column (board 15: Backlog)."""
+    return {2060: "Todo"}.get(board, "Backlog")
+
+
+def hours_since(stamp, now):
+    try:
+        return (now - datetime.fromisoformat(stamp.replace("Z", "+00:00"))).total_seconds() / 3600
+    except (AttributeError, ValueError):
+        return None
+
+
+def sendback_rows(board, tickets, prs, hold, live, now):
+    """One row per ticket in a building column with what happens to it. Pure.
+    prs: {ticket: newest open PR {url, red, conflicting, updated}}; hold: tickets that stay whatever their PR (merged or
+    closed ones wrong-status's fixes move, tickets a runner runs or just claimed, open BlockedBy links);
+    live: names (lowered) of workers that work right now."""
+    rows = []
+    for t in tickets:
+        col = t.get("section") or ""
+        if col not in BUILD_COLUMNS.get(board, ()) or t.get("ticketNumber") in hold:
+            continue
+        key = t["ticketNumber"]
+        labels = [(lab.get("name") or "").strip() for lab in t.get("labels") or []]
+        agents = [(a.get("agent") or {}).get("displayName") for a in t.get("assignees") or []]
+        agents = [a for a in agents if a]
+        if {lab.lower() for lab in labels} & SENDBACK_SKIP_LABELS or t.get("waitingOnUserId") or t.get("blockerCommentId"):
+            continue
+        if any(a.lower() in QUEUE_EXEMPT for a in agents):
+            continue
+        moved = hours_since(t.get("updatedAt"), now)
+        if any(a.lower() in live for a in agents) and moved is not None and moved < WORKING_H:
+            continue
+        pr = prs.get(key)
+        why = None
+        if pr:
+            idle = hours_since(pr.get("updated"), now)
+            if pr.get("red"):
+                why = "its PR is red"
+            elif pr.get("conflicting"):
+                why = "its PR has merge conflicts"
+            elif idle is not None and idle >= SENDBACK_IDLE_H:
+                why = f"its PR sat untouched {int(idle)}h"
+        else:
+            why = f"{col} with no open PR"
+        rows.append({"ticket": key, "board": board, "column": col, "home": home_column(board, labels, t.get("title")),
+                     "agents": agents, "pr": pr and pr["url"], "why": why})
+    return rows
+
+
+def plan_sendback(rows):
+    """Close the PR (with a comment linking the ticket), move the ticket home, unassign every agent. Pure."""
+    plan = []
+    for r in rows:
+        if not r["why"]:
+            continue
+        link = TICKET_URL.format(b=r["board"], n=r["ticket"].rsplit("-", 1)[-1])
+        cmds, why = [], r["why"]
+        if r.get("waits"):  # fleet/park --waits-on: home column, unassigned, PR kept; fleet/pick skips it until the blocker is done
+            why += f" ({r['pr']} stays open)" if r["pr"] else ""
+        elif r["pr"] and "/hypertask-ai/" not in r["pr"]:
+            why += f" ({r['pr']} stays open: the runner App cannot write there; the next runner adopts it)"
+        elif r["pr"]:
+            why += f" ({r['pr']} closed)"
+            cmds.append(["gh", "pr", "close", r["pr"], "--comment",
+                         f"Closed by board-health: the ticket went back to the queue because {r['why']}. "
+                         f"The next runner starts fresh from the ticket: {link}"])
+        cmds.append(["vcc", "task", "move", r["ticket"], r["home"]])
+        cmds += [["vcc", "task", "unassign", r["ticket"], "--agent", a] for a in r["agents"]]
+        plan.append((r["ticket"], cmds, f"{NOTE} {SENDBACK_NOTE.format(why=why)}"))
+    return plan
+
+
+def gh_token():
+    return subprocess.run(["gh-app-token"], capture_output=True, text=True).stdout.strip()
+
+
+PR_CLOSE_BOARDS = {15}
+PR_IDLE_H = 48
+BOT_AUTHORS = ("dependabot", "renovate")
+
+
+def plan_pr_closes(board, bad, now, skip=()):
+    """Close the open PRs pr-queue proves nobody will finish, as the runner App. Pure.
+    bad: pr-queue's summary["bad"]; skip: PR URLs another fix in this run already closes.
+    DUPLICATE: the older PR, naming the newer. TICKET-CLOSED: only a ticket archived or in Done.
+    NO-TICKET and ORPHAN: only when GitHub shows no update for 48h. Bot PRs never."""
+    plan = []
+    for b in bad or []:
+        url, key = b.get("pr") or "", b.get("ticket")
+        if url in skip or "/hypertask-ai/" not in url or b.get("verdict") == "BOT" \
+                or any(x in (b.get("author") or "").lower() for x in BOT_AUTHORS):
+            continue
+        link = key and TICKET_URL.format(b=board, n=key.rsplit("-", 1)[-1])
+        archived, done = b.get("ticket_status") == "Archive", (b.get("ticket_section") or "").lower() == "done"
+        idle = hours_since(b.get("updated"), now)
+        if b.get("verdict") == "DUPLICATE" and b.get("newer"):
+            why = f"duplicate of the newer {b['newer']}"
+            comment = f"Closed by board-health: {b['newer']} is the newer PR for {key}. Work continues there."
+        elif b.get("verdict") == "TICKET-CLOSED" and key and (archived or done):
+            why = f"its ticket is {'archived' if archived else 'done'}"
+            comment = f"Closed by board-health: {why}. Reopen the ticket and this PR to continue: {link}"
+        elif b.get("verdict") in ("NO-TICKET", "ORPHAN") and idle is not None and idle >= PR_IDLE_H:
+            why = f"no owner and untouched {int(idle)}h"
+            comment = "Closed by board-health: no owner for 48h. Reopen and assign the ticket to continue." \
+                + (f" Ticket: {link}" if link else "")
+        else:
+            continue
+        plan.append((key, [["gh", "pr", "close", url, "--comment", comment]], f"{NOTE} {url} closed: {why}."))
+    return plan
+
+
+def pr_close_board(board, name, plan):
+    """Read only: the PR closes for one board, minus PRs another fix in plan already closes."""
+    if board not in PR_CLOSE_BOARDS:
+        return []
+    prq = run_json([str(HERE / "pr-queue"), "--scope", name])
+    skip = {c[3] for _, cmds, _ in plan for c in cmds if c[:3] == ["gh", "pr", "close"]}
+    return plan_pr_closes(board, (prq or {}).get("bad"), datetime.now(timezone.utc), skip)
+
+
+def show_pr_closes(board, closes):
+    print(f"PR-CLOSE board {board}: {len(closes)} open PRs would close (--fix --apply closes them)")
+    for _, cmds, note in closes:
+        print(f"  {note[len(NOTE) + 1:]}")
+
+
+def open_pr_states(keys):
+    """{ticket: newest open PR} for the given tickets, across the hypertask-ai and valentinyeo repos. Read only."""
+    env = dict(os.environ, GH_TOKEN=gh_token())
+    found = {}
+    for owner in ("hypertask-ai", "valentinyeo"):
+        r = subprocess.run(["gh", "search", "prs", "--owner", owner, "--state", "open", "--limit", "500",
+                            "--json", "url,title,updatedAt"], capture_output=True, text=True,
+                           env=env if owner == "hypertask-ai" else None)
+        for p in json.loads(r.stdout or "[]"):
+            m = re.search(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b", p.get("title") or "")
+            if m and m[1] in keys and p["updatedAt"] > found.get(m[1], {}).get("updated", ""):
+                found[m[1]] = {"url": p["url"], "updated": p["updatedAt"]}
+    for key, p in found.items():
+        r = subprocess.run(["gh", "pr", "view", p["url"], "--json", "mergeable,statusCheckRollup"], capture_output=True,
+                           text=True, env=env if "/hypertask-ai/" in p["url"] else None)
+        d = json.loads(r.stdout or "{}")
+        p["conflicting"] = d.get("mergeable") == "CONFLICTING"
+        p["red"] = any(c.get("conclusion") in ("FAILURE", "TIMED_OUT") or c.get("state") in ("FAILURE", "ERROR")
+                       for c in d.get("statusCheckRollup") or [])
+    return found
+
+
+def live_workers():
+    """Lowered names of every worker that works right now, on any fleet board (pool runners as fleet/pick sees them)."""
+    live = scopes.sessions()
+    return {n for b in sorted(QUEUE_FIX_BOARDS) for k in scopes.for_board(b) for n in scopes.workers(scopes.get(k), live)[1]}
+
+
+def sendback_board(board, status):
+    """Read only: (rows, plan) for one whole board. status: wrong-status's result; its fixes move merged tickets on,
+    and closed or PR-less ones on boards with a HOME map, so those are left to plan_fixes."""
+    tickets = board_tickets(board)
+    building = {t["ticketNumber"] for t in tickets if (t.get("section") or "") in BUILD_COLUMNS.get(board, ())}
+    hold = {r["ticket"] for r in (status or {}).get("rows", [])
+            if board in HOME or r["verdict"] in ("MERGED-NOT-MOVED", "LIVE-READY")}
+    prs, live, now = open_pr_states(building), live_workers(), datetime.now(timezone.utc)
+    pick = scopes.pick_module()
+    # only the run an alive runner is on now, or a claim whose run has not started yet: the picker's 3h claim window
+    # counts every short run a runner made since, and held every ticket in a building column (board 15: 9 of 9)
+    hold |= {pick.running(m) for m in range(1, pick.RUNNERS + 1) if f"runner {m}" in live} | set(pick.fresh_claims())
+    rows = sendback_rows(board, tickets, prs, hold, live, now)
+    for r in rows:
+        # a BlockedBy link governs the wait (the CI snag rule): its PR is red because of the blocker, so the PR is kept
+        if r["why"] and waits_on_open_ticket(r["ticket"]):
+            r["why"], r["waits"] = "it waits on an open BlockedBy ticket", True
+    return rows, plan_sendback(rows)
+
+
+def waits_on_open_ticket(key):
+    """Has the ticket an outgoing BlockedBy link to a ticket that is not archived or done? Unreadable counts as yes."""
+    d = json.loads(run_text(["hypertask", "--json", "task", "relations", key]) or "null")
+    if not isinstance(d, dict):
+        return True
+    for r in d.get("relations") or []:
+        other = r.get("otherTask") or {}
+        if r.get("relationType") != "BlockedBy" or r.get("direction") != "outgoing" or other.get("status") == "Archive":
+            continue
+        section = other.get("section")
+        if section is None:  # relations carry no column: read the blocker itself
+            g = json.loads(run_text(["hypertask", "--json", "task", "get", other.get("ticketNumber") or ""]) or "null")
+            try:
+                section = g["tasks"][0].get("section") or ""
+            except (TypeError, KeyError, IndexError):
+                return True
+        if not SHIPPED.match(section):
+            return True
+    return False
+
+
+def fleet_line():
+    """Valentin's question in one line: every ticket being built or waiting for its live check, on every fleet board,
+    against the workers that work right now; then the shared pool's own WIP cap, as fleet/pick applies it."""
+    from importlib.machinery import SourceFileLoader
+    try:
+        pick = SourceFileLoader("fleet_pick", str(HERE.parents[2] / "fleet" / "pick")).load_module()
+        pick.SNAP = pick.load_snapshot()
+        building = {t["key"] for t in pick.SNAP["tickets"] if t["section"] in pick.BOARDS[t["board"]][1]}
+        units, pool, excluded = pick.pipeline()
+    except (RuntimeError, OSError, ValueError) as e:
+        return f"FLEET pipeline unknown: {type(e).__name__}: {e}"
+    workers = live_workers()
+    return (f"FLEET pipeline {len(building)} tickets in In Progress, AI Review and QA on boards 15, 2060, 11514 "
+            f"for {len(workers)} live workers{' OVER' if len(building) > len(workers) else ''}. Pool {pick.wip_line(units, pool, excluded)}")
+
+
+def show_sendback(board, rows, plan):
+    keep = [r for r in rows if not r["why"]]
+    print(f"SENDBACK board {board}: {len(plan)} of {len(rows)} tickets in In Progress or AI Review go back to the queue; "
+          f"{len(keep)} stay (green or fresh PR, or being worked)")
+    for why, n in Counter(re.sub(r"\d+h", "48h or more", r["why"]) if r["why"] else "stays" for r in rows).most_common():
+        print(f"  {why}: {n}")
+
+
+def show_plan(board, plan, rows):
+    print(f"PLAN board {board}: {len(plan)} fixes, writes nothing")
+    if rows:
+        print(f"QUEUE-HOLDS board {board}: {len(rows)} tickets held in queue columns by {len(queue_counts(rows))} workers")
+        print("  " + "\n  ".join(f"{w}: {n}" for w, n in queue_counts(rows)))
+        cols = Counter(r["column"] for r in rows)
+        print("  columns: " + ", ".join(f"{c} {n}" for c, n in cols.most_common()))
+    for ticket, cmds, note in plan:
+        print(f"WOULD {ticket} [{' && '.join(' '.join(c) for c in cmds) or 'note only'}] {note[len(NOTE) + 1:][:100]}")
+
+
+def uuid_retry(cmd, task):
+    """The same unassign by the agent's UUID from the ticket's own assignees, for a worker that is not a member of the board. Pure."""
+    if cmd[:3] != ["vcc", "task", "unassign"] or "--agent" not in cmd:
+        return None
+    who = cmd[cmd.index("--agent") + 1]
+    for a in (task or {}).get("assignees") or []:
+        ag = a.get("agent") or {}
+        if ag.get("displayName") == who and ag.get("id"):
+            return cmd[:cmd.index("--agent") + 1] + [ag["id"]]
+    return None
+
+
+def run_fix(cmd):
+    # GitHub writes go through the runner App token, never Valentin's login
+    env = dict(os.environ, GH_TOKEN=gh_token()) if cmd[0] == "gh" else None
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if r.returncode and "no agent named" in (r.stderr + r.stdout):
+        task = (json.loads(run_text(["hypertask", "--json", "task", "get", cmd[3]]) or "{}").get("tasks") or [None])[0]
+        retry = uuid_retry(cmd, task)
+        if retry:
+            return subprocess.run(retry, capture_output=True, text=True)
+    return r
+
+
+# HYCI-388, 13 Nov (HTPR-9080 ping-pong): a runner moved the ticket from QA to In Progress for its live check, then on to
+# Flag: Only Me + QA at 23:06:45; the sendback, planned from a read taken while it was In Progress, moved it back to QA at
+# 23:07:09 and the picker started a third run. The move to QA only fits a ticket that still sits in a column nobody finishes
+# from, and that nobody touched in the last quarter hour.
+MERGED_MOVE_FROM = re.compile(r"^(?:In Progress|AI Review|Agent Blocked|Valentin Review)\b", re.I)
+MERGED_MOVE_QUIET_MIN = 15
+
+
+def merged_move_skip(task, now):
+    """Why the move to QA must not run on this fresh read of the ticket, or "" when it may. Pure: `task` is `task get`'s row or None."""
+    if not task:
+        return "its column could not be read again"
+    col = task.get("section") or ""
+    if not MERGED_MOVE_FROM.match(col):
+        return f"it is in {col or 'no column'} now, not where the read saw it"
+    moved = hours_since(task.get("updatedAt"), now)
+    if moved is not None and moved * 60 < MERGED_MOVE_QUIET_MIN:
+        return f"it moved {int(moved * 60)} minutes ago, a runner is still on it"
+    return ""
+
+
+def is_qa_move(cmds):
+    return bool(cmds) and cmds[0][:3] == ["vcc", "task", "move"] and cmds[0][-1] == "QA"
+
+
+def apply_fixes(plan):
+    done = failed = skipped = 0
+    for ticket, cmds, note in plan:
+        if ticket and is_qa_move(cmds):  # the plan is minutes old: read the column again right before the write
+            fresh = (json.loads(run_text(["hypertask", "--json", "task", "get", ticket]) or "{}").get("tasks") or [None])[0]
+            why = merged_move_skip(fresh, datetime.now(timezone.utc))
+            if why:
+                skipped += 1
+                print(f"FIX SKIPPED {ticket}: not moved to QA, {why}")
+                continue
+        log = [] if cmds else json.loads(run_text(["hypertask", "--json", "task", "agent-log", ticket]) or "{}").get("activities") or []
+        if not cmds and any(note[:60] in (a.get("text") or "") for a in log[:20]):
+            skipped += 1
+            continue
+        errs = []
+        for c in cmds:  # in order, stop at the first failure: a PR that did not close keeps its ticket where it is
+            r = run_fix(c)
+            if r.returncode:
+                errs.append(r)
+                break
+        if errs:
+            failed += 1
+            print(f"FIX FAILED {ticket}: {(errs[0].stderr or errs[0].stdout).strip()[:160]}")
+            continue
+        if ticket:  # a PR with no ticket has no agent lane
+            subprocess.run(["vcc", "activity", "add", ticket, note], capture_output=True, text=True)
+        done += 1
+        print(f"FIXED {ticket or cmds[0][3]}: {note[len(NOTE) + 1:][:100]}")
+    print(f"FIX SUMMARY {done} fixed, {skipped} already noted, {failed} failed")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--board", type=int, default=15)
+    p.add_argument("--apply", action="store_true", help="file or bump the alarm when a line is red over a day; "
+                   "with --fix also close the PRs pr-queue proves dead")
+    p.add_argument("--fix", action="store_true", help="run the safe fixes, then score again")
+    p.add_argument("--scope", help="a key in scopes.json: a board view one lead owns, e.g. 2060/postbox")
+    p.add_argument("--alarm-board", type=int, help="default: the scope's alarm board")
+    p.add_argument("--plan", action="store_true", help="print every safe fix and write nothing")
+    p.add_argument("--only", choices=["queue", "sendback", "prs", "links"],
+                   help="with --plan or --fix: run just the free-the-queue, the send-back, the PR-close or the CI-link fix")
+    p.add_argument("--self-test", action="store_true")
+    a = p.parse_args()
+    if a.self_test:
+        return self_test()
+    sc = scopes.get(a.scope or a.board)
+    a.board, view, name = sc["board"], bool(sc.get("view")), sc["key"]
+    alarm_board = a.alarm_board or sc["alarm_board"]
+    if a.plan or a.fix:
+        if a.board not in QUEUE_FIX_BOARDS or view:
+            print(f"FIX not available on {name}: the shared login cannot write there. The lead fixes by hand.")
+        else:
+            plan, rows, back = [], queue_holds(a.board) if a.only in (None, "queue") else [], ([], [])
+            status = run_json([str(HERE / "wrong-status"), "--board", str(a.board)]) if a.only in (None, "sendback") else None
+            flow = run_json([str(HERE / "flow-check"), "--scope", name]) if a.only in (None, "links") else None
+            if not a.only:  # cheap first: merged moves on, live ones close, doubles (solo devs too) drop extras
+                plan = plan_fixes(a.board, flow, status)
+            if a.only in (None, "sendback"):
+                back = sendback_board(a.board, status)
+                sent = {t for t, _, _ in back[1]}
+                plan = [p for p in plan if p[0] not in sent] + back[1]
+            if a.only in (None, "links"):  # a Done CI ticket left linked blocks for good: nothing cleared it
+                plan += plan_ci_fixes(flow)
+            plan += plan_queue_fixes(rows)
+            closes = pr_close_board(a.board, name, plan) if a.only in (None, "prs") else []
+            if a.fix and not a.plan:
+                apply_fixes(plan)
+                if a.apply:  # PR closes are the one fix that waits for --apply (the hourly timer passes it)
+                    apply_fixes(closes)
+                elif closes:
+                    show_pr_closes(a.board, closes)
+                if a.board == 15 and not a.only:
+                    print(run_text([str(HERE / "flag-columns"), "--apply"]).strip().splitlines()[-1:])
+                    print(run_text([str(HERE / "flag-links"), "--apply"]).strip().splitlines()[:1])
+            else:
+                if a.only in (None, "sendback"):
+                    show_sendback(a.board, *back)
+                show_plan(a.board, plan, rows)
+                if a.only in (None, "prs"):
+                    show_pr_closes(a.board, closes)
+                return 0
+    whole = not view
+    with ThreadPoolExecutor(6) as ex:
+        status = ex.submit(run_json, [str(HERE / "wrong-status"), "--board", str(a.board)]) if whole else None
+        flow = ex.submit(run_json, [str(HERE / "flow-check"), "--scope", name])
+        blockers = ex.submit(run_text, [str(HERE / "blocker-review"), "--boards", str(a.board)]) if whole else None
+        chatter = ex.submit(run_json, [str(HERE / "ticket-check"), "--board", str(a.board)]) if whole else None
+        # --fix on board 15 (hourly timer) deletes dismantled runner logins: Valentin's order 2026-11-08
+        identities = ex.submit(run_json, [str(HERE / "agent-identities")] + (["--apply"] if a.fix else [])) \
+            if a.board == 15 else None
+        prq = ex.submit(run_json, [str(HERE / "pr-queue"), "--scope", name])
+        held = ex.submit(queue_holds, a.board) if whole and a.board in QUEUE_FIX_BOARDS else None
+    status = status and status.result()
+    if flow.result() is None and a.board in FLOW_BOARDS:
+        print(f"BOARD-HEALTH {name}: UNKNOWN, flow-check failed")
+        return 1
+    now = datetime.now(timezone.utc)
+    measured = measure(flow.result(), blockers.result() if blockers else "", chatter and chatter.result(),
+                       identities and identities.result(), status, a.board, prq.result())
+    f = flow.result() or {}
+    s = f.get("summary") or {}
+    numbers = {"being built": (s.get("ownership") or {}).get("active"), "in QA": s.get("qa"),
+               "problems": sum(b for b, _ in measured.values())}
+    numbers = {k: v for k, v in numbers.items() if v is not None}
+    red_for, last, before, at = track(name.replace("/", "-"), measured, numbers, now)
+    lines, head, escalate = scorecard(name, measured, red_for, last, sc["lead"])
+    print("\n".join(lines))
+    if not a.fix and whole and a.board in QUEUE_FIX_BOARDS:
+        fixable = plan_fixes(a.board, f, status) + plan_ci_fixes(f) + plan_queue_fixes(held.result())
+        if fixable:
+            print(f"FIXABLE {len(fixable)} safe fixes waiting: rerun with --plan to read them, --fix to run them")
+    if whole and a.board in QUEUE_FIX_BOARDS:  # one fleet read, only on the four fleet boards
+        print(fleet_line())
+    print(headline(numbers, before, at))
+    print(head)
+    if escalate and a.apply:
+        print(alarm(name, alarm_board, lines, escalate))
+    return 0 if not any(b for b, _ in measured.values()) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

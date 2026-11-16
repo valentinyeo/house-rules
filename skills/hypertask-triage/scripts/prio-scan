@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Queue tickets with no priority get one, so runners pick new work in a sensible order.
+
+Valentin, 2026-11-10: "There should be an automatic scan across the board for the prioritization".
+
+fleet/pick orders new work by the priority field (Urgent, High, Medium, Low). Many queue tickets have none, so their
+order is arbitrary. This scan reads the same queue columns the picker reads and fills only the empty ones.
+
+Never changes a set priority. Never sets Urgent (Valentin's call). Never touches a ticket labelled incident.
+Rules, first match wins:
+  High    Security, data leak, login or auth, billing or payment or money in the labels or title; a Bug on board 15
+          that Valentin reported; a board 11514 ticket that blocks an app ticket or carries the CI label.
+  Low     untouched for 21 days or more, or labelled Nice to have or Later.
+  Medium  everything else.
+
+prio-scan                dry run: one SET line per ticket and a summary
+prio-scan --apply        write the priority and an agent-lane note as your agent (vcc)
+prio-scan --self-test
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+os.environ["SHIP_SESSION_NAME"] = "Chief Of Staff"
+os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
+
+VCC = str(Path.home() / ".local/bin/vcc")
+QUEUE = {"15": ("Backlog", "Bugs", "Improvements", "Features"), "2060": ("Todo",), "11514": ("Backlog",)}
+STALE_DAYS = 21
+LOW_LABELS = {"nice to have", "later"}
+CI_LABEL = "ci"
+HIGH_WORDS = re.compile(
+    r"\b(security|data leaks?|log-?in|log in|sign-?in|sign in|auth|oauth|authentication|authorization|authorisation|"
+    r"billing|payments?|money|stripe)\b", re.I)
+
+
+def payload(text):
+    start = min(i for i in (text.find("["), text.find("{")) if i >= 0)
+    return json.loads(text[start:])
+
+
+def vcc(*args):
+    done = subprocess.run([VCC, "--json", *args], capture_output=True, text=True)
+    if done.returncode:
+        raise RuntimeError(f"vcc {' '.join(args)} failed: {(done.stderr or done.stdout).strip()[-600:]}")
+    return payload(done.stdout)
+
+
+def column(board, name):
+    rows, offset = [], 0
+    while True:
+        page = vcc("task", "list", "--project", board, "--section", name, "--limit", "100", "--offset", str(offset)).get("tasks", [])
+        rows += page
+        if len(page) < 100:
+            return rows
+        offset += 100
+
+
+def priority_of(task):
+    value = task.get("priority")
+    if isinstance(value, dict):
+        value = value.get("Priority_Value")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def label_names(task):
+    return {(l.get("name") or "").strip().lower() for l in task.get("labels") or []}
+
+
+def blocks_app(key):
+    for r in vcc("task", "relations", key).get("relations", []):
+        other = r.get("otherTask") or {}
+        if (r.get("relationType") == "BlockedBy" and r.get("direction") == "incoming" and other.get("status") != "Archive"
+                and not (other.get("ticketNumber") or "").startswith("HYCI-")):
+            return True
+    return False
+
+
+def decide(task, board, now, blocks=lambda key: False):
+    """(priority, reason) for a ticket with no priority; None when the scan must leave it alone."""
+    labels = label_names(task)
+    if priority_of(task) or "incident" in labels:
+        return None
+    hit = HIGH_WORDS.search(" ".join(sorted(labels))) or HIGH_WORDS.search(task.get("title") or "")
+    if hit:
+        return "High", f"mentions {hit.group(0).lower()}"
+    if board == "15" and ("bug" in labels or task.get("section") in ("Bugs", "🪲 Bugs")) and re.search(r"\bvalentin\b", task.get("description") or "", re.I):
+        return "High", "bug Valentin reported"
+    if board == "11514":
+        if CI_LABEL in labels:
+            return "High", "CI ticket"
+        if blocks(task["ticketNumber"]):
+            return "High", "blocks an app ticket"
+    if labels & LOW_LABELS:
+        return "Low", "labelled " + sorted(labels & LOW_LABELS)[0]
+    updated = datetime.fromisoformat((task.get("updatedAt") or "").replace("Z", "+00:00")) if task.get("updatedAt") else None
+    if updated and now - updated >= timedelta(days=STALE_DAYS):
+        return "Low", f"untouched for {(now - updated).days} days"
+    return "Medium", "normal queue work"
+
+
+def plan(now):
+    seen, sets, total = set(), [], 0
+    for board, sections in QUEUE.items():
+        for section in sections:
+            for task in column(board, section):
+                key = task.get("ticketNumber")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                total += 1
+                got = decide(task, board, now, blocks_app)
+                if got:
+                    sets.append((board, key, got[0], got[1], task.get("title", "")))
+    return sets, total
+
+
+def apply(sets):
+    bad = 0
+    for board, key, prio, reason, _ in sets:
+        try:
+            current = vcc("task", "get", key).get("tasks", [{}])[0]
+            if priority_of(current):
+                print(f"  SKIP {key}: priority set meanwhile")
+                continue
+            done = subprocess.run([VCC, "task", "update", key, "--priority", prio], capture_output=True, text=True)
+            if done.returncode:
+                raise RuntimeError((done.stderr or done.stdout).strip()[-600:])
+            note = subprocess.run([VCC, "activity", "add", key, f"Priority scan: set {prio}. Reason: {reason}. "
+                                   "Change it by hand any time; the scan never overrides a set priority."],
+                                  capture_output=True, text=True)
+            if note.returncode:
+                raise RuntimeError("priority set, agent-lane note failed: " + (note.stderr or note.stdout).strip()[-600:])
+        except RuntimeError as err:
+            bad += 1
+            print(f"  FAIL {key}: {err}")
+    return bad
+
+
+def summary(sets, total):
+    n = {p: sum(1 for s in sets if s[2] == p) for p in ("High", "Medium", "Low")}
+    return f"PRIO-SCAN: {len(sets)} of {total} queue tickets had no priority; set {n['High']} high, {n['Medium']} medium, {n['Low']} low"
+
+
+def self_test():
+    now = datetime(2026, 11, 10, tzinfo=timezone.utc)
+    fresh = "2026-11-09T10:00:00.000Z"
+
+    def t(title="Add a thing", labels=(), updated=fresh, desc="", prio=None, key="HTPR-1"):
+        return {"ticketNumber": key, "title": title, "labels": [{"name": n} for n in labels], "updatedAt": updated,
+                "description": desc, "priority": prio}
+
+    assert decide(t(prio="Medium"), "15", now) is None
+    assert decide(t(prio={"Priority_Value": "Low"}), "15", now) is None
+    assert decide(t(labels=["incident"], title="Login is down"), "15", now) is None
+    assert decide(t(), "15", now) == ("Medium", "normal queue work")
+    assert decide(t(prio=""), "15", now) == ("Medium", "normal queue work")
+    assert decide(t(labels=["Security"]), "15", now)[0] == "High"
+    assert decide(t(title="Fix login redirect"), "2060", now)[0] == "High"
+    assert decide(t(title="Google sign-in client"), "2060", now)[0] == "High"
+    assert decide(t(title="Stripe live-mode cutover"), "2060", now)[0] == "High"
+    assert decide(t(title="Billing page shows wrong plan"), "15", now)[0] == "High"
+    assert decide(t(title="Data leak in export"), "15", now)[0] == "High"
+    assert decide(t(title="Author names in the footer"), "15", now) == ("Medium", "normal queue work")
+    assert decide(t(title="Authentication token refresh"), "15", now)[0] == "High"
+    assert decide(t(labels=["Bug"], desc="<p>Valentin saw this</p>"), "15", now) == ("High", "bug Valentin reported")
+    assert decide(t(labels=["Bug"], desc="<p>Runner found this</p>"), "15", now)[0] == "Medium"
+    assert decide(t(desc="<p>Valentin asked</p>"), "15", now)[0] == "Medium"
+    assert decide(t(labels=["Bug"], desc="Valentin saw this"), "2060", now)[0] == "Medium"
+    assert decide(t(labels=["CI"]), "11514", now) == ("High", "CI ticket")
+    assert decide(t(labels=["CI"]), "2060", now)[0] == "Medium"
+    assert decide(t(key="HYCI-9"), "11514", now, blocks=lambda key: key == "HYCI-9") == ("High", "blocks an app ticket")
+    assert decide(t(key="HYCI-9"), "11514", now, blocks=lambda key: False)[0] == "Medium"
+    assert decide(t(), "15", now, blocks=lambda key: True)[0] == "Medium"
+    assert decide(t(labels=["Nice to have"]), "15", now) == ("Low", "labelled nice to have")
+    assert decide(t(labels=["later"]), "15", now)[0] == "Low"
+    assert decide(t(updated="2026-10-20T00:00:00.000Z"), "15", now) == ("Low", "untouched for 21 days")
+    assert decide(t(updated="2026-10-20T00:00:00.000Z"), "15", now)[0] == "Low"
+    assert decide(t(updated="2026-10-20T00:00:01.000Z"), "15", now)[0] == "Medium"
+    assert decide(t(updated="2026-10-01T00:00:00.000Z", labels=["Security"]), "15", now)[0] == "High"
+    assert decide(t(updated=None), "15", now)[0] == "Medium"
+    assert all(decide(t(title=x), "15", now)[0] != "Urgent" for x in ("Urgent login outage", "security leak"))
+    assert summary([("15", "A", "High", "r", ""), ("15", "B", "Low", "r", "")], 5) == \
+        "PRIO-SCAN: 2 of 5 queue tickets had no priority; set 1 high, 0 medium, 1 low"
+    print("prio-scan self-test ok")
+
+
+def main():
+    if "--self-test" in sys.argv:
+        return self_test()
+    sets, total = plan(datetime.now(timezone.utc))
+    for board, key, prio, reason, title in sets:
+        print(f"SET {key} {prio} {reason}  [{title[:70]}]")
+    print(summary(sets, total))
+    for board in QUEUE:
+        mine = [s for s in sets if s[0] == board]
+        print(f"  board {board}: " + ", ".join(f"{p} {sum(1 for s in mine if s[2] == p)}" for p in ("High", "Medium", "Low")))
+    if "--apply" in sys.argv and sets:
+        bad = apply(sets)
+        print(f"applied {len(sets) - bad} of {len(sets)}")
+        return 1 if bad else 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

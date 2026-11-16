@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Cut self-maintenance tickets at the source: vcc asks this before every new ticket on Fleet CI & Infra.
+
+Valentin, 2026-11-08: "210 tickets to build 3 apps!!!!!!!!!! that is insane".
+
+On board 11514 (Fleet CI & Infra):
+1. An open ticket with a near-duplicate title exists: add a +1 note to its agent lane, print its link, file nothing.
+No cap on filing (Valentin, 8 Nov: "A cap doesn't really make sense for CI and infra"): a new problem is
+filed, then reviewed; pileup-watch archives what goes stale.
+Board 4060 (old Fleet Infra) is archived (Valentin, 8 Nov): a ticket for it is refused, file on 11514.
+A ticket labelled Incident skips both: outage filers (production-red-alert, fleet-watch) keep their own dedupe.
+Every pickable board (15, 2060, 11514): a new ticket that ticket-ready would call Not Ready (HYCI-396) gets a warning on stderr
+with the reasons. The warning never blocks and makes no network call. It reads the description from --description or
+--description-file only.
+Any other board, or any other command: allowed, no network call.
+A board read that fails lets the ticket through with a warning, so a rate limit never blocks an outage.
+
+usage: filing-gate [--dry-run] [--who NAME] -- <vcc arguments>
+exit 0 file it, 5 refused (archived board), 6 not filed (duplicate, +1 added). FILING_GATE_DRY_RUN=1 = --dry-run:
+print the decision, write nothing.
+"""
+import argparse
+import importlib.machinery
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+pileup = importlib.machinery.SourceFileLoader("pileup_watch", os.path.join(HERE, "pileup-watch")).load_module()
+dupes = importlib.machinery.SourceFileLoader("board_dupes", os.path.join(HERE, "board-dupes")).load_module()
+
+BOARDS = {11514: "Fleet CI & Infra"}
+RETIRED = {4060: 11514}
+SAME = 0.6  # board-dupes default
+URL = "https://app.hypertask.ai/detail/project-{board}/{number}"
+REFUSE, DUPLICATE = 5, 6
+
+
+def create_args(argv):
+    """(board, title, labels) for a vcc task create, else None."""
+    words, flags, i = [], {}, 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg.startswith("--"):
+            name, eq, value = arg[2:].partition("=")
+            if eq:
+                flags.setdefault(name, []).append(value)
+            elif name in ("json", "human", "markdown", "help") or i + 1 >= len(argv):
+                flags.setdefault(name, []).append("")
+            else:
+                flags.setdefault(name, []).append(argv[i + 1])
+                i += 1
+        else:
+            words.append(arg)
+        i += 1
+    if words[:2] not in (["task", "create"], ["tasks", "create"]) or "help" in flags:
+        return None
+    try:
+        board = int(flags.get("project", [""])[-1])
+    except ValueError:
+        return None
+    labels = {l.strip().lower() for v in flags.get("labels", []) for l in v.split(",") if l.strip()}
+    return board, flags.get("title", [""])[-1], labels
+
+
+def ready_warning(argv):
+    """ticket-ready's warning for a new ticket that would be Not Ready, or "". Never raises: a broken check lets the ticket through."""
+    try:
+        ready = importlib.machinery.SourceFileLoader("ticket_ready", os.path.join(HERE, "ticket-ready")).load_module()
+        return ready.check_create(argv)
+    except Exception as e:  # noqa: BLE001
+        print(f"filing-gate: ticket-ready check skipped ({type(e).__name__}: {e})", file=sys.stderr)
+        return ""
+
+
+def numbers(title):
+    return set(re.findall(r"\d+", title))
+
+
+def score(a, b):
+    """board-dupes word overlap; titles naming different numbers (board 15 vs board 2060) never match."""
+    wa, wb = dupes.words(a), dupes.words(b)
+    if not wa or not wb or numbers(a) != numbers(b):
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def link(board, t):
+    return URL.format(board=board, number=t["uniqueIndex"])
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--dry-run", action="store_true", default=os.environ.get("FILING_GATE_DRY_RUN") == "1")
+    p.add_argument("--who", default=os.environ.get("SHIP_SESSION_NAME") or "an agent")
+    p.add_argument("args", nargs=argparse.REMAINDER)
+    a = p.parse_args()
+    args = a.args[1:] if a.args[:1] == ["--"] else a.args
+    parsed = create_args(args)
+    if parsed and parsed[0] in RETIRED and "incident" not in parsed[2]:
+        print(f"REFUSE board {parsed[0]} is archived: file on board {RETIRED[parsed[0]]} (Fleet CI & Infra)")
+        return REFUSE
+    if parsed:
+        warning = ready_warning(args)
+        if warning:
+            print(warning, file=sys.stderr)
+    if not parsed or parsed[0] not in BOARDS:
+        return 0
+    board, title, labels = parsed
+    name = f"{BOARDS[board]} ({board})"
+    if "incident" in labels:
+        if a.dry_run:
+            print(f"ALLOW incident on {name}")
+        return 0
+    tickets = [t for t in pileup.column_tickets(board, None) if t.get("section") != "Done"]
+    if not tickets:
+        print(f"filing-gate: {name} read back no open tickets; not checked", file=sys.stderr)
+        return 0
+
+    best = max(((score(title, t.get("title") or ""), t) for t in tickets), key=lambda x: x[0], default=(0.0, None))
+    if best[0] >= SAME:
+        t = best[1]
+        url = link(board, t)
+        note = (f"+1 from {a.who} {datetime.now(timezone.utc):%Y-%m-%d}: tried to file \"{title}\". "
+                "filing-gate added this note instead of a second ticket.")
+        if a.dry_run:
+            print(f"+1 {t['ticketNumber']} {url} (match {best[0]:.2f}: {t.get('title')})")
+        else:
+            r = subprocess.run(["vcc", "activity", "add", t["ticketNumber"], note], capture_output=True, text=True)
+            if r.returncode:
+                print(f"filing-gate: +1 note failed: {(r.stderr or r.stdout).strip()[:200]}", file=sys.stderr)
+        print(f"vcc: not filed. The same problem is already open on {name}: {t['ticketNumber']} \"{t.get('title')}\" "
+              f"{url}\n{'Dry run: no note added.' if a.dry_run else 'A +1 note went to its agent lane.'} Add your detail there: vcc activity add {t['ticketNumber']} "
+              "\"<what you saw>\". Link your app ticket BlockedBy it if it blocks you.", file=sys.stderr)
+        return DUPLICATE
+
+    if a.dry_run:
+        print(f"ALLOW {name}: no open duplicate")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
