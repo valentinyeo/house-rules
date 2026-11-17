@@ -3,7 +3,7 @@
 
 Run right before a fleet switch. Saves JSON to ~/.local/state/fleet-switch/snapshot-<UTC>.json.
 Reads boards through the `hypertask` CLI and tmux; never writes to a board.
-Usage: fleet/snapshot [--boards 15,2060,11514]
+Usage: fleet/snapshot [--boards 15,2060]
 "live" means its tmux session or state row exists, as board-health counts it. It does not prove an agent runs in it.
 """
 import argparse
@@ -54,7 +54,7 @@ def prs(t):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--boards", default="15,2060,11514")
+    ap.add_argument("--boards", default="15,2060")
     boards = [int(b) for b in ap.parse_args().boards.split(",")]
     live_sessions = scopes.sessions()
     patterns, live, always = [], set(), set()

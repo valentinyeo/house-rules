@@ -139,6 +139,8 @@ class Sandbox:
     def env(self):
         env = os.environ.copy()
         env["FLEET_PICK_STATE"] = str(self.pick_state)
+        env["FLEET_PICK_LKG"] = str(self.root / "lkg")
+        env["FLEET_HOME"] = str(HERE)
         env["FLEET_RUNNER_STATE"] = str(self.runner_state)
         env["FLEET_WATCH_STATE"] = str(self.watch_state)
         env["FLEET_PICK_ALLOCATION"] = str(self.allocation)
@@ -257,6 +259,8 @@ def drill_broken_picker(ctx):
         return row("broken-picker", start, det, None, False, err)
     bad = ctx.root / "pick-bad.py"
     bad.write_text(PICK.read_text() + "\n(\n")
+    owner = ctx.root / "ticket_owner.py"
+    shutil.copy2(HERE / "ticket_owner.py", owner)
     good = compiles(PICK, ctx.root / "pick-good.pyc")
     broken = compiles(bad, ctx.root / "pick-bad.pyc")
     if not good:
@@ -265,6 +269,9 @@ def drill_broken_picker(ctx):
         return row("broken-picker", start, time.time(), None, False, "injected syntax error still compiled")
     env_bad = dict(env)
     env_bad["FLEET_PICK_SOURCE"] = str(bad)
+    # The injected fault exercises rollback, without filing a live incident.
+    bad_sha = hashlib.sha256((file_sha(bad) + file_sha(owner)).encode()).hexdigest()
+    (ctx.watch_state / "broken-picker-incident.json").write_text(json.dumps({"sha": bad_sha}))
     roll = subprocess.run([sys.executable, str(gate), "pick"], env=env_bad, capture_output=True, text=True)
     detected = time.time()
     if roll.returncode != 0:
@@ -305,8 +312,8 @@ def drill_cap_deadlock(ctx):
 
         wip = [tk(f"HTPR-{9101 + i}", "In Progress", holders=("runner 2",)) for i in range(12)]
         bait = tk("HTPR-9400", "Features", "Urgent")
-        tools = tk("HYCI-9301", "Backlog", "Urgent")
-        checks = tk("HYCI-9300", "Backlog", "Medium")
+        tools = tk("HYCI-9301", "Todo", "Urgent")
+        checks = tk("HYCI-9300", "Todo", "Medium")
         blocked = tk("HTPR-9201", "Done")
         tickets = wip + [bait, tools, checks, blocked]
         rel = {t["key"]: [[], []] for t in tickets}
@@ -378,11 +385,11 @@ def drill_board_access(ctx):
             return set(refreshed.get(board) or [])
 
         pick.fetch_members = fetch
-        joined = pick.can_join(3, "11514")
+        joined = pick.can_join(3, "2060")
         detected = time.time()
         incident_path = ctx.watch_state / "incidents.jsonl"
         incident = incident_path.read_text() if incident_path.exists() else ""
-        named = "runner 3" in incident and "11514" in incident
+        named = "runner 3" in incident and "2060" in incident
         if joined and named:
             return row("board-access", start, detected, detected, True, "")
         parts = []
@@ -560,7 +567,7 @@ def file_alarm(items, dry, sample):
         print("drill-file-lint-ok")
         return 0
     listed = subprocess.run(
-        ["hypertask", "--json", "task", "list", "--project", "11514", "--search", "Factory drill failed", "--limit", "50"],
+        ["hypertask", "--json", "task", "list", "--project", "2060", "--search", "Factory drill failed", "--limit", "50"],
         capture_output=True, text=True,
     )
     if listed.returncode != 0:
@@ -592,9 +599,9 @@ def file_alarm(items, dry, sample):
         print(f"drill-file-noted {existing}")
         return 0
     created = subprocess.run(
-        ["vcc", "task", "create", "--project", "11514", "--title", "Factory drill failed",
+        ["vcc", "task", "create", "--project", "2060", "--title", "Factory drill failed",
          "--description-file", str(path), "--priority", "urgent",
-         "--labels", "CI,Hypertask CI,brain-medium", "--section", "Backlog"],
+         "--labels", "CI,Hypertask CI,brain-medium", "--section", "Todo"],
         capture_output=True, text=True,
     )
     if created.returncode != 0:

@@ -183,6 +183,13 @@ def hypertask(home=None):
     return str(path) if path.is_file() else shutil.which("hypertask") or str(path)
 
 
+def board_status(board, token, run=subprocess.run):
+    command = [hypertask(), "project", "show", str(board), "--json", "--token", token]
+    result = run(command, capture_output=True, text=True, timeout=120)
+    result.check_returncode()
+    return json.loads(result.stdout)["project"]["status"]
+
+
 def board_tickets(board, token, run=subprocess.run):
     tickets, offset = [], 0
     while True:
@@ -357,7 +364,7 @@ def select_rows(rows, root, repo, all_rows=False, home=None, keys=()):
 
 
 def gather(solo, now, roster_path=HERE / "roster.json", home=None, proc=Path("/proc"), tasks=None,
-           views=None, prs=None, all_rows=True, identity=None, caller_keys=(), list_views=None):
+           views=None, prs=None, all_rows=True, identity=None, caller_keys=(), list_views=None, statuses=None):
     home = Path.home() if home is None else home
     snapshot = Snapshot()
     snapshot.all_rows = all_rows
@@ -406,16 +413,17 @@ def gather(solo, now, roster_path=HERE / "roster.json", home=None, proc=Path("/p
     except ValueError as error:
         snapshot.failed(str(error))
         return snapshot
-    if tasks is None or views is None:
+    if tasks is None or views is None or statuses is None:
         try:
             token = read_token(home)
             tasks = tasks or (lambda board: board_tickets(board, token))
             views = views or (lambda view: view_filter(view, token))
             list_views = list_views or (lambda board: board_views(board, token))
+            statuses = statuses or (lambda board: board_status(board, token))
         except (OSError, ValueError):
             snapshot.failed("Hypertask token failed")
     prs = prs or pr_counts
-    view_cache, board_view_cache, row_tickets, scoped_boards = {}, {}, {}, set()
+    view_cache, board_view_cache, status_cache, row_tickets, scoped_boards = {}, {}, {}, {}, set()
     for row in roster:
         session, sid, loop, why, model = None, None, "no chat", "no chat", "no chat"
         try:
@@ -454,6 +462,10 @@ def gather(solo, now, roster_path=HERE / "roster.json", home=None, proc=Path("/p
         resolved_view = view
         for board in boards:
             try:
+                if board not in status_cache:
+                    status_cache[board] = statuses(board)
+                if status_cache[board] == "Archive":
+                    continue
                 board_view = view
                 if board == "2060" and not board_view:
                     if board not in board_view_cache:
@@ -597,7 +609,7 @@ def self_test():
             data = dict(total_count={"failure": 2, "pending": 3, "success": 1}[checks], incomplete_results=False)
             return subprocess.CompletedProcess(command, 0, "HTTP/2.0 200 OK\n\n" + json.dumps(data), "")
         def collect(**kwargs):
-            return gather(solo, now, roster, home, proc, tasks, views, prs, list_views=lambda board: [], **kwargs)
+            return gather(solo, now, roster, home, proc, tasks, views, prs, list_views=lambda board: [], statuses=lambda board: "Normal", **kwargs)
         with patch.object(solo, "HOME", home), patch.object(solo.roster, "hosted_chats", return_value=chats), patch.object(solo, "tmux_states", return_value={}):
             rows = collect()
             assert len(rows) == 3 and calls == ["2060"]
@@ -684,16 +696,16 @@ def self_test():
             def failed_prs(repo):
                 failed_pr_calls.append(repo)
                 raise ValueError("fixture PR failure")
-            failed_repo = gather(solo, now, roster, home, proc, tasks, views, failed_prs)
+            failed_repo = gather(solo, now, roster, home, proc, tasks, views, failed_prs, statuses=lambda board: "Normal")
             assert failed_pr_calls == ["owner/app"]
             assert "PRs open/red/pending/green/waiting verifier: 0/0/0/0/0 (2 rows unknown)" in render(failed_repo, now)
             roster.write_text(json.dumps({"rows": fixture["roster"][:2]}))
             def failed(board):
                 raise ValueError("fixture failure")
-            broken = gather(solo, now, roster, home, proc, failed, views, prs)
+            broken = gather(solo, now, roster, home, proc, failed, views, prs, statuses=lambda board: "Normal")
             assert broken[0].left is None and "board 2060 failed" in render(broken, now)
             malformed = gather(solo, now, roster, home, proc,
-                               lambda board: [dict(id=1, labels=[dict(id="a")])], views, prs)
+                               lambda board: [dict(id=1, labels=[dict(id="a")])], views, prs, statuses=lambda board: "Normal")
             assert "Shipped 1h/3h/12h: 0/0/0" in render(malformed, now)
         worker_proc = home / "real-workers"
         worker_proc.mkdir()
@@ -738,13 +750,28 @@ def self_test():
         assert resolve_view(dict(name="projects"), saved) is None
         assert resolve_view(dict(name="SF Design Lead"), saved) is None
         record.write_text(json.dumps(dict(pid=10, sessionId="native-a")))
-        roster.write_text(json.dumps({"rows": [dict(fixture["roster"][0], name="poteto-2-advisor", board="15,2060,11514", view=None)]}))
+        roster.write_text(json.dumps({"rows": [dict(fixture["roster"][0], name="poteto-2-advisor", board="15,2060,99999", view=None)]}))
         with patch.object(solo.roster, "hosted_chats", return_value={}), patch.object(solo, "tmux_states", return_value={}):
             resolved = gather(solo, now, roster, home, proc,
                               tasks=lambda board: fixture["boards"]["2060"], views=lambda view: {"a"}, prs=prs,
-                              list_views=lambda board: saved)
+                              list_views=lambda board: saved, statuses=lambda board: "Normal")
         assert resolved[0].view == "82d368d4-a164-49e4-abfa-783cff950aa8"
         assert resolved[0].left == 5 and not resolved.failures, (resolved[0], resolved.failures)
+        archived_calls = []
+        def archive_status(board):
+            return "Archive" if board == "99999" else "Normal"
+        def active_tasks(board):
+            archived_calls.append(board)
+            assert board != "99999", "archived board tickets must not be read"
+            return fixture["boards"]["2060"]
+        with patch.object(solo.roster, "hosted_chats", return_value={}), patch.object(solo, "tmux_states", return_value={}):
+            archived = gather(solo, now, roster, home, proc, tasks=active_tasks, views=lambda view: {"a"}, prs=prs,
+                              list_views=lambda board: saved, statuses=archive_status)
+        assert archived_calls == ["15", "2060"]
+        assert archived[0].left == 3 and not archived.failures, (archived[0], archived.failures)
+        assert "board 99999 failed" not in render(archived, now)
+        status_result = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, '{"project":{"status":"Archive"}}', "")
+        assert board_status("99999", "fixture", status_result) == "Archive"
         searches = []
         def big_repo(command, **kwargs):
             searches.append(command)
@@ -809,7 +836,7 @@ def self_test():
         checkout = dict(real[0])
         checkout.pop("cwd")
         assert select_rows([checkout], str(home / "projects/pecunia"), "valentinyeo/pecunia", home=home)[0] == [checkout]
-        missing = gather(solo, now, home / "missing", home, proc, tasks, views, prs, all_rows=False)
+        missing = gather(solo, now, home / "missing", home, proc, tasks, views, prs, all_rows=False, statuses=lambda board: "Normal")
         assert "Factory" not in render(missing, now)
         pages = []
         def fake_run(command, **kwargs):
@@ -842,7 +869,7 @@ def self_test():
         token_file.write_text("fixture-token")
         with patch.dict(os.environ, {"HT_TOKEN": str(token_file)}):
             assert read_token(home) == "fixture-token"
-    print("factory-state self-test ok: 21 reparented workers, ticket/cwd attribution, unattributed totals, saved views, 504-safe PR checks, reset retry, partial totals, shared sources, Codex sessions, verifier counts, loops, scope, failures")
+    print("factory-state self-test ok: 21 reparented workers, ticket/cwd attribution, unattributed totals, saved views, 504-safe PR checks, reset retry, partial totals, shared sources, Codex sessions, verifier counts, loops, scope, failures, archived boards")
 
 
 def main():
