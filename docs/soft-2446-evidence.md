@@ -79,3 +79,10 @@ This changes automation and instructions, without app screens.
 After every caller PR merges, rename board columns separately.
 Then remove aliases in one follow-up wave.
 The user explicitly excluded that removal here.
+
+Historical rule notes moved from edited lines:
+
+```text
+(2026-11-02, why: IGSH-1353 sat there with "Decision: None")
+(2026-11-02, why: "fix the origin of tickets not being moved")
+```
