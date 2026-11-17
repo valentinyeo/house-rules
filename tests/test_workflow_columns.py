@@ -19,6 +19,15 @@ def load(path):
 
 
 class ColumnMigrationTests(unittest.TestCase):
+    def test_runner_briefs_do_not_send_new_prs_to_the_legacy_review_column(self):
+        infra = (ROOT / 'fleet/briefs/infra.txt').read_text()
+        self.assertNotIn('AI Review when the PR opens', infra)
+        for name in ('ci', 'infra'):
+            text = (ROOT / ('fleet/briefs/' + name + '.txt')).read_text()
+            self.assertIn('Move Software Factory tickets', text)
+            self.assertIn('PR opened -> Checks', text)
+            self.assertIn('checks green -> Verifier', text)
+
     def test_picker_keeps_every_inflight_stage_and_alias(self):
         pick = load('fleet/pick')
         self.assertTrue({'Building', 'Doing', 'Checks', 'Verifier', 'AI Review'} <= set(pick.BOARDS['2060'][1]))
