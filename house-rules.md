@@ -27,6 +27,43 @@ valentin's additional lines:
 - a long chat saves its handover and starts its own fresh chat with its loop on; nobody types /clear.
 - github billing is valentin's. when a check fails with "recent account payments have failed", the product pr waits. never verify it on this server or merge around the check. say it once on the ticket, then build the next unit.
 
+## Board sync for orchestrators
+
+Run reconcile yourself on your own board.
+Supported boards are 15 and 2060.
+Use your agent's `HT_TOKEN` and `SHIP_SESSION_NAME`.
+Never use Valentin's personal login.
+
+Preview without writes. Replace `2060` with your board.
+
+```sh
+~/.local/share/house-rules/fleet/reconcile --board 2060
+```
+
+`--section` restricts previews to one column.
+It cannot accompany `--apply`.
+
+```sh
+~/.local/share/house-rules/fleet/reconcile --board 2060 --section Doing
+```
+
+Apply after reading the printed reasons.
+`--limit` caps the entire run.
+Exceeding the cap refuses every move.
+Unknown facts also refuse every move.
+Board 15 always caps runs at five.
+It requires vcc or HT Product Lead credentials.
+
+```sh
+~/.local/share/house-rules/fleet/reconcile --board 2060 --apply --limit 5
+```
+
+Check each move against its printed reason.
+Valentin Review is never touched.
+Merged work still waits for live proof.
+Reconcile never moves tickets to Done.
+Read [the board rules](docs/fleet-reconcile.md) for details.
+
 Local enforcement:
 
 | line | enforced by |
