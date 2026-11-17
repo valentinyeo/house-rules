@@ -64,7 +64,7 @@ jobs:
             const messages = events.filter(x => x.type === 'message_end' && x.message?.role === 'assistant');
             const last = messages.at(-1)?.message?.content || [];
             const verdict = last.filter(x => x.type === 'text').map(x => x.text).join('\n');
-            const match = verdict.match(/^(PASS\+NOTES|PASS|FAIL)\s*$/m);
+            const match = verdict.match(/^(?:VERDICT: )?(PASS\+NOTES|PASS|FAIL)\s*$/m);
             if (!match) throw new Error('DeepSeek returned no verdict');
             const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const body = `${verdict}\n\nDeepSeek Flash verifier. Head ${context.payload.pull_request.head.sha}.\nTrace: ${run}`;
