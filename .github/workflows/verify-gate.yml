@@ -1,0 +1,126 @@
+name: verify-gate
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        type: number
+        required: true
+      mode:
+        type: string
+        default: pr
+      release-sha:
+        type: string
+        default: ''
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+  id-token: write
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve this called workflow revision
+        id: revision
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('verify-gate');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            if (!claims.job_workflow_ref?.startsWith('valentinyeo/house-rules/.github/workflows/verify-gate.yml@') ||
+                !/^[0-9a-f]{40}$/.test(claims.job_workflow_sha || '')) {
+              throw new Error('Missing called-workflow identity');
+            }
+            core.setOutput('sha', claims.job_workflow_sha);
+      - uses: actions/checkout@v4
+        with:
+          repository: valentinyeo/house-rules
+          ref: ${{ steps.revision.outputs.sha }}
+          path: gate
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ inputs.pr-number }}/head
+          fetch-depth: 0
+          path: caller
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.2
+      - name: Broken variants first, then passing fixtures
+        run: python3 gate/tests/test_verify_gate.py --demonstrate
+      - name: Gate regression tests
+        run: python3 -m unittest discover -s gate/tests -p test_verify_gate.py -v
+      - name: Fetch posted verdict and Actions artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          VERIFY_MODE: ${{ inputs.mode }}
+          RELEASE_SHA: ${{ inputs.release-sha }}
+        run: >-
+          python3 gate/fleet/verify-collect
+          --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER"
+          --checkout caller --out collected
+          --mode "$VERIFY_MODE" --release-sha "$RELEASE_SHA"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: verify-gate-inputs
+          path: collected
+          retention-days: 7
+  check:
+    if: ${{ always() }}
+    needs: collect
+    name: ${{ matrix.item }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        item: [real-app, agent-verifier, feature-map, repro-first, test-first,
+               adversary, skill-tests, hard-rules, current-head, real-size,
+               github-run, release-proof, seen-failing]
+    steps:
+      - name: Resolve this called workflow revision
+        id: revision
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('verify-gate');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            if (!claims.job_workflow_ref?.startsWith('valentinyeo/house-rules/.github/workflows/verify-gate.yml@') ||
+                !/^[0-9a-f]{40}$/.test(claims.job_workflow_sha || '')) {
+              throw new Error('Missing called-workflow identity');
+            }
+            core.setOutput('sha', claims.job_workflow_sha);
+      - uses: actions/checkout@v4
+        with:
+          repository: valentinyeo/house-rules
+          ref: ${{ steps.revision.outputs.sha }}
+          path: gate
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ inputs.pr-number }}/head
+          fetch-depth: 0
+          path: caller
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.2
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: verify-gate-inputs
+          path: collected
+      - name: Enforce one book item
+        env:
+          VERIFY_ITEM: ${{ matrix.item }}
+          COLLECT_RESULT: ${{ needs.collect.result }}
+        run: |
+          if [ "$COLLECT_RESULT" != success ]; then
+            echo "FAIL $VERIFY_ITEM | missing artifact: successful current evidence collection"
+            exit 1
+          fi
+          python3 gate/fleet/verify-score caller --check "$VERIFY_ITEM" --context collected/context.json --evidence collected/evidence
