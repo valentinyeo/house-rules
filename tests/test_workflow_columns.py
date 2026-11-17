@@ -81,20 +81,21 @@ class ColumnMigrationTests(unittest.TestCase):
         import tempfile
         from unittest.mock import Mock
         merge = load('fleet/pr-merge')
-        pr = {'number': 7, 'state': 'OPEN', 'title': 'SOFT-2446 fix',
-              'baseRefName': 'main', 'headRefOid': 'a' * 40, 'mergeStateStatus': 'CLEAN',
-              'statusCheckRollup': [], 'updatedAt': '2020-01-01T00:00:00Z'}
-        comments = [{'body': 'pstack-verifier: PASS @ ' + 'a' * 40,
-                     'user': {'login': 'github-actions[bot]'}}]
-        with tempfile.TemporaryDirectory() as directory:
-            hooks = {'env': {}, 'pr': lambda: pr, 'comments': lambda *a: comments,
-                     'sync': lambda *a: None, 'merge': Mock(return_value=(0, '', '')),
-                     'ticket': lambda key: {'section': 'Checks', 'assignees': ['Runner 1']},
-                     'owner': lambda key: None}
-            with patch.object(merge, 'STATE', Path(directory)), \
-                    patch.object(merge, 'FREEZE', Path(directory) / 'freeze'):
-                self.assertEqual(merge.one('valentinyeo/house-rules', 7, hooks=hooks), 'wait')
-            hooks['merge'].assert_not_called()
+        for key in ('SOFT-2446', 'HYCI-2446'):
+            pr = {'number': 7, 'state': 'OPEN', 'title': key + ' fix',
+                  'baseRefName': 'main', 'headRefOid': 'a' * 40, 'mergeStateStatus': 'CLEAN',
+                  'statusCheckRollup': [], 'updatedAt': '2020-01-01T00:00:00Z'}
+            comments = [{'body': 'pstack-verifier: PASS @ ' + 'a' * 40,
+                         'user': {'login': 'github-actions[bot]'}}]
+            with tempfile.TemporaryDirectory() as directory:
+                hooks = {'env': {}, 'pr': lambda: pr, 'comments': lambda *a: comments,
+                         'sync': lambda *a: None, 'merge': Mock(return_value=(0, '', '')),
+                         'ticket': lambda key: {'section': 'Checks', 'assignees': ['Runner 1']},
+                         'owner': lambda key: None}
+                with patch.object(merge, 'STATE', Path(directory)), \
+                        patch.object(merge, 'FREEZE', Path(directory) / 'freeze'):
+                    self.assertEqual(merge.one('valentinyeo/house-rules', 7, hooks=hooks), 'wait')
+                hooks['merge'].assert_not_called()
 
     def test_successful_check_rerun_replaces_its_older_failure(self):
         from workflow_columns import stage

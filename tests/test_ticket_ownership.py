@@ -107,7 +107,7 @@ class OwnershipTests(unittest.TestCase):
                 patch.object(park, "note"), patch.object(park, "record_event"), patch.object(park, "vcc") as api:
             result = park.park_hand_back("HYCI-404", "checks pending; recheck later", ticket)
             self.assertIn("Runner 6 retained", result)
-            api.assert_called_once_with("task", "move", "HYCI-404", "--section", "AI Review")
+            api.assert_called_once_with("task", "move", "HYCI-404", "--section", "Checks")
             park.release("HYCI-404", ticket)
             self.assertEqual(api.call_count, 1)
             self.assertEqual(self.owners.read("HYCI-404")["runner"], 6)

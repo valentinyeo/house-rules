@@ -95,3 +95,10 @@ Successful rerun: Checks != Verifier
 ```
 
 Both now pass the focused regression.
+
+Main advanced during verification through PR #589.
+It removed archived board 11514 from fleet operations.
+Rebased this branch and preserved that cleanup.
+HYCI tickets now share board 2060's column contract.
+The missing-check guard now covers HYCI too.
+The upstream board-archive regressions still pass locally.

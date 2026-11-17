@@ -66,6 +66,7 @@ REPOS = {
     "valentinyeo/house-rules": ("sf", "main"),
 }
 DEPLOY_REPOS = {"hypertask-ai/hypertask"}
+FACTORY_KEYS = ("SOFT-", "IGSH-", "HYCI-")
 BUILDING = {"in progress", "building", "doing", "checks", "verifier", "ai review", "qa"}
 HOLD_LABELS = {"hold", "valentin-review", "do-not-merge"}
 TICKET = re.compile(r"^\[?([A-Z][A-Z0-9]*-\d+)\b")
@@ -338,7 +339,7 @@ def enroll_deploy(repo, key, n, sha):
 
 
 def sync_column(repo, key, pr, env, dry=False, comments=None):
-    if not key.startswith(("SOFT-", "IGSH-")):
+    if not key.startswith(FACTORY_KEYS):
         return
     rc, out, err = sh([HT, "--json", "task", "get", key], timeout=90)
     if rc:
@@ -402,7 +403,7 @@ def one(repo, n, dry=False, now=None, hooks=None):
         action, reason, detail = decide(repo, pr, now, st, FREEZE.exists())
         key = ticket_key(pr) or ""
         comments = []
-        factory = key.startswith(("SOFT-", "IGSH-"))
+        factory = key.startswith(FACTORY_KEYS)
         if factory:
             if action == "merge" or pr.get("state") == "MERGED":
                 comments = (h.get("comments") or verifier_comments)(repo, n, env)
@@ -580,7 +581,7 @@ def sweep(dry, only_repo=None, spawn=None, lister=None, now=None):
             continue
         for pr in prs:
             action, reason, _ = decide(repo, pr, now, load_pr_state(repo, pr["number"]), frozen)
-            if action in ("ignore", "wait") and not (action == "wait" and (ticket_key(pr) or "").startswith(("SOFT-", "IGSH-"))):
+            if action in ("ignore", "wait") and not (action == "wait" and (ticket_key(pr) or "").startswith(FACTORY_KEYS)):
                 if ticket_key(pr):
                     print(f"pr-merge: {repo}#{pr['number']} {action}: {reason}")
                 continue
