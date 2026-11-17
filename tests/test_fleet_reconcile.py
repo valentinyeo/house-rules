@@ -408,7 +408,7 @@ class ProductWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / 'hypertask-test'
             state.mkdir()
-            with sqlite3.connect(state / 'queue.sqlite3') as db:
+            with contextlib.closing(sqlite3.connect(state / 'queue.sqlite3')) as db, db:
                 db.execute('CREATE TABLE deliveries (project_id INTEGER,ticket TEXT,state TEXT,event TEXT,progress_at REAL,started_at REAL)')
                 for key, board, status, age, event in (
                     ('HTPR-1', 15, 'running', 1, 'task.assigned'),
