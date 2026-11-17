@@ -27,7 +27,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          VERIFY_'["python3 -m unittest tests.test_workflow_columns tests.test_ticket_ownership -v", "python3 fleet/pr-merge --self-test", "python3 fleet/sf-release-watch --self-test", "python3 skills/hypertask-triage/scripts/flow-check --self-test"]': '["python3 -m unittest tests.test_workflow_columns tests.test_ticket_ownership -v", "python3 fleet/pr-merge --self-test", "python3 fleet/sf-release-watch --self-test", "python3 skills/hypertask-triage/scripts/flow-check --self-test"]'
+          VERIFY_COMMANDS: '["python3 -m unittest tests.test_workflow_columns tests.test_ticket_ownership -v", "python3 fleet/pr-merge --self-test", "python3 fleet/sf-release-watch --self-test", "python3 skills/hypertask-triage/scripts/flow-check --self-test"]'
         run: python3 scripts/column-verifier.py
       - uses: actions/upload-artifact@v4
         if: always()
