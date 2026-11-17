@@ -100,6 +100,27 @@ class ColumnMigrationTests(unittest.TestCase):
             moves = [cmd for cmd in calls if 'move' in cmd]
             self.assertEqual([cmd[-1] for cmd in moves], [expected] if expected else [])
 
+    def test_merged_pass_stays_in_review_until_live_proof(self):
+        import json
+        merge = load('fleet/pr-merge')
+        pr = {'state': 'MERGED', 'headRefOid': 'a' * 40}
+        comments = [{'body': 'pstack-verifier: PASS @ ' + 'a' * 40,
+                     'user': {'login': 'github-actions[bot]'}}]
+        for current, review in (('Checks', 'AI Review'), ('Building', 'Verifier')):
+            calls = []
+            def api(cmd, *args, **kwargs):
+                calls.append(cmd)
+                if 'get' in cmd:
+                    data = {'tasks': [{'projectId': 2060, 'section': current}]}
+                elif 'list' in cmd:
+                    data = {'sections': [{'name': name} for name in (current, review, 'Done')]}
+                else:
+                    data = {'success': True}
+                return 0, json.dumps(data), ''
+            with self.subTest(current=current), patch.object(merge, 'sh', side_effect=api):
+                merge.sync_column('valentinyeo/house-rules', 'SOFT-2446', pr, {}, comments=comments)
+            self.assertEqual([cmd[-1] for cmd in calls if 'move' in cmd], [review])
+
     def test_latest_failure_overrules_a_pass_and_red_checks_return_to_checks(self):
         from workflow_columns import passed, stage
         pr = {'state': 'OPEN', 'headRefOid': 'a' * 40, 'statusCheckRollup': [
@@ -109,7 +130,7 @@ class ColumnMigrationTests(unittest.TestCase):
         self.assertFalse(passed(pr, comments))
         self.assertEqual(stage(pr, comments), 'Checks')
         pr['state'] = 'MERGED'
-        self.assertIsNone(stage(pr, comments))
+        self.assertEqual(stage(pr, comments), 'Verifier')
 
     def test_empty_checks_cannot_merge_even_with_a_current_pass(self):
         import tempfile
@@ -156,10 +177,10 @@ class ColumnMigrationTests(unittest.TestCase):
         self.assertTrue(passed(pr, [comment]))
         self.assertEqual(stage(pr, [comment]), 'Verifier')
         pr['state'] = 'MERGED'
-        self.assertEqual(stage(pr, [comment]), 'Done')
-        self.assertIsNone(stage(pr, []))
+        self.assertEqual(stage(pr, [comment]), 'Verifier')
+        self.assertEqual(stage(pr, []), 'Verifier')
         comment['body'] = comment['body'].replace('a' * 40, 'b' * 40)
-        self.assertIsNone(stage(pr, [comment]))
+        self.assertEqual(stage(pr, [comment]), 'Verifier')
         comment['body'] = 'pstack-verifier: PASS @ ' + 'a' * 40
         comment['user']['login'] = 'someone'
         self.assertFalse(passed(pr, [comment]))
