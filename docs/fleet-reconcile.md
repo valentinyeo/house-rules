@@ -123,3 +123,13 @@ Changed tickets skip that run.
 ```sh
 python3 fleet/reconcile --self-test
 ```
+
+## Column rename compatibility
+
+Building aliases Doing. Verifier aliases AI Review.
+Checks keeps its existing meaning.
+The sync reads board sections before planning moves.
+Destinations prefer Building and Verifier when available.
+Existing names remain valid during the staged rename.
+Protected columns and the two-hour grace remain unchanged.
+Merged work still waits for live proof.

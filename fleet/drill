@@ -261,6 +261,8 @@ def drill_broken_picker(ctx):
     bad.write_text(PICK.read_text() + "\n(\n")
     owner = ctx.root / "ticket_owner.py"
     shutil.copy2(HERE / "ticket_owner.py", owner)
+    columns = ctx.root / "workflow_columns.py"
+    shutil.copy2(HERE / "workflow_columns.py", columns)
     good = compiles(PICK, ctx.root / "pick-good.pyc")
     broken = compiles(bad, ctx.root / "pick-bad.pyc")
     if not good:
@@ -270,7 +272,7 @@ def drill_broken_picker(ctx):
     env_bad = dict(env)
     env_bad["FLEET_PICK_SOURCE"] = str(bad)
     # The injected fault exercises rollback, without filing a live incident.
-    bad_sha = hashlib.sha256((file_sha(bad) + file_sha(owner)).encode()).hexdigest()
+    bad_sha = hashlib.sha256((file_sha(bad) + file_sha(owner) + file_sha(columns)).encode()).hexdigest()
     (ctx.watch_state / "broken-picker-incident.json").write_text(json.dumps({"sha": bad_sha}))
     roll = subprocess.run([sys.executable, str(gate), "pick"], env=env_bad, capture_output=True, text=True)
     detected = time.time()

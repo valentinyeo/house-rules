@@ -15,9 +15,12 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workflow_columns import INFLIGHT, resolve
+
 BOARD = 2060
 PROTECTED = {'Valentin Review', 'Done', 'Not now'}
-MANAGED = {'Todo', 'Doing', 'Checks', 'AI Review'}
+MANAGED = {'Todo', *INFLIGHT}
 LEASES = Path(os.environ.get('FLEET_LEASE_DIR', Path.home() / '.local/state/fleet/leases'))
 
 
@@ -51,10 +54,17 @@ RULES = (
 )
 
 
-def target(facts):
+def target(facts, sections=None):
     for matches, column, reason in RULES:
         if matches(facts):
-            return column or facts.column, reason
+            if column is None:
+                return facts.column, reason
+            name = {'Doing': 'Building', 'AI Review': 'Verifier'}.get(column, column)
+            if sections is not None:
+                column = resolve(name, sections)
+            elif facts.column == name:
+                column = name
+            return column, reason
 
 
 def stamp(value):
@@ -292,10 +302,10 @@ def collect(task, pulls, now):
     return Facts(task['section'], now - stamp(task['updatedAt']), live_lease(task['ticketNumber'], now), tuple(pull_facts(p) for p in pulls))
 
 
-def reconcile(task, facts, apply=False):
+def reconcile(task, facts, apply=False, sections=None):
     if str(task['projectId']) != str(BOARD):
         raise ValueError('ticket outside board 2060')
-    column, reason = target(facts)
+    column, reason = target(facts, sections)
     key = task['ticketNumber']
     action = 'KEEP' if column == task['section'] else ('MOVE' if apply else 'PLAN')
     line = f'{action} {key} {task["section"]} -> {column} | {reason}'
@@ -307,8 +317,8 @@ def reconcile(task, facts, apply=False):
     return column
 
 
-def apply_plan(plans, limit, pulls):
-    moves = [(task, facts) for task, facts in plans if target(facts)[0] != task['section']]
+def apply_plan(plans, limit, pulls, sections=None):
+    moves = [(task, facts) for task, facts in plans if target(facts, sections)[0] != task['section']]
     if len(moves) > limit:
         print(f'REFUSE move cap: planned={len(moves)} limit={limit}; no writes', flush=True)
         return 1
@@ -325,7 +335,7 @@ def apply_plan(plans, limit, pulls):
     ready = []
     for fresh, facts in fresh_tasks:
         latest = collect(fresh, pulls[fresh['ticketNumber']], time.time())
-        if target(latest) != target(facts):
+        if target(latest, sections) != target(facts, sections):
             print(f'SKIP {fresh["ticketNumber"]} | facts changed since preview', flush=True)
             continue
         ready.append((fresh, latest))
@@ -335,10 +345,10 @@ def apply_plan(plans, limit, pulls):
             print(f'SKIP {task["ticketNumber"]} | ticket changed during preflight', flush=True)
             continue
         final = collect(current, pulls[current['ticketNumber']], time.time())
-        if target(final) != target(facts):
+        if target(final, sections) != target(facts, sections):
             print(f'SKIP {task["ticketNumber"]} | facts changed during preflight', flush=True)
             continue
-        reconcile(current, final, apply=True)
+        reconcile(current, final, apply=True, sections=sections)
     return 0
 
 
@@ -368,6 +378,7 @@ def main():
             print('SKIP board=2060 | reconciliation already running', flush=True)
             return 0
         tasks = tickets(args.section)
+        sections = api('section', 'list', '--project', str(BOARD))['sections']
         candidates = [t for t in tasks if t['section'] in MANAGED]
         pulls = discover([t['ticketNumber'] for t in candidates])
         now, errors = time.time(), 0
@@ -378,14 +389,14 @@ def main():
                     facts = Facts(task['section'], now - stamp(task['updatedAt']))
                 else:
                     facts = collect(task, pulls[task['ticketNumber']], now)
-                reconcile(task, facts)
+                reconcile(task, facts, sections=sections)
                 plans.append((task, facts))
             except (ValueError, KeyError, TypeError, OSError, RuntimeError, subprocess.SubprocessError) as error:
                 errors += 1
                 print(f'UNKNOWN {task["ticketNumber"]} | {error}', flush=True)
         print(f'{"PREVIEW" if args.apply else "DRY RUN"} board={BOARD} tickets={len(tasks)} unknown={errors}', flush=True)
         if args.apply and not errors:
-            return apply_plan(plans, args.limit, pulls)
+            return apply_plan(plans, args.limit, pulls, sections=sections)
         return bool(errors)
 
 

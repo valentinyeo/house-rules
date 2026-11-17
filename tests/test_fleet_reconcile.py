@@ -94,6 +94,18 @@ class ReconcileTest(unittest.TestCase):
                 self.assertIn(f'PLAN SOFT-3 Checks -> {verifier}', out.getvalue())
                 self.assertNotIn('unknown column', out.getvalue())
 
+    def test_apply_uses_the_resolved_verifier_column(self):
+        current = task('Checks')
+        facts = r.Facts('Checks', 8000, False, (pull(),))
+        sections = [{'name': name} for name in ('Todo', 'Building', 'Checks', 'Verifier')]
+        with patch.object(r, 'api', return_value={'tasks': [current]}) as api, \
+                patch.object(r, 'collect', return_value=facts), \
+                patch.object(r, 'run'), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(r.apply_plan([(current, facts)], 5, {'SOFT-1': []}, sections), 0)
+            self.assertIn('MOVE SOFT-1 Checks -> Verifier', out.getvalue())
+            self.assertEqual(api.call_args_list[-1].args,
+                             ('task', 'move', 'SOFT-1', '--section', 'Verifier'))
+
     def test_live_prose_mentions_do_not_own_tickets(self):
         cases = [('pecunia-52.json', 'SOFT-1915', 'SOFT-1910'),
                  ('android-370.json', 'SOFT-1974', 'SOFT-2369')]
@@ -172,6 +184,7 @@ class ReconcileTest(unittest.TestCase):
                 patch.object(r.Path, 'home', return_value=Path(directory)), \
                 patch.object(sys, 'argv', ['reconcile']), \
                 patch.object(r, 'tickets', return_value=[dict(task(), ticketNumber='BROKEN'), task()]), \
+                patch.object(r, 'api', return_value={'sections': [{'name': 'Todo'}]}), \
                 patch.object(r.time, 'time', return_value=NOW), \
                 patch.object(r, 'discover', return_value={'BROKEN': [], 'SOFT-1': []}), \
                 patch.object(r, 'live_lease', return_value=False), \

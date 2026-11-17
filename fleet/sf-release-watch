@@ -150,7 +150,7 @@ def classify(number, prs, releases, contains, notes, run_failed, now, section="A
     """One ticket's state from what GitHub says. Pure: every GitHub answer comes in as an argument.
     prs: the repo's recent PRs (gh pr list rows). releases: published releases, newest first. contains(sha, tag): does the tag
     contain the commit. notes(tag): the release body. run_failed(sha): did a workflow run on that commit fail.
-    section: the ticket's column. Only AI Review gets moved to Done: a ticket in Doing may be rework of an old merge.
+    section: the ticket's column. Only Verifier or AI Review moves to Done: building work may rework an old merge.
     Returns (state, detail, since, release_tag, merge_sha); state is pr, release, done, attention or none."""
     mine = [p for p in prs if names_ticket(p.get("title"), number) or names_ticket(p.get("headRefName"), number)]
     live = [p for p in mine if p["state"] == "OPEN"]

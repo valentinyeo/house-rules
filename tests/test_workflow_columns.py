@@ -19,6 +19,31 @@ def load(path):
 
 
 class ColumnMigrationTests(unittest.TestCase):
+    def test_broken_picker_drill_never_files_a_live_incident(self):
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        drill = load('fleet/drill')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            watch, runner = root / 'watch', root / 'runner'
+            fake_bin = root / '.local/bin'
+            for path in (watch, runner, fake_bin):
+                path.mkdir(parents=True)
+            calls = root / 'vcc-calls'
+            fake = fake_bin / 'vcc'
+            fake.write_text('#!/bin/sh\necho called >> "' + str(calls) + '"\n')
+            fake.chmod(0o755)
+            env = dict(os.environ, HOME=str(root), FLEET_PICK_LKG=str(root / 'lkg'),
+                       FLEET_RUNNER_STATE=str(runner), FLEET_WATCH_STATE=str(watch))
+            ctx = SimpleNamespace(root=root, watch_state=watch, runner_state=runner,
+                                  env=lambda: env)
+            result = drill.drill_broken_picker(ctx)
+            self.assertTrue(result['pass'], result)
+            self.assertFalse(calls.exists(), 'sandbox attempted to file a live incident')
+            self.assertEqual((root / 'lkg/workflow_columns.py').read_bytes(),
+                             (ROOT / 'fleet/workflow_columns.py').read_bytes())
+
     def test_runner_briefs_do_not_send_new_prs_to_the_legacy_review_column(self):
         infra = (ROOT / 'fleet/briefs/infra.txt').read_text()
         self.assertNotIn('AI Review when the PR opens', infra)
