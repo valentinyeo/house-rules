@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 MODEL = 'deepseek-v4.1-flash'
@@ -63,6 +64,10 @@ for iteration in range(24):
     try:
         with urllib.request.urlopen(req, timeout=240) as response:
             result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors='replace').replace(os.environ['OPENCODE_API_KEY'], '<redacted>')
+        print('Provider request failed:', exc.code, detail[:1000])
+        raise SystemExit(1)
     except Exception as exc:
         print('Provider request failed:', type(exc).__name__)
         raise SystemExit(1)
