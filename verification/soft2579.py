@@ -1,13 +1,13 @@
 import json
 import os
 import subprocess
-import urllib.request
-import urllib.error
+import uuid
 from pathlib import Path
 
 MODEL = 'deepseek-v4.1-flash'
 OUT = Path('evidence')
 OUT.mkdir(exist_ok=True)
+SESSION = str(uuid.uuid4())
 prompt = '''Read the worker instructions below before anything else.
 You are the independent DeepSeek Flash verifier for SOFT-2579, authored by Codex.
 Goal: the shared drain rule follows pstack 0.15.43 Autonomous run. Checkable goal,
@@ -59,18 +59,20 @@ tool = {'type': 'function', 'function': {'name': 'run_command', 'description': '
         'parameters': {'type': 'object', 'properties': {'command': {'type': 'string'}}, 'required': ['command']}}}
 for iteration in range(24):
     body = {'model': MODEL, 'messages': messages, 'tools': [tool], 'max_tokens': 6500}
-    req = urllib.request.Request('https://opencode.ai/zen/go/v1/chat/completions',
-          data=json.dumps(body).encode(), headers={'Authorization': 'Bearer ' + os.environ['OPENCODE_API_KEY'], 'Content-Type': 'application/json'})
-    try:
-        with urllib.request.urlopen(req, timeout=240) as response:
-            result = json.load(response)
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors='replace').replace(os.environ['OPENCODE_API_KEY'], '<redacted>')
-        print('Provider request failed:', exc.code, detail[:1000])
+    headers = ['Authorization: Bearer ' + os.environ['OPENCODE_API_KEY'],
+               'Content-Type: application/json', 'x-opencode-session: ' + SESSION,
+               'x-opencode-client: vstack-verifier']
+    config = '\n'.join('header = ' + json.dumps(h) for h in headers)
+    config += '\ndata = ' + json.dumps(json.dumps(body)) + '\n'
+    response = subprocess.run(['curl', '--silent', '--show-error', '--fail-with-body',
+                               '--max-time', '240', '--config', '-',
+                               'https://opencode.ai/zen/go/v1/chat/completions'],
+                              input=config, capture_output=True, text=True)
+    if response.returncode:
+        detail = (response.stdout + response.stderr).replace(os.environ['OPENCODE_API_KEY'], '<redacted>')
+        print('Provider request failed:', detail[:1000])
         raise SystemExit(1)
-    except Exception as exc:
-        print('Provider request failed:', type(exc).__name__)
-        raise SystemExit(1)
+    result = json.loads(response.stdout)
     msg = result['choices'][0]['message']
     messages.append(msg)
     calls = msg.get('tool_calls') or []
