@@ -128,6 +128,7 @@ class ColumnMigrationTests(unittest.TestCase):
                  ({'state': 'OPEN', 'statusCheckRollup': [
                      {'name': 'unit', 'status': 'COMPLETED', 'conclusion': 'SUCCESS'}]}, 'Verifier'),
                  ({'number': 1}, 'Building'),
+                 ({'state': 'OPEN', 'isDraft': True}, 'Building'),
                  ({'state': 'CLOSED'}, 'Todo')]
         for pr, expected in cases:
             for review in ('Verifier', 'AI Review'):

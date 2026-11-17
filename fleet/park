@@ -208,7 +208,14 @@ def paused_section(ticket):
     if any(state not in ("OPEN", "MERGED", "CLOSED") for state in states):
         return ticket.get("section")
     stages = {stage(dict(pr, state=state), []) for pr, state in zip(pulls, states)}
-    wanted = "Checks" if "Checks" in stages else "Verifier" if "Verifier" in stages else "Todo"
+    if "Checks" in stages:
+        wanted = "Checks"
+    elif "Verifier" in stages:
+        wanted = "Verifier"
+    elif "OPEN" in states:
+        return ticket.get("section")
+    else:
+        wanted = "Todo"
     return resolve(wanted, vcc("section", "list", "--project", board)["sections"])
 
 
