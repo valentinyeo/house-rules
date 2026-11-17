@@ -403,12 +403,12 @@ def one(repo, n, dry=False, now=None, hooks=None):
         key = ticket_key(pr) or ""
         comments = []
         factory = key.startswith(("SOFT-", "IGSH-"))
-        if factory and not h:
+        if factory:
             if action == "merge" or pr.get("state") == "MERGED":
-                comments = verifier_comments(repo, n, env)
-            sync_column(repo, key, pr, env, dry, comments)
-            if action == "merge" and not passed(pr, comments):
-                print(f"pr-merge: PR {n} wait: no current-head PASS verifier verdict")
+                comments = (h.get("comments") or verifier_comments)(repo, n, env)
+            (h.get("sync") or sync_column)(repo, key, pr, env, dry, comments)
+            if action == "merge" and (stage(pr, comments) != "Verifier" or not passed(pr, comments)):
+                print(f"pr-merge: PR {n} wait: needs green checks and a current-head PASS verifier verdict")
                 return "wait"
         if action in ("ignore", "wait"):
             print(f"pr-merge: PR {n} {action}: {reason}")

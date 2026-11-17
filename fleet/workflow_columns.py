@@ -33,8 +33,16 @@ def stage(pr, comments):
         return 'Done' if passed(pr, comments) else None
     if pr.get('state') != 'OPEN' or pr.get('isDraft'):
         return None
-    checks = [c for c in pr.get('statusCheckRollup') or []
-              if 'verifier' not in (c.get('name') or c.get('context') or '').lower()]
+    latest = {}
+    for index, check in enumerate(pr.get('statusCheckRollup') or []):
+        name = check.get('name') or check.get('context') or ''
+        if 'verifier' in name.lower():
+            continue
+        key = (check.get('workflowName') or '', name)
+        order = (check.get('startedAt') or '', index)
+        if key not in latest or order >= latest[key][0]:
+            latest[key] = (order, check)
+    checks = [check for _, check in latest.values()]
     green = bool(checks) and all(
         c.get('state') == 'SUCCESS' if 'context' in c else
         c.get('status') == 'COMPLETED' and c.get('conclusion') in ('SUCCESS', 'NEUTRAL', 'SKIPPED')

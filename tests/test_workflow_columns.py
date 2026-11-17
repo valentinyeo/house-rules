@@ -77,6 +77,32 @@ class ColumnMigrationTests(unittest.TestCase):
         pr['state'] = 'MERGED'
         self.assertIsNone(stage(pr, comments))
 
+    def test_empty_checks_cannot_merge_even_with_a_current_pass(self):
+        import tempfile
+        from unittest.mock import Mock
+        merge = load('fleet/pr-merge')
+        pr = {'number': 7, 'state': 'OPEN', 'title': 'SOFT-2446 fix',
+              'baseRefName': 'main', 'headRefOid': 'a' * 40, 'mergeStateStatus': 'CLEAN',
+              'statusCheckRollup': [], 'updatedAt': '2020-01-01T00:00:00Z'}
+        comments = [{'body': 'pstack-verifier: PASS @ ' + 'a' * 40,
+                     'user': {'login': 'github-actions[bot]'}}]
+        with tempfile.TemporaryDirectory() as directory:
+            hooks = {'env': {}, 'pr': lambda: pr, 'comments': lambda *a: comments,
+                     'sync': lambda *a: None, 'merge': Mock(return_value=(0, '', '')),
+                     'ticket': lambda key: {'section': 'Checks', 'assignees': ['Runner 1']},
+                     'owner': lambda key: None}
+            with patch.object(merge, 'STATE', Path(directory)), \
+                    patch.object(merge, 'FREEZE', Path(directory) / 'freeze'):
+                self.assertEqual(merge.one('valentinyeo/house-rules', 7, hooks=hooks), 'wait')
+            hooks['merge'].assert_not_called()
+
+    def test_successful_check_rerun_replaces_its_older_failure(self):
+        from workflow_columns import stage
+        pr = {'state': 'OPEN', 'statusCheckRollup': [
+            {'name': 'unit', 'status': 'COMPLETED', 'conclusion': 'FAILURE', 'startedAt': '2026-11-17T10:00:00Z'},
+            {'name': 'unit', 'status': 'COMPLETED', 'conclusion': 'SUCCESS', 'startedAt': '2026-11-17T11:00:00Z'}]}
+        self.assertEqual(stage(pr, []), 'Verifier')
+
     def test_column_resolution_and_progression(self):
         from workflow_columns import resolve, stage, passed
         old = [{'name': 'Doing'}, {'name': 'AI Review'}, {'name': 'Checks'}]
