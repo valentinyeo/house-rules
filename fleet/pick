@@ -4178,7 +4178,7 @@ def self_test():
     assert lane(hyci) == "infra" and lane(sf) == "sf", "a shared board keeps separate lanes"
     assert lane({**sf, "labels": ["ci"]}) == "ci", "CI labels retain the CI lane"
     assert repo_for(hyci) == str(HYPERTASK_REPO), "a live board does not change the default HYCI repo"
-    assert BOARDS[hyci["board"]] == (("Todo",), ("Doing", "AI Review"))
+    assert BOARDS[hyci["board"]] == (("Todo",), ("Building", "Doing", "Checks", "Verifier", "AI Review"))
     SKIP[0] = Skip(set(), set())
     assert parkable(t), "a resting building ticket with no job yet is due one"
     record_park(3, "HTPR-1")
