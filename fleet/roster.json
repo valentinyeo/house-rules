@@ -10,7 +10,7 @@
    "kind": "chief",
    "role_skill": "/hypertask-triage",
    "login": "Chief Of Staff",
-   "board": "15,2060,11514",
+   "board": "15,2060",
    "status": "live",
    "notes": "Poteto takes Chief Of Staff at the switch. Runs the factory only; no app contact. Owns board-health on every board. Reuses the Chief Of Staff login.",
    "workers": 3,
@@ -43,9 +43,9 @@
    "kind": "lead",
    "role_skill": "/lead",
    "login": "Infra Lead",
-   "board": "11514",
+   "board": "",
    "status": "unknown",
-   "notes": "Tools expert. Owns no board: Fleet CI & Infra (11514) is owned by CI Boss (Valentin, 8 Nov)."
+   "notes": "Tools expert. Owns no board: Fleet CI & Infra (11514) is owned by CI Boss (Valentin, 8 Nov). board 11514 archived 2026-11-17"
   },
   {
    "name": "CI Boss",
@@ -53,9 +53,9 @@
    "kind": "lead",
    "role_skill": "/lead",
    "login": "CI Boss",
-   "board": "11514",
+   "board": "",
    "status": "unknown",
-   "notes": "No board note for 22h on blocking CI tickets (Big Boss Man, 2026-11-07). Check it is running."
+   "notes": "No board note for 22h on blocking CI tickets (Big Boss Man, 2026-11-07). Check it is running. board 11514 archived 2026-11-17"
   },
   {
    "name": "projects",
@@ -270,17 +270,18 @@
    "kind": "runner-pool",
    "role_skill": "/setup-runner",
    "login": "CI Runner {n}",
-   "board": "11514",
+   "board": "",
    "status": "dead",
-   "notes": "All 5 empty shells, idle 36h. CI/Infra lane capped at 4 in the shared pool."
+   "notes": "All 5 empty shells, idle 36h. CI/Infra lane capped at 4 in the shared pool. board 11514 archived 2026-11-17"
   },
   {
    "name": "infra-runner-{n}",
    "kind": "runner-pool",
    "role_skill": "/setup-runner",
    "login": "Infra Runner {n}",
-   "board": "11514",
-   "status": "live"
+   "board": "",
+   "status": "live",
+   "notes": "board 11514 archived 2026-11-17"
   },
   {
    "name": "mp-runner-{n}",

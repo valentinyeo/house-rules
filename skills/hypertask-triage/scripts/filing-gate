@@ -1,42 +1,22 @@
 #!/usr/bin/env python3
-"""Cut self-maintenance tickets at the source: vcc asks this before every new ticket on Fleet CI & Infra.
+"""Refuse tickets on archived boards using their live project status.
 
-Valentin, 2026-11-08: "210 tickets to build 3 apps!!!!!!!!!! that is insane".
-
-On board 11514 (Fleet CI & Infra):
-1. An open ticket with a near-duplicate title exists: add a +1 note to its agent lane, print its link, file nothing.
-No cap on filing (Valentin, 8 Nov: "A cap doesn't really make sense for CI and infra"): a new problem is
-filed, then reviewed; pileup-watch archives what goes stale.
-Board 4060 (old Fleet Infra) is archived (Valentin, 8 Nov): a ticket for it is refused, file on 11514.
-A ticket labelled Incident skips both: outage filers (production-red-alert, fleet-watch) keep their own dedupe.
-Every pickable board (15, 2060, 11514): a new ticket that ticket-ready would call Not Ready (HYCI-396) gets a warning on stderr
-with the reasons. The warning never blocks and makes no network call. It reads the description from --description or
---description-file only.
-Any other board, or any other command: allowed, no network call.
-A board read that fails lets the ticket through with a warning, so a rate limit never blocks an outage.
+Board 4060 remains refused even when its lookup fails.
+A failed board read warns and allows filing, so outages can still be reported.
+Ticket readiness warnings never block filing.
 
 usage: filing-gate [--dry-run] [--who NAME] -- <vcc arguments>
-exit 0 file it, 5 refused (archived board), 6 not filed (duplicate, +1 added). FILING_GATE_DRY_RUN=1 = --dry-run:
-print the decision, write nothing.
+exit 0 file it, 5 refused (archived board).
 """
 import argparse
+import json
 import importlib.machinery
 import os
-import re
 import subprocess
 import sys
-from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-pileup = importlib.machinery.SourceFileLoader("pileup_watch", os.path.join(HERE, "pileup-watch")).load_module()
-dupes = importlib.machinery.SourceFileLoader("board_dupes", os.path.join(HERE, "board-dupes")).load_module()
-
-BOARDS = {11514: "Fleet CI & Infra"}
-RETIRED = {4060: 11514}
-SAME = 0.6  # board-dupes default
-URL = "https://app.hypertask.ai/detail/project-{board}/{number}"
-REFUSE, DUPLICATE = 5, 6
-
+REFUSE = 5
 
 def create_args(argv):
     """(board, title, labels) for a vcc task create, else None."""
@@ -75,69 +55,67 @@ def ready_warning(argv):
         return ""
 
 
-def numbers(title):
-    return set(re.findall(r"\d+", title))
+def board_status(board):
+    result = subprocess.run(["hypertask", "project", "show", str(board), "--json"],
+                            capture_output=True, text=True, timeout=30)
+    result.check_returncode()
+    return json.loads(result.stdout)["project"]["status"]
 
 
-def score(a, b):
-    """board-dupes word overlap; titles naming different numbers (board 15 vs board 2060) never match."""
-    wa, wb = dupes.words(a), dupes.words(b)
-    if not wa or not wb or numbers(a) != numbers(b):
-        return 0.0
-    return len(wa & wb) / len(wa | wb)
-
-
-def link(board, t):
-    return URL.format(board=board, number=t["uniqueIndex"])
+def self_test():
+    from contextlib import redirect_stdout, redirect_stderr
+    from io import StringIO
+    from unittest.mock import patch
+    for board, status, labels, expected in (
+        (11514, "Archive", "", REFUSE),  # HYCI-233 was wrongly filed here.
+        (11514, "Archive", "Incident", REFUSE),
+        (98765, "Archive", "", REFUSE),
+        (4060, "Normal", "Incident", REFUSE),
+        (15, "Normal", "", 0),
+        (2060, "Normal", "Incident", 0),
+    ):
+        argv = ["filing-gate", "--", "task", "create", "--project", str(board),
+                "--title", "HYCI-233 regression", "--labels", labels]
+        output = StringIO()
+        with patch.object(sys, "argv", argv), patch.dict(globals(), board_status=lambda _: status, ready_warning=lambda _: ""), redirect_stdout(output):
+            assert main() == expected
+        if expected == REFUSE:
+            assert output.getvalue().strip() == f"REFUSE board {board} is archived: file on your own board"
+    with patch.object(sys, "argv", ["filing-gate", "--", "task", "create", "--project", "15"]), patch.dict(globals(), ready_warning=lambda _: ""), patch("subprocess.run", side_effect=OSError("offline")), redirect_stderr(StringIO()) as warning:
+        assert main() == 0
+        assert "board 15 read failed" in warning.getvalue()
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, '{"project":{"status":"Archive"}}', "")) as lookup:
+        assert board_status(11514) == "Archive"
+        assert lookup.call_args.args[0] == ["hypertask", "project", "show", "11514", "--json"]
+    print("filing-gate self-test ok: HYCI-233, archived boards, incidents, 4060, active boards, lookup failure")
 
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--self-test", action="store_true")
     p.add_argument("--dry-run", action="store_true", default=os.environ.get("FILING_GATE_DRY_RUN") == "1")
     p.add_argument("--who", default=os.environ.get("SHIP_SESSION_NAME") or "an agent")
     p.add_argument("args", nargs=argparse.REMAINDER)
     a = p.parse_args()
+    if a.self_test:
+        return self_test()
     args = a.args[1:] if a.args[:1] == ["--"] else a.args
     parsed = create_args(args)
-    if parsed and parsed[0] in RETIRED and "incident" not in parsed[2]:
-        print(f"REFUSE board {parsed[0]} is archived: file on board {RETIRED[parsed[0]]} (Fleet CI & Infra)")
-        return REFUSE
+    if parsed:
+        board = parsed[0]
+        status = None
+        if board != 4060:
+            try:
+                status = board_status(board)
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                print(f"filing-gate: board {board} read failed ({error}); not checked", file=sys.stderr)
+        if board == 4060 or status == "Archive":
+            print(f"REFUSE board {board} is archived: file on your own board")
+            return REFUSE
     if parsed:
         warning = ready_warning(args)
         if warning:
             print(warning, file=sys.stderr)
-    if not parsed or parsed[0] not in BOARDS:
-        return 0
-    board, title, labels = parsed
-    name = f"{BOARDS[board]} ({board})"
-    if "incident" in labels:
-        if a.dry_run:
-            print(f"ALLOW incident on {name}")
-        return 0
-    tickets = [t for t in pileup.column_tickets(board, None) if t.get("section") != "Done"]
-    if not tickets:
-        print(f"filing-gate: {name} read back no open tickets; not checked", file=sys.stderr)
-        return 0
-
-    best = max(((score(title, t.get("title") or ""), t) for t in tickets), key=lambda x: x[0], default=(0.0, None))
-    if best[0] >= SAME:
-        t = best[1]
-        url = link(board, t)
-        note = (f"+1 from {a.who} {datetime.now(timezone.utc):%Y-%m-%d}: tried to file \"{title}\". "
-                "filing-gate added this note instead of a second ticket.")
-        if a.dry_run:
-            print(f"+1 {t['ticketNumber']} {url} (match {best[0]:.2f}: {t.get('title')})")
-        else:
-            r = subprocess.run(["vcc", "activity", "add", t["ticketNumber"], note], capture_output=True, text=True)
-            if r.returncode:
-                print(f"filing-gate: +1 note failed: {(r.stderr or r.stdout).strip()[:200]}", file=sys.stderr)
-        print(f"vcc: not filed. The same problem is already open on {name}: {t['ticketNumber']} \"{t.get('title')}\" "
-              f"{url}\n{'Dry run: no note added.' if a.dry_run else 'A +1 note went to its agent lane.'} Add your detail there: vcc activity add {t['ticketNumber']} "
-              "\"<what you saw>\". Link your app ticket BlockedBy it if it blocks you.", file=sys.stderr)
-        return DUPLICATE
-
-    if a.dry_run:
-        print(f"ALLOW {name}: no open duplicate")
     return 0
 
 
