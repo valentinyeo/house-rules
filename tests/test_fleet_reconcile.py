@@ -286,6 +286,83 @@ class ReconcileTest(unittest.TestCase):
             self.assertFalse(r.pass_on_head([comment()], HEAD, 'writer', 'valentinyeo/another-repo', POLICY))
 
 
+class Board15Test(unittest.TestCase):
+    def target(self, column, age=8000, alive=False, pulls=()):
+        return r.target(r.Facts(column, age, alive, pulls), board=r.BOARDS[15])[0]
+
+    def test_live_worker_moves_to_in_progress(self):
+        self.assertEqual(self.target('Backlog', alive=True), 'In Progress')
+        self.assertEqual(self.target('AI Review', alive=True, pulls=(pull(),)), 'In Progress')
+
+    def test_open_pr_moves_to_ai_review(self):
+        for checks in ('green', 'red', 'running', 'missing'):
+            with self.subTest(checks=checks):
+                self.assertEqual(self.target('In Progress', pulls=(pull(checks=checks),)), 'AI Review')
+                self.assertEqual(self.target('Backlog', pulls=(pull(checks=checks),)), 'AI Review')
+
+    def test_never_returns_to_backlog(self):
+        for column in ('In Progress', 'AI Review'):
+            for pulls in ((), (pull('MERGED'),), (pull('CLOSED'),)):
+                with self.subTest(column=column, pulls=pulls):
+                    self.assertEqual(self.target(column, pulls=pulls), column)
+
+    def test_protected_columns_never_move(self):
+        for column in ('UX needed', 'UX Sign-off', 'Agent Blocked (Infra)', 'Valentin Review',
+                       'QA', 'Flag: Only Me + QA', 'Flag: Everyone', 'Flag: Off', 'No Flag',
+                       'Flag: Future', 'Future column'):
+            with self.subTest(column=column):
+                self.assertEqual(self.target(column, alive=True, pulls=(pull(checks='red'),)), column)
+
+    def test_two_hour_grace(self):
+        self.assertEqual(self.target('Backlog', age=7199, alive=True), 'Backlog')
+        self.assertEqual(self.target('Backlog', age=7200, alive=True), 'In Progress')
+
+    def test_five_move_cap(self):
+        plans = [({'ticketNumber': f'HTPR-{i}', 'section': 'Backlog', 'projectId': 15},
+                  r.Facts('Backlog', 8000, True)) for i in range(1, 7)]
+        with patch.object(r, 'api') as api, patch.object(r, 'run') as run, contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(r.apply_plan(plans, 99, {}, board=r.BOARDS[15]), 1)
+            self.assertIn('limit=5', out.getvalue())
+            api.assert_not_called()
+            run.assert_not_called()
+
+    def test_board15_accepts_only_its_ticket_keys_and_urls(self):
+        board = r.BOARDS[15]
+        self.assertEqual(r.ticket_index('HTPR-19', board=board), '19')
+        self.assertTrue(r.names_ticket({'body': 'https://app.hypertask.ai/detail/project-15/19'}, 'HTPR-19', board=board))
+        self.assertFalse(r.names_ticket({'body': 'https://app.hypertask.ai/detail/project-2060/19'}, 'HTPR-19', board=board))
+        with self.assertRaises(ValueError):
+            r.ticket_index('SOFT-19', board=board)
+
+    def test_board15_prs_only_come_from_hypertask_repository(self):
+        pr = {'title': 'HTPR-1 fix', 'url': 'https://github.com/hypertask-ai/hypertask/pull/1',
+              'state': 'OPEN', 'repository': {'nameWithOwner': 'hypertask-ai/hypertask'}, 'number': 1}
+        wrong = {**pr, 'repository': {'nameWithOwner': 'valentinyeo/another-repo'}}
+        data = {'data': {'q0': {'pageInfo': {'hasNextPage': False}, 'nodes': [pr, wrong]}}}
+        with patch.object(r, 'run', return_value=json.dumps(data)) as run, patch.object(r, 'branch_pulls', return_value=[]):
+            self.assertEqual(r.discover(['HTPR-1'], board=r.BOARDS[15]), {'HTPR-1': [pr]})
+            self.assertIn('repo:hypertask-ai/hypertask', run.call_args.args[-1])
+
+    def test_board15_requires_explicit_agent_token(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(r, 'api') as api:
+            with self.assertRaises(ValueError):
+                r.require_board15_agent()
+            api.assert_not_called()
+
+    def test_board15_refuses_personal_token_and_wrong_agent(self):
+        for identity in (None, {'displayName': 'Valentin Yeo'}, {'id': 'runner', 'displayName': 'Other Runner'}):
+            with self.subTest(identity=identity), patch.dict(os.environ, {'HT_TOKEN': 'token'}), \
+                    patch.object(r, 'api', return_value={'connected_agent': identity}):
+                with self.assertRaises(ValueError):
+                    r.require_board15_agent()
+
+    def test_board15_accepts_vcc_and_product_lead_agent(self):
+        for name in ('Valentins Claude Code', 'HT Product Lead'):
+            with self.subTest(name=name), patch.dict(os.environ, {'HT_TOKEN': 'token'}), \
+                    patch.object(r, 'api', return_value={'connected_agent': {'id': 'agent', 'displayName': name}}):
+                r.require_board15_agent()
+
+
 class LeaseTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
