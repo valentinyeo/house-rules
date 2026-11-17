@@ -35,6 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ticket_owner import store
+from workflow_columns import resolve, stage
 
 HOME = Path.home()
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
@@ -196,6 +197,21 @@ def park_unstarted(key, t=None):
 CHECK_WAIT = re.compile(r"\brecheck\b|\b(?:pending|running|queued|awaiting|in progress)\b", re.I)
 
 
+def paused_section(ticket):
+    pulls = ticket.get("pullRequests") or []
+    board = str(ticket.get("projectId"))
+    if not pulls:
+        return home_section(board, [l.get("name", "") for l in ticket.get("labels") or []], ticket.get("title"))
+    if board != "2060":
+        return "AI Review"
+    states = [(pr.get("state") or "").upper() for pr in pulls]
+    if any(state not in ("OPEN", "MERGED", "CLOSED") for state in states):
+        return ticket.get("section")
+    stages = {stage(dict(pr, state=state), []) for pr, state in zip(pulls, states)}
+    wanted = "Checks" if "Checks" in stages else "Verifier" if "Verifier" in stages else "Todo"
+    return resolve(wanted, vcc("section", "list", "--project", board)["sections"])
+
+
 def park_hand_back(key, why, t=None):
     """Pause unfinished work without transferring its owner or losing its PR."""
     t = t or get(key)
@@ -212,8 +228,9 @@ def park_hand_back(key, why, t=None):
         raise RuntimeError(f"{key}: only its starting runner may schedule its next run")
     section = t.get("section")
     if section in ("In Progress", "Building", "Doing"):
-        section = ("Checks" if str(t.get("projectId")) == "2060" else "AI Review") if t.get("pullRequests") else home_section(t.get("projectId"), [], t.get("title"))
-        vcc("task", "move", key, "--section", section)
+        section = paused_section(t)
+        if section != t.get("section"):
+            vcc("task", "move", key, "--section", section)
     free_claim(key)
     note(key, f"Paused by fleet/park: {mine[0]} keeps this ticket until Done. Left to do: {why.strip()} "
               f"Column {section}; PR retained. Only this runner resumes it.")
@@ -324,7 +341,7 @@ def park_too_hard(key, why, t=None, dry=False, labels=None):
     held = holders(t)
     section = t.get("section")
     if section in ("In Progress", "Building", "Doing"):
-        section = ("Checks" if str(t.get("projectId")) == "2060" else "AI Review") if t.get("pullRequests") else home_section(t.get("projectId"), names, t.get("title"))
+        section = paused_section(t)
     plan = (f"{key}: {', '.join(old) or 'no brain tag'} -> {new}; unassign {', '.join(held) or 'nobody'}; "
             f"owner pin dropped; column {section}")
     if dry:
