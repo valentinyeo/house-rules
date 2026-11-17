@@ -14,7 +14,7 @@ pstack owns the shared behavior. Follow these sources:
 - Rule enforcement follows `correct/SKILL.md`, Keep the rule table.
 
 Paths use pstack 0.15.43's `skills/` directory.
-The [audit](inventory/pstack-0.15.43-audit.md) covers every original line.
+The [audit](https://github.com/valentinyeo/house-rules/blob/40133c7bbd49f1c474d7198ff5e6b821c2a0fa84/inventory/pstack-0.15.43-audit.md) covers every original line.
 
 valentin's additional lines:
 
