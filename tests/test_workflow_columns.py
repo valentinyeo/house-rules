@@ -121,6 +121,35 @@ class ColumnMigrationTests(unittest.TestCase):
                 merge.sync_column('valentinyeo/house-rules', 'SOFT-2446', pr, {}, comments=comments)
             self.assertEqual([cmd[-1] for cmd in calls if 'move' in cmd], [review])
 
+    def test_parking_preserves_the_actual_pr_stage(self):
+        park = load('fleet/park')
+        cases = [({'state': 'MERGED'}, 'Verifier'),
+                 ({'state': 'OPEN'}, 'Checks'),
+                 ({'state': 'OPEN', 'statusCheckRollup': [
+                     {'name': 'unit', 'status': 'COMPLETED', 'conclusion': 'SUCCESS'}]}, 'Verifier'),
+                 ({'number': 1}, 'Building'),
+                 ({'state': 'CLOSED'}, 'Todo')]
+        for pr, expected in cases:
+            for review in ('Verifier', 'AI Review'):
+                want = review if expected == 'Verifier' else expected
+                ticket = {'projectId': 2060, 'section': 'Building', 'title': 'work',
+                          'pullRequests': [pr], 'labels': [{'name': 'brain-medium'}],
+                          'assignees': [{'agent': {'displayName': 'Runner 6'}}]}
+                sections = [{'name': n} for n in ('Todo', 'Building', 'Checks', review)]
+                with self.subTest(pr=pr, review=review), \
+                        patch.dict(park.os.environ, {'SHIP_SESSION_NAME': 'RUNNER 6'}), \
+                        patch.object(park, 'blockers', return_value=[]), \
+                        patch.object(park, 'preserve_owner', return_value={'runner': 6}), \
+                        patch.object(park, 'free_claim'), patch.object(park, 'note'), \
+                        patch.object(park, 'record_event'), \
+                        patch.object(park, 'vcc', return_value={'sections': sections}) as api:
+                    result = park.park_hand_back('SOFT-1', 'awaiting next run', ticket)
+                    moves = [c.args[-1] for c in api.call_args_list if c.args[:2] == ('task', 'move')]
+                    self.assertEqual(moves, [] if want == 'Building' else [want])
+                    self.assertIn('-> ' + want, result)
+                    result = park.park_too_hard('SOFT-1', 'needs stronger runner', ticket, dry=True)
+                    self.assertIn('column ' + want, result)
+
     def test_latest_failure_overrules_a_pass_and_red_checks_return_to_checks(self):
         from workflow_columns import passed, stage
         pr = {'state': 'OPEN', 'headRefOid': 'a' * 40, 'statusCheckRollup': [
