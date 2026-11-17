@@ -2,11 +2,11 @@
 """Refuse tickets on archived boards using their live project status.
 
 Board 4060 remains refused even when its lookup fails.
-A failed board read warns and allows filing, so outages can still be reported.
+Unreadable board status refuses filing.
 Ticket readiness warnings never block filing.
 
 usage: filing-gate [--dry-run] [--who NAME] -- <vcc arguments>
-exit 0 file it, 5 refused (archived board).
+exit 0 file it, 5 refused (archived or unreadable board).
 """
 import argparse
 import json
@@ -59,7 +59,10 @@ def board_status(board):
     result = subprocess.run(["hypertask", "project", "show", str(board), "--json"],
                             capture_output=True, text=True, timeout=30)
     result.check_returncode()
-    return json.loads(result.stdout)["project"]["status"]
+    status = json.loads(result.stdout)["project"]["status"]
+    if status not in ("Normal", "Archive"):
+        raise ValueError(f"unknown board status: {status!r}")
+    return status
 
 
 def self_test():
@@ -82,7 +85,7 @@ def self_test():
         if expected == REFUSE:
             assert output.getvalue().strip() == f"REFUSE board {board} is archived: file on your own board"
     with patch.object(sys, "argv", ["filing-gate", "--", "task", "create", "--project", "15"]), patch.dict(globals(), ready_warning=lambda _: ""), patch("subprocess.run", side_effect=OSError("offline")), redirect_stderr(StringIO()) as warning:
-        assert main() == 0
+        assert main() == REFUSE
         assert "board 15 read failed" in warning.getvalue()
     with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, '{"project":{"status":"Archive"}}', "")) as lookup:
         assert board_status(11514) == "Archive"
@@ -108,7 +111,9 @@ def main():
             try:
                 status = board_status(board)
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-                print(f"filing-gate: board {board} read failed ({error}); not checked", file=sys.stderr)
+                print(f"filing-gate: board {board} read failed ({error})", file=sys.stderr)
+                print(f"REFUSE board {board} status is unreadable: retry before filing")
+                return REFUSE
         if board == 4060 or status == "Archive":
             print(f"REFUSE board {board} is archived: file on your own board")
             return REFUSE
