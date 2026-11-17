@@ -99,31 +99,31 @@ class OwnershipTests(unittest.TestCase):
 
     def test_park_keeps_assignment_and_leaves_in_progress(self):
         park = load("park")
-        ticket = {"projectId": 2060, "section": "Doing", "pullRequests": [{"number": 12}],
+        ticket = {"projectId": 2060, "section": "Doing", "pullRequests": [{"number": 12, "state": "OPEN"}],
                   "assignees": [{"agent": {"displayName": "Runner 6"}}]}
         with patch.dict(os.environ, {"SHIP_SESSION_NAME": "RUNNER 6"}), \
                 patch.object(park, "store", return_value=self.owners), \
                 patch.object(park, "blockers", return_value=[]), patch.object(park, "free_claim"), \
-                patch.object(park, "note"), patch.object(park, "record_event"), patch.object(park, "vcc") as api:
+                patch.object(park, "note"), patch.object(park, "record_event"), patch.object(park, "vcc", return_value={"sections": [{"name": "Checks"}]}) as api:
             result = park.park_hand_back("HYCI-404", "checks pending; recheck later", ticket)
             self.assertIn("Runner 6 retained", result)
-            api.assert_called_once_with("task", "move", "HYCI-404", "--section", "Checks")
+            api.assert_any_call("task", "move", "HYCI-404", "--section", "Checks")
             park.release("HYCI-404", ticket)
-            self.assertEqual(api.call_count, 1)
+            self.assertFalse(any(c.args[:2] == ("task", "unassign") for c in api.call_args_list))
             self.assertEqual(self.owners.read("HYCI-404")["runner"], 6)
 
     def test_software_factory_pr_opens_in_checks_and_keeps_its_owner(self):
         park = load("park")
         for column in ("Doing", "Building"):
-            ticket = {"projectId": 2060, "section": column, "pullRequests": [{"number": 12}],
+            ticket = {"projectId": 2060, "section": column, "pullRequests": [{"number": 12, "state": "OPEN"}],
                       "assignees": [{"agent": {"displayName": "Runner 6"}}]}
             with patch.dict(os.environ, {"SHIP_SESSION_NAME": "RUNNER 6"}), \
                     patch.object(park, "preserve_owner", return_value={"runner": 6}), \
                     patch.object(park, "blockers", return_value=[]), patch.object(park, "free_claim"), \
-                    patch.object(park, "note"), patch.object(park, "record_event"), patch.object(park, "vcc") as api:
+                    patch.object(park, "note"), patch.object(park, "record_event"), patch.object(park, "vcc", return_value={"sections": [{"name": "Checks"}]}) as api:
                 result = park.park_hand_back("SOFT-2446", "checks pending; recheck later", ticket)
                 self.assertIn("Runner 6 retained", result)
-                api.assert_called_once_with("task", "move", "SOFT-2446", "--section", "Checks")
+                self.assertEqual([c.args[-1] for c in api.call_args_list if c.args[:2] == ("task", "move")], ["Checks"])
 
     def test_last_good_picker_keeps_its_ownership_dependency(self):
         gate = load("tool-gate.py")
