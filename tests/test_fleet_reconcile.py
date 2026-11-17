@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -284,6 +285,162 @@ class ReconcileTest(unittest.TestCase):
         jobs[0]['jobs'][0]['labels'] = ['self-hosted']
         with patch.object(r, 'run', side_effect=[json.dumps(workflow), json.dumps(jobs)]):
             self.assertFalse(r.pass_on_head([comment()], HEAD, 'writer', 'valentinyeo/another-repo', POLICY))
+
+
+class Board15Test(unittest.TestCase):
+    def target(self, column, age=8000, alive=False, pulls=()):
+        return r.target(r.Facts(column, age, alive, pulls), board=r.BOARDS[15])[0]
+
+    def test_service_path_finds_agent_cli_before_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            executable = home / '.local/bin/hypertask'
+            executable.parent.mkdir(parents=True)
+            executable.write_text(f'#!{sys.executable}\n' + '''import json, os, sys
+assert os.environ['HT_TOKEN'] == 'service-agent-token'
+args = sys.argv[1:]
+if args == ['--json', 'context']:
+    print(json.dumps({'connected_agent': {'id': 'agent', 'displayName': 'HT Product Lead'}}))
+elif args[:3] == ['--json', 'task', 'list']:
+    print(json.dumps({'tasks': [], 'total': 0}))
+else:
+    raise SystemExit('unexpected command: ' + repr(args))
+''')
+            executable.chmod(0o755)
+            result = subprocess.run([sys.executable, str(ROOT / 'fleet/reconcile'), '--board', '15', '--apply'],
+                                    env={'HOME': directory, 'PATH': '/usr/bin:/bin', 'HT_TOKEN': 'service-agent-token'},
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('PREVIEW board=15 tickets=0 unknown=0', result.stdout)
+
+    def test_live_worker_moves_to_in_progress(self):
+        self.assertEqual(self.target('Backlog', alive=True), 'In Progress')
+        self.assertEqual(self.target('AI Review', alive=True, pulls=(pull(),)), 'In Progress')
+
+    def test_open_pr_moves_to_ai_review(self):
+        for checks in ('green', 'red', 'running', 'missing'):
+            with self.subTest(checks=checks):
+                self.assertEqual(self.target('In Progress', pulls=(pull(checks=checks),)), 'AI Review')
+                self.assertEqual(self.target('Backlog', pulls=(pull(checks=checks),)), 'AI Review')
+
+    def test_never_returns_to_backlog(self):
+        for column in ('In Progress', 'AI Review'):
+            for pulls in ((), (pull('MERGED'),), (pull('CLOSED'),)):
+                with self.subTest(column=column, pulls=pulls):
+                    self.assertEqual(self.target(column, pulls=pulls), column)
+
+    def test_protected_columns_never_move(self):
+        for column in ('UX needed', 'UX Sign-off', 'Agent Blocked (Infra)', 'Valentin Review',
+                       'QA', 'Flag: Only Me + QA', 'Flag: Everyone', 'Flag: Off', 'No Flag',
+                       'Flag: Future', 'Future column'):
+            with self.subTest(column=column):
+                self.assertEqual(self.target(column, alive=True, pulls=(pull(checks='red'),)), column)
+
+    def test_two_hour_grace(self):
+        self.assertEqual(self.target('Backlog', age=7199, alive=True), 'Backlog')
+        self.assertEqual(self.target('Backlog', age=7200, alive=True), 'In Progress')
+
+    def test_five_move_cap(self):
+        plans = [({'ticketNumber': f'HTPR-{i}', 'section': 'Backlog', 'projectId': 15},
+                  r.Facts('Backlog', 8000, True)) for i in range(1, 7)]
+        with patch.object(r, 'api') as api, patch.object(r, 'run') as run, contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(r.apply_plan(plans, 99, {}, board=r.BOARDS[15]), 1)
+            self.assertIn('limit=5', out.getvalue())
+            api.assert_not_called()
+            run.assert_not_called()
+
+    def test_board15_accepts_only_its_ticket_keys_and_urls(self):
+        board = r.BOARDS[15]
+        self.assertEqual(r.ticket_index('HTPR-19', board=board), '19')
+        self.assertTrue(r.names_ticket({'body': 'https://app.hypertask.ai/detail/project-15/19'}, 'HTPR-19', board=board))
+        self.assertFalse(r.names_ticket({'body': 'https://app.hypertask.ai/detail/project-2060/19'}, 'HTPR-19', board=board))
+        with self.assertRaises(ValueError):
+            r.ticket_index('SOFT-19', board=board)
+
+    def test_board15_prs_only_come_from_hypertask_repository(self):
+        pr = {'title': 'HTPR-1 fix', 'url': 'https://github.com/hypertask-ai/hypertask/pull/1',
+              'state': 'OPEN', 'repository': {'nameWithOwner': 'hypertask-ai/hypertask'}, 'number': 1}
+        wrong = {**pr, 'repository': {'nameWithOwner': 'valentinyeo/another-repo'}}
+        data = {'data': {'q0': {'pageInfo': {'hasNextPage': False}, 'nodes': [pr, wrong]}}}
+        with patch.object(r, 'run', return_value=json.dumps(data)) as run, patch.object(r, 'branch_pulls', return_value=[]):
+            self.assertEqual(r.discover(['HTPR-1'], board=r.BOARDS[15]), {'HTPR-1': [pr]})
+            self.assertIn('repo:hypertask-ai/hypertask', run.call_args.args[-1])
+
+    def test_closed_pr_during_preflight_never_moves(self):
+        t = {'ticketNumber': 'HTPR-1', 'section': 'In Progress', 'projectId': 15,
+             'updatedAt': NOW - 8000}
+        pr = {'url': 'https://github.com/hypertask-ai/hypertask/pull/1', 'state': 'OPEN',
+              'number': 1, 'repository': {'nameWithOwner': 'hypertask-ai/hypertask'}}
+        plans = [(t, r.Facts('In Progress', 8000, False, (pull(),)))]
+        with patch.object(r, 'api', return_value={'tasks': [t]}), \
+                patch.object(r, 'live_product_worker', return_value=False), \
+                patch.object(r, 'run', return_value=json.dumps({'url': pr['url'], 'state': 'CLOSED'})) as run, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(r.apply_plan(plans, 5, {'HTPR-1': [pr]}, board=r.BOARDS[15]), 0)
+            self.assertIn('facts changed since preview', out.getvalue())
+            self.assertEqual(run.call_args.args[:3], ('gh', 'pr', 'view'))
+
+    def test_board15_requires_explicit_agent_token(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(r, 'api') as api:
+            with self.assertRaises(ValueError):
+                r.require_board15_agent()
+            api.assert_not_called()
+
+    def test_board15_refuses_personal_token_and_wrong_agent(self):
+        for identity in (None, {'displayName': 'Valentin Yeo'}, {'id': 'runner', 'displayName': 'Other Runner'}):
+            with self.subTest(identity=identity), patch.dict(os.environ, {'HT_TOKEN': 'token'}), \
+                    patch.object(r, 'api', return_value={'connected_agent': identity}):
+                with self.assertRaises(ValueError):
+                    r.require_board15_agent()
+
+    def test_board15_accepts_vcc_and_product_lead_agent(self):
+        for name in ('Valentins Claude Code', 'HT Product Lead'):
+            with self.subTest(name=name), patch.dict(os.environ, {'HT_TOKEN': 'token'}), \
+                    patch.object(r, 'api', return_value={'connected_agent': {'id': 'agent', 'displayName': name}}):
+                r.require_board15_agent()
+
+
+class ProductWorkerTest(unittest.TestCase):
+    def setUp(self):
+        r.product_workers.cache_clear()
+
+    def test_queue_requires_active_service_and_recent_ticket_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'hypertask-test'
+            state.mkdir()
+            with contextlib.closing(sqlite3.connect(state / 'queue.sqlite3')) as db, db:
+                db.execute('CREATE TABLE deliveries (project_id INTEGER,ticket TEXT,state TEXT,event TEXT,progress_at REAL,started_at REAL)')
+                for key, board, status, age, event in (
+                    ('HTPR-1', 15, 'running', 1, 'task.assigned'),
+                    ('HTPR-2', 15, 'running', 901, 'task.assigned'),
+                    ('HTPR-3', 2060, 'running', 1, 'task.assigned'),
+                    ('HTPR-4', 15, 'pending', 1, 'task.assigned'),
+                    ('HTPR-5', 15, 'running', 1, 'chat.message'),
+                    ('HTPR-6', 15, 'claiming', 1, 'comment.mention'),
+                    ('HTPR-7', 15, 'launching', 1, 'scope.discovery')):
+                    db.execute('INSERT INTO deliveries VALUES (?,?,?,?,?,?)', (board,key,status,event,NOW-age,NOW-age))
+            listed = 'hypertask-agent-worker@test.service loaded active running test worker'
+            shown = 'MainPID=1234\nActiveState=active\n'
+            with patch.object(r, 'run', side_effect=[listed, shown]), \
+                    patch.object(r, 'pid_alive', return_value=True), \
+                    patch.object(r, 'worker_state_directory', return_value=state):
+                self.assertEqual(r.product_workers(NOW), {'HTPR-1', 'HTPR-6', 'HTPR-7'})
+            with patch.object(r, 'run', side_effect=[listed, shown]), \
+                    patch.object(r, 'pid_alive', return_value=False):
+                self.assertEqual(r.product_workers(NOW + 1), set())
+
+    def test_active_worker_missing_queue_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(r, 'run', side_effect=['hypertask-agent-worker@test.service loaded active running test', 'MainPID=1234\nActiveState=active']), \
+                patch.object(r, 'pid_alive', return_value=True), \
+                patch.object(r, 'worker_state_directory', return_value=Path(directory)):
+            with self.assertRaises((ValueError, sqlite3.Error)):
+                r.product_workers(NOW)
+
+    def test_service_read_failure_fails_closed(self):
+        with patch.object(r, 'run', side_effect=RuntimeError('systemctl failed')):
+            with self.assertRaises(RuntimeError):
+                r.product_workers(NOW)
 
 
 class LeaseTest(unittest.TestCase):

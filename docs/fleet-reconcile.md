@@ -123,3 +123,41 @@ Changed tickets skip that run.
 ```sh
 python3 fleet/reconcile --self-test
 ```
+
+
+## Board 15
+
+`fleet/reconcile --board 15` previews Hypertask moves.
+`--board 2060` preserves Software Factory behavior.
+Omitting `--board` also selects Software Factory.
+Board 15 ticket keys start with `HTPR-`.
+PRs come from `hypertask-ai/hypertask`.
+Live workers move tickets to In Progress.
+Open PRs move tickets to AI Review.
+Live workers take priority over open PRs.
+Recent changes keep their two-hour grace.
+Idle tickets stay in their current column.
+Tickets never move back to Backlog.
+UX needed and UX Sign-off stay.
+Agent Blocked (Infra) and Valentin Review stay.
+QA and every Flag column stay.
+No Flag and unknown columns also stay.
+Each run permits at most five moves.
+Exceeding that cap refuses every move.
+
+Worker facts use the installed Hypertask workers.
+An active service alone proves no ticket work.
+Its local PID must still exist.
+Its queue must name that board's ticket.
+Claiming, launching, and running count as active.
+Progress expires after fifteen minutes.
+Unreadable worker facts refuse all moves.
+
+The board-15 service template installs no timer.
+Its environment file is `~/.config/fleet/reconcile-board15.env`.
+Supply `HT_TOKEN` there, with mode `0600`.
+Use the vcc or HT Product Lead token.
+The vcc identity is "Valentins Claude Code".
+The script verifies the connected agent before writes.
+Missing, personal, or other agent tokens fail.
+Never supply Valentin's personal token.
