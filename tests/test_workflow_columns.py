@@ -218,6 +218,27 @@ class ColumnMigrationTests(unittest.TestCase):
         pr['statusCheckRollup'] = []
         self.assertEqual(stage(pr, []), 'Checks')
 
+    def test_cross_repo_factory_gate_accepts_current_verdict_and_holds_without_it(self):
+        import tempfile
+        merge = load('fleet/pr-merge')
+        for repo, (_, base) in merge.REPOS.items():
+            pr = {'number': 7, 'state': 'OPEN', 'title': 'SOFT-2499 fix',
+                  'baseRefName': base, 'headRefOid': 'a' * 40,
+                  'mergeStateStatus': 'CLEAN', 'updatedAt': '2020-01-01T00:00:00Z',
+                  'statusCheckRollup': [{'name': 'unit', 'status': 'COMPLETED',
+                                         'conclusion': 'SUCCESS'}]}
+            for verdicts, expected in (([], 'wait'),
+                    ([{'body': 'pstack-verifier: PASS @ ' + 'a' * 40,
+                       'user': {'login': 'github-actions[bot]'}}], 'merge')):
+                with self.subTest(repo=repo, expected=expected), tempfile.TemporaryDirectory() as directory:
+                    hooks = {'env': {}, 'pr': lambda: pr, 'comments': lambda *a: verdicts,
+                             'sync': lambda *a: None,
+                             'ticket': lambda key: {'section': 'Checks', 'assignees': ['Runner 3']},
+                             'owner': lambda key: None}
+                    with patch.object(merge, 'STATE', Path(directory)), \
+                            patch.object(merge, 'FREEZE', Path(directory) / 'freeze'):
+                        self.assertEqual(merge.one(repo, 7, dry=True, hooks=hooks), expected)
+
 
 if __name__ == '__main__':
     unittest.main()

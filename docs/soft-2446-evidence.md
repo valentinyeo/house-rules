@@ -102,3 +102,40 @@ Rebased this branch and preserved that cleanup.
 HYCI tickets now share board 2060's column contract.
 The missing-check guard now covers HYCI too.
 The upstream board-archive regressions still pass locally.
+
+
+## Cross-repository verifier gate, 17 November
+
+The contract requires current-head PASS before merging.
+Green checks alone cannot authorize a factory merge.
+Missing verifier producers must hold those PRs.
+Removing this gate would violate the requested behavior.
+This migration does not deploy other repositories' workflows.
+
+The latest FAIL claimed only house-rules produces verdicts.
+Live Multiprompt source contradicts that claim.
+Its existing producer emits the exact accepted format.
+
+- [Producer, pinned source](https://github.com/valentinyeo/multiprompt/blob/0298e7844fe989ea132fd671fa426122475ac4b8/tools/pr-verifier.cjs#L264).
+- [Hosted posting step, pinned source](https://github.com/valentinyeo/multiprompt/blob/0298e7844fe989ea132fd671fa426122475ac4b8/.github/workflows/pr-verifier.yml#L318).
+
+Exact producer expression:
+```js
+`pstack-verifier: ${final} @ ${headSha}`
+```
+
+The new regression drives the actual merge function.
+It covers every repository in its configured list.
+Each fixture uses that repository's actual base branch.
+No-verdict fixtures return `wait`, as required.
+Current-head bot PASS fixtures return `merge` in dry-run.
+No merge command or live board write executes.
+
+```text
+python3 -m unittest tests.test_workflow_columns.ColumnMigrationTests.test_cross_repo_factory_gate_accepts_current_verdict_and_holds_without_it -v
+OK
+```
+
+This test already passes before any gate change.
+The alleged defect is the required verification hold.
+No gate bypass or verifier deployment was added.
