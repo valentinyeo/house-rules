@@ -1,8 +1,6 @@
 # Worker brief rules
 
-Faults: Hypertask bug -> hypertask feedback.
-Repo rules or scripts -> the worker repo's board and view.
-Shared house rules or pstack setup -> board 2060, label Poteto.
+Faults: Hypertask bug -> hypertask feedback; repo rules or scripts -> the worker repo's board and view; only shared house rules or pstack setup -> board 2060, label Poteto.
 
 Report faults before working around them.
 For Hypertask faults, run this command:
