@@ -17,7 +17,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: d094e106bd669153d45fe0a56ba69d0ef8adcb9e
+          ref: afab989b44752d6be9b4939f560cebecbaf98d5f
           fetch-depth: 0
           path: subject
           persist-credentials: false
@@ -33,7 +33,7 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GH_TOKEN: ${{ github.token }}
           SUBJECT_KIND: house
-          SUBJECT_SHA: d094e106bd669153d45fe0a56ba69d0ef8adcb9e
+          SUBJECT_SHA: afab989b44752d6be9b4939f560cebecbaf98d5f
           SUBJECT_PR: '595'
         run: python3 driver/scripts/soft-2588-verifier.py
       - uses: actions/upload-artifact@v4
