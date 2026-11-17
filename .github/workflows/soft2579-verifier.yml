@@ -15,14 +15,14 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: 4a667d4
+          ref: 4a667d4334933b59866693206d179c8312b0ea49
           path: house-rules
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: valentinyeo/vstack
-          ref: 5183546
+          ref: 51835461fb8a7be74b347e10351bea9565184653
           path: vstack
           fetch-depth: 0
           persist-credentials: false
