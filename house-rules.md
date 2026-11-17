@@ -7,6 +7,7 @@ hypertask is where work lives. every unit starts and ends on a ticket, on the or
 new cloudflare work starts from the joelhooks/rat-stack template.
 
 valentin's lines:
+- include [shared worker rules](docs/worker-brief.md) in every worker brief. This includes spawn-worker input. Report faults before working around them.
 - every pr gets a pstack verifier before merge: an agent that did not write it, from another model family, runs the change like a user and posts PASS, PASS+NOTES or FAIL on the pr. a bot review or green ci is not a verdict.
 - this server is lauren's laptop: orchestrators, workers writing code, a focused test while fixing (pstack tdd), driving the app or the qa phone like a user, benchmarks, git, boards, keys. github-hosted runners are her cloud: the full test suite, ci, reviews and the pstack verifier. no self-hosted runner, ever.
 - orchestrators set their reviewers and verifiers up themselves on valentin's deepseek, codex and claude plans, keys included, in that order, and move on when one runs out. claude is allowed for workers and checks. other plans go first while claude usage is high, so orchestrators keep headroom. on deepseek, always flash, never pro. no need to ask anyone.
@@ -31,3 +32,4 @@ what enforces each line (pstack /correct: a check beats a sentence; drop a line 
 | no real email in a public repo | `new-public-repo` refuses to push one; per repo, a ci check on commit emails |
 | no secrets anywhere | `secrets-guard` hook |
 | no chat waits for valentin | `short-chat` hook: a long chat saves its handover and starts its own fresh chat, never deletes its loop; if fresh start fails it stays quiet 2 h and auto-compact keeps the chat going |
+| worker briefs name both fault paths | poteto-2-advisor `.claude/hooks/book-check.py`, advisor-checks CI; fleet/runner includes the shared rules, tested in rules-lint CI; filing remains agent judgment |
