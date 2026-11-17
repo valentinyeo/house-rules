@@ -49,6 +49,62 @@ def comment(status='PASS', head=HEAD, when='2026-01-01', number=1):
 
 
 class ReconcileTest(unittest.TestCase):
+    def test_parked_and_unknown_columns_never_move(self):
+        for column in ('Not now', 'Some future column', ''):
+            for age in (0, 8000):
+                for alive in (False, True):
+                    with self.subTest(column=column, age=age, alive=alive):
+                        result, reason = r.target(r.Facts(column, age, alive, (pull(checks='red'),)))
+                        self.assertEqual(result, column)
+                        self.assertIn(reason, ('protected column', 'unknown column; kept'))
+
+    def test_live_prose_mentions_do_not_own_tickets(self):
+        cases = [('pecunia-52.json', 'SOFT-1915', 'SOFT-1910'),
+                 ('android-370.json', 'SOFT-1974', 'SOFT-2369')]
+        for fixture, mentioned, owner in cases:
+            pr = json.loads((ROOT / 'tests/fixtures/reconcile' / fixture).read_text())
+            with self.subTest(fixture=fixture):
+                self.assertFalse(r.names_ticket(pr, mentioned))
+                if owner == 'SOFT-1910':
+                    self.assertTrue(r.names_ticket(pr, owner))
+        self.assertEqual(r.target(r.Facts('Todo', 8000))[0], 'Todo')
+        self.assertEqual(r.target(r.Facts('AI Review', 8000, False, (pull('MERGED'),)))[0], 'AI Review')
+
+    def test_structural_ownership(self):
+        for pr in ({'title': 'Fix SOFT-1'}, {'headRefName': 'fix/soft-1-reconcile'},
+                   {'body': 'Ticket: SOFT-1'}, {'body': '**Ticket:** [SOFT-1](https://app.hypertask.ai/detail/project-2060/1)'},
+                   {'body': 'See https://app.hypertask.ai/detail/project-2060/1'}):
+            with self.subTest(pr=pr):
+                self.assertTrue(r.names_ticket(pr, 'SOFT-1'))
+        for pr in ({'body': 'Since SOFT-1 this works'}, {'body': 'Not Ticket: SOFT-1'},
+                   {'body': 'Ticket: SOFT-10'}, {'body': 'https://evil.test/project-2060/1'},
+                   {'body': 'https://app.hypertask.ai/detail/project-2060/10'},
+                   {'body': 'https://app.hypertask.ai/detail/project-2061/1'},
+                   {'body': 'https://app.hypertask.ai/detail/project-2060/1-extra'},
+                   {'title': 'SOFT-10', 'headRefName': 'fix/soft-10'}):
+            with self.subTest(pr=pr):
+                self.assertFalse(r.names_ticket(pr, 'SOFT-1'))
+
+    def test_bad_keys_do_not_crash_matching_or_search(self):
+        self.assertFalse(r.names_ticket({'body': 'unrelated'}, 'BROKEN'))
+        with patch.object(r, 'run') as run:
+            self.assertEqual(r.discover(['BROKEN']), {'BROKEN': []})
+            run.assert_not_called()
+
+    def test_merged_pass_waits_for_live_proof(self):
+        self.assertEqual(r.target(r.Facts('Doing', 8000, False, (pull('MERGED', passed=True),))),
+                         ('AI Review', 'merged PR with PASS; live proof pending'))
+
+    def test_overlap_is_a_clean_skip(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(r.Path, 'home', return_value=Path(directory)), \
+                patch.object(sys, 'argv', ['reconcile']), \
+                patch.object(r.fcntl, 'flock', side_effect=BlockingIOError()), \
+                patch.object(r, 'tickets') as tickets, contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(r.main(), 0)
+            self.assertIn('SKIP', out.getvalue())
+            tickets.assert_not_called()
+
     def test_idle_doing_returns_todo(self):
         self.assertEqual(r.target(r.Facts('Doing', 7201)), ('Todo', 'no live lease and no PR'))
 
