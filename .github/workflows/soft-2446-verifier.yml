@@ -25,9 +25,9 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.PSTACK_OPENCODE_API_KEY || secrets.OPENCODE_API_KEY }}
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          VERIFY_COMMANDS: '["python3 -m unittest tests.test_workflow_columns tests.test_ticket_ownership tests.test_fleet_reconcile -v", "python3 fleet/pr-merge --self-test", "python3 fleet/sf-release-watch --self-test", "python3 skills/hypertask-triage/scripts/flow-check --self-test"]'
+          VERIFY_COMMANDS: '["python3 -m unittest tests.test_workflow_columns tests.test_ticket_ownership tests.test_fleet_reconcile tests.test_column_verifier -v", "python3 fleet/pr-merge --self-test", "python3 fleet/sf-release-watch --self-test", "python3 skills/hypertask-triage/scripts/flow-check --self-test"]'
         run: python3 scripts/column-verifier.py
       - uses: actions/upload-artifact@v4
         if: always()
