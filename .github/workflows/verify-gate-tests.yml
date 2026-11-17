@@ -1,0 +1,24 @@
+name: verify-gate-tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  gate-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: valentinyeo/house-rules
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.2
+      - name: Broken variants first, then passing fixtures
+        run: python3 tests/test_verify_gate.py --demonstrate
+      - name: Gate regression tests
+        run: python3 -m unittest discover -s tests -p test_verify_gate.py -v

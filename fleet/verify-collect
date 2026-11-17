@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Collect GitHub API facts and verifier artifacts without executing PR code."""
+
+import argparse
+import io
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import urllib.request
+import urllib.parse
+import zipfile
+
+from verify_gate import Missing, contained, document, git, require
+
+
+class ArtifactRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        redirected = super().redirect_request(request, fp, code, message, headers, new_url)
+        if urllib.parse.urlparse(new_url).netloc != urllib.parse.urlparse(request.full_url).netloc:
+            redirected.remove_header('Authorization')
+        return redirected
+
+
+class GitHub:
+    def __init__(self, repo):
+        require(re.fullmatch(r'[\w.-]+/[\w.-]+', repo), 'owner/repository')
+        self.repo = repo
+
+    def request(self, endpoint, binary=False):
+        require(endpoint.startswith('/repos/' + self.repo + '/'), 'same-repository GitHub API endpoint')
+        request = urllib.request.Request('https://api.github.com' + endpoint, headers={
+            'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+        })
+        with urllib.request.build_opener(ArtifactRedirect()).open(request, timeout=60) as response:
+            body = response.read()
+        return body if binary else json.loads(body)
+
+    def pages(self, endpoint, key=None):
+        values = []
+        for page in range(1, 101):
+            data = self.request(endpoint + ('&' if '?' in endpoint else '?') + f'per_page=100&page={page}')
+            batch = data[key] if key else data
+            values.extend(batch)
+            if len(batch) < 100:
+                return values
+        raise Missing('GitHub API pagination exhausted')
+
+    def run(self, run_id):
+        require(isinstance(run_id, int) and run_id > 0, 'numeric Actions run ID')
+        root = f'/repos/{self.repo}/actions/runs/{run_id}'
+        run = self.request(root)
+        run['jobs'] = self.pages(root + '/jobs', 'jobs')
+        return run
+
+    def artifacts(self, run_id, name, destination):
+        root = f'/repos/{self.repo}/actions/runs/{run_id}'
+        matches = [item for item in self.pages(root + '/artifacts', 'artifacts')
+                   if item['name'] == name and not item.get('expired')]
+        require(len(matches) == 1, f'unexpired Actions artifact: {name}')
+        data = self.request(f"/repos/{self.repo}/actions/artifacts/{matches[0]['id']}/zip", binary=True)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            require(sum(item.file_size for item in archive.infolist()) <= 100_000_000,
+                    'verification artifact smaller than 100 MB')
+            for item in archive.infolist():
+                path = contained(destination, item.filename)
+                require(not item.external_attr >> 16 & 0o170000 == 0o120000, 'artifact without symlinks')
+                if item.is_dir():
+                    path.mkdir(parents=True, exist_ok=True)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(archive.read(item))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--repo', required=True)
+    parser.add_argument('--pr', type=int, required=True)
+    parser.add_argument('--checkout', type=Path, required=True)
+    parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--mode', choices=('pr', 'release'), default='pr')
+    parser.add_argument('--release-sha')
+    args = parser.parse_args()
+    try:
+        collect(args)
+    except (Missing, OSError, ValueError, KeyError, TypeError) as error:
+        args.out.mkdir(parents=True, exist_ok=True)
+        (args.out / 'evidence').mkdir(exist_ok=True)
+        (args.out / 'context.json').write_text(json.dumps({'collection_error': str(error)}))
+        print(f'FAIL GitHub evidence collection | missing artifact: {error}')
+        raise SystemExit(1)
+
+
+def collect(args):
+    api = GitHub(args.repo)
+    pr = api.request(f'/repos/{args.repo}/pulls/{args.pr}')
+    require(git(args.checkout, 'rev-parse', 'HEAD') == pr['head']['sha'], 'checkout matching current PR head SHA')
+    policy = json.loads(git(args.checkout, 'show', f"{pr['base']['sha']}:.verify/policy.json"))
+    comments = api.pages(f'/repos/{args.repo}/issues/{args.pr}/comments')
+    candidates = []
+    for comment in comments:
+        login = comment['user']['login']
+        if login not in policy.get('verifiers', {}):
+            continue
+        match = re.search(r'```verify-verdict\s*\n(.*?)\n```', comment['body'], re.S)
+        if not match:
+            continue
+        verdict = json.loads(match[1])
+        verdict.update(login=login, comment_id=comment['id'], comment_url=comment['html_url'])
+        candidates.append((comment['updated_at'], comment['id'], verdict))
+    require(candidates, 'allowlisted agent verdict comment')
+    verdict = max(candidates)[2]
+    match = re.fullmatch(r'https://github\.com/' + re.escape(args.repo) + r'/actions/runs/(\d+)',
+                         verdict.get('run_url', ''))
+    require(match, 'same-repository GitHub Actions verifier URL')
+    run_id = int(match[1])
+    run = api.run(run_id)
+    require(run_id != int(os.environ['GITHUB_RUN_ID']), 'independent verifier run')
+    require(run['head_sha'] == pr['head']['sha'] and run['conclusion'] == 'success',
+            'successful verifier Actions run for current PR head')
+    verifier = policy['verifiers'][verdict['login']]
+    require(run['path'] == verifier['workflow'], 'allowlisted verifier workflow')
+    args.out.mkdir(parents=True, exist_ok=True)
+    evidence = args.out / 'evidence'
+    evidence.mkdir()
+    api.artifacts(run_id, 'pstack-verification', evidence)
+    manifest = document(evidence / 'verification.json')
+    context = {
+        'repository': args.repo, 'pr_number': args.pr, 'head_sha': pr['head']['sha'],
+        'base_sha': pr['base']['sha'], 'author_login': pr['user']['login'],
+        'labels': [label['name'].lower() for label in pr['labels']], 'policy': policy,
+        'verdict': verdict, 'run': run, 'gate_run_id': int(os.environ['GITHUB_RUN_ID']),
+        'mode': args.mode, 'release_sha': args.release_sha,
+    }
+    if 'bug' in context['labels']:
+        test_run = api.run(manifest.get('history', {}).get('test_run_id'))
+        failed = args.out / 'failed-test'
+        failed.mkdir()
+        api.artifacts(test_run['id'], 'pstack-failing-test', failed)
+        result = document(failed / 'test-result.json')
+        require(result.get('head_sha') == test_run['head_sha'] and
+                isinstance(result.get('exit_code'), int) and result['exit_code'] != 0,
+                'failing test artifact matching historical run SHA')
+        test_run.update({key: result.get(key) for key in ('test_path', 'command', 'output')})
+        context['test_run'] = test_run
+    (args.out / 'context.json').write_text(json.dumps(context, indent=2))
+    print(f"Collected PR {args.pr}, head {context['head_sha']}, verifier run {run_id}")
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (Missing, OSError, ValueError, KeyError) as error:
+        print(f'FAIL GitHub evidence collection | missing artifact: {error}', file=sys.stderr)
+        raise SystemExit(1)
