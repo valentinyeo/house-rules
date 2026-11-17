@@ -95,6 +95,23 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(r.target(r.Facts('Doing', 8000, False, (pull('MERGED', passed=True),))),
                          ('AI Review', 'merged PR with PASS; live proof pending'))
 
+    def test_apply_previews_and_caps_before_any_write(self):
+        plans = [(dict(task(), ticketNumber=f'SOFT-{i}'), r.Facts('Doing', 8000)) for i in range(1, 7)]
+        with patch.object(r, 'api') as api, patch.object(r, 'run') as run, contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(r.apply_plan(plans, 5), 1)
+            self.assertIn('move cap', out.getvalue())
+            api.assert_not_called()
+            run.assert_not_called()
+
+    def test_apply_rechecks_changed_ticket_before_writes(self):
+        plans = [(task(), r.Facts('Doing', 8000))]
+        with patch.object(r, 'api', return_value={'tasks': [task('Not now')]}), \
+                patch.object(r, 'collect') as collect, patch.object(r, 'reconcile') as reconcile, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(r.apply_plan(plans, 5), 0)
+            collect.assert_not_called()
+            reconcile.assert_not_called()
+
     def test_overlap_is_a_clean_skip(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(r.Path, 'home', return_value=Path(directory)), \
