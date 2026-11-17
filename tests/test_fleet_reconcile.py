@@ -58,6 +58,42 @@ class ReconcileTest(unittest.TestCase):
                         self.assertEqual(result, column)
                         self.assertIn(reason, ('protected column', 'unknown column; kept'))
 
+    def test_renamed_columns_follow_work_instead_of_staying_unknown(self):
+        for column in ('Building', 'Checks', 'Verifier'):
+            with self.subTest(column=column):
+                self.assertEqual(r.target(r.Facts(column, 8000)),
+                                 ('Todo', 'no live lease and no PR'))
+        self.assertEqual(r.target(r.Facts('Building', 8000, True)),
+                         ('Building', 'live lease'))
+        self.assertEqual(r.target(r.Facts('Verifier', 8000, False, (pull(),))),
+                         ('Verifier', 'open PR checks green; verifier or merge pending'))
+
+    def test_cli_resolves_destinations_against_live_board_names(self):
+        for building, verifier in (('Doing', 'AI Review'), ('Building', 'Verifier')):
+            sections = {'sections': [{'name': name} for name in
+                                    ('Todo', building, 'Checks', verifier)]}
+            rows = [dict(task('Todo'), ticketNumber='SOFT-1'),
+                    dict(task(building), ticketNumber='SOFT-2'),
+                    dict(task('Checks'), ticketNumber='SOFT-3')]
+            facts = [r.Facts('Todo', 8000, True),
+                     r.Facts(building, 8000, False, (pull(),)),
+                     r.Facts('Checks', 8000, False, (pull(),))]
+            with self.subTest(building=building), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(r.Path, 'home', return_value=Path(directory)), \
+                    patch.object(sys, 'argv', ['reconcile']), \
+                    patch.object(r, 'api', return_value=sections), \
+                    patch.object(r, 'tickets', return_value=rows), \
+                    patch.object(r.time, 'time', return_value=NOW), \
+                    patch.object(r, 'discover', return_value={t['ticketNumber']: [] for t in rows}), \
+                    patch.object(r, 'collect', side_effect=facts) as collect, \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(r.main(), 0)
+                self.assertEqual(collect.call_count, 3)
+                self.assertIn(f'PLAN SOFT-1 Todo -> {building} | live lease', out.getvalue())
+                self.assertIn(f'PLAN SOFT-2 {building} -> {verifier}', out.getvalue())
+                self.assertIn(f'PLAN SOFT-3 Checks -> {verifier}', out.getvalue())
+                self.assertNotIn('unknown column', out.getvalue())
+
     def test_live_prose_mentions_do_not_own_tickets(self):
         cases = [('pecunia-52.json', 'SOFT-1915', 'SOFT-1910'),
                  ('android-370.json', 'SOFT-1974', 'SOFT-2369')]
