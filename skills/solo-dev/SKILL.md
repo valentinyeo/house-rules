@@ -91,9 +91,9 @@ Do this once per repo, as its own commit, before the first ticket.
 Behave on the board exactly like a fleet runner, just alone. Follow the `tickets` skill.
 Run `~/.local/share/house-rules/skills/tickets/scripts/ticket-lint <file>` before every description or people comment; raw `hypertask --token` writes skip no check. (2026-10-30, why: IGSH-1169 passed jargon to Valentin)
 
-- Same columns as the fleet: Building while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; `blocker-sweep.py` flags it. (2026-11-02, why: IGSH-1353 sat there with "Decision: None")
+- Same columns as the fleet: Building while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; `blocker-sweep.py` flags it.
 - No ticket sits in Building or Doing overnight.
-- Verifier accepts AI Review during the rename. Neither is a waiting room. Run `scripts/parked-review --board <id>` at every board check; it must print 0 parked. (2026-11-02, why: "fix the origin of tickets not being moved")
+- Verifier accepts AI Review during the rename. Neither is a waiting room. Run `scripts/parked-review --board <id>` at every board check; it must print 0 parked.
 - Every ticket runs through pstack `poteto-mode`: its Bug fix or Feature playbook, `how` before nontrivial changes, `architect` across function boundaries. Name the playbook in your first ticket comment. (2026-10-30, why: Valentin asked "are the agents using pstack?")
 - Prove every change with the repo's own verify skill (`.claude/skills/verify-<app>/`) and link its output on the ticket. No verify skill yet? Make one with pstack `create-verification-skill` first. (2026-11-03, why: "We have never set it up properly")
 - A question from Valentin is not a stop. Answer it, then go back to the queue in the same turn. Never end a turn while the view has open tickets. (2026-10-30, why: answering his question left the session idle)
