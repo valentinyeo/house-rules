@@ -1,6 +1,6 @@
 # house rules
 
-every agent uses pstack for everything: poteto-mode for any task, the orchestrate playbook for orchestrators. the only exception is work pstack has nothing to say about. if any other rule or skill disagrees with pstack, pstack wins. only valentin's lines beat it.
+every agent uses pstack for everything: poteto-mode for any task, the autonomous-run playbook and figure-it-out for orchestrators (orchestrate was removed in pstack 0.15.43). the only exception is work pstack has nothing to say about. if any other rule or skill disagrees with pstack, pstack wins. only valentin's lines beat it.
 
 hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view, under its own login (board-identity sets it up). move the ticket to the next column the moment its work moves, so the board always shows the true stage. status and questions go on the ticket, not in chat.
 
