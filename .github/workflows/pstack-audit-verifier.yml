@@ -42,7 +42,7 @@ jobs:
             --no-extensions --no-mcp --no-skills --no-context-files \
             --no-prompt-templates --no-themes --tools read,bash \
             --no-session --mode json -p \
-            'Read ../pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
+            'Read '"$GITHUB_WORKSPACE"'/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
           Goal: house-rules.md keeps only rules absent from pstack 0.15.43. A previous DeepSeek run gave 40133c7 PASS+NOTES, confirming every retained and delegated clause. It found an audit link broken after syncing and two missing duplicate patterns. This follow-up fixes those notes. Verify the fixes and the current complete artifact. Do not repeat full-repository lint, already proven to fail identically on base. The requested diff lint is the relevant check. Verify this PR independently. Do not merge or edit tracked files. Read ../pstack-source/pstack/skills/poteto-mode/SKILL.md. Read the diff against origin/main, the complete original and new house-rules.md, and inventory/pstack-0.15.43-audit.md. Compare every removed clause to the actual pinned pstack sources. Challenge retained clauses too. Run python3 -m unittest tests.test_pstack_delegation -v and python3 scripts/rules-lint --diff origin/main. Prove the regression rejects the original house-rules.md using a temporary checkout or restoring the file afterward. Check every local difference survives. End with exactly one verdict line PASS, PASS+NOTES, or FAIL, followed by concrete evidence and any bugs. Keep prose sentences at most eight words. Commands and logs stay exact.' \
             > verifier.jsonl
       - uses: actions/upload-artifact@v4
