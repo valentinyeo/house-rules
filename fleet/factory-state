@@ -750,7 +750,7 @@ def self_test():
         assert resolve_view(dict(name="projects"), saved) is None
         assert resolve_view(dict(name="SF Design Lead"), saved) is None
         record.write_text(json.dumps(dict(pid=10, sessionId="native-a")))
-        roster.write_text(json.dumps({"rows": [dict(fixture["roster"][0], name="poteto-2-advisor", board="15,2060,11514", view=None)]}))
+        roster.write_text(json.dumps({"rows": [dict(fixture["roster"][0], name="poteto-2-advisor", board="15,2060,99999", view=None)]}))
         with patch.object(solo.roster, "hosted_chats", return_value={}), patch.object(solo, "tmux_states", return_value={}):
             resolved = gather(solo, now, roster, home, proc,
                               tasks=lambda board: fixture["boards"]["2060"], views=lambda view: {"a"}, prs=prs,
@@ -759,19 +759,19 @@ def self_test():
         assert resolved[0].left == 5 and not resolved.failures, (resolved[0], resolved.failures)
         archived_calls = []
         def archive_status(board):
-            return "Archive" if board == "11514" else "Normal"
+            return "Archive" if board == "99999" else "Normal"
         def active_tasks(board):
             archived_calls.append(board)
-            assert board != "11514", "archived board tickets must not be read"
+            assert board != "99999", "archived board tickets must not be read"
             return fixture["boards"]["2060"]
         with patch.object(solo.roster, "hosted_chats", return_value={}), patch.object(solo, "tmux_states", return_value={}):
             archived = gather(solo, now, roster, home, proc, tasks=active_tasks, views=lambda view: {"a"}, prs=prs,
                               list_views=lambda board: saved, statuses=archive_status)
         assert archived_calls == ["15", "2060"]
         assert archived[0].left == 3 and not archived.failures, (archived[0], archived.failures)
-        assert "board 11514 failed" not in render(archived, now)
+        assert "board 99999 failed" not in render(archived, now)
         status_result = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, '{"project":{"status":"Archive"}}', "")
-        assert board_status("11514", "fixture", status_result) == "Archive"
+        assert board_status("99999", "fixture", status_result) == "Archive"
         searches = []
         def big_repo(command, **kwargs):
             searches.append(command)

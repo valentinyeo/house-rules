@@ -45,7 +45,7 @@
    "login": "Infra Lead",
    "board": "",
    "status": "unknown",
-   "notes": "Tools expert. Owns no board: Fleet CI & Infra (11514) is owned by CI Boss (Valentin, 8 Nov). board 11514 archived 2026-11-17"
+   "notes": "Tools expert. Owns no board: Fleet CI & Infra is archived. Fleet incidents go to Chief Of Staff on board 2060."
   },
   {
    "name": "CI Boss",
@@ -55,7 +55,7 @@
    "login": "CI Boss",
    "board": "",
    "status": "unknown",
-   "notes": "No board note for 22h on blocking CI tickets (Big Boss Man, 2026-11-07). Check it is running. board 11514 archived 2026-11-17"
+   "notes": "No board note for 22h on blocking CI tickets (Big Boss Man, 2026-11-07). Check it is running. Fleet CI & Infra archived 2026-11-17; incidents go to Chief Of Staff on board 2060"
   },
   {
    "name": "projects",
@@ -254,7 +254,7 @@
     "9": "dead",
     "10": "stale"
    },
-   "notes": "dead = empty shell; stale = Claude open, idle about 40h. Joins the shared pool. A runner picks only from boards whose member list holds its login (fleet/pick can_join, cached 1h; fleet/pick --check-access lists gaps). Runners 1-17 all sit on 15, 2060 and 11514 (fleet/pick --check-access, 2026-11-08)."
+   "notes": "dead = empty shell; stale = Claude open, idle about 40h. Joins the shared pool. A runner picks only from boards whose member list holds its login (fleet/pick can_join, cached 1h; fleet/pick --check-access lists gaps). Runners 1-17 all sit on 15 and 2060 (fleet/pick --check-access, 2026-11-08)."
   },
   {
    "name": "poteto-cursor-{n}",
@@ -272,7 +272,7 @@
    "login": "CI Runner {n}",
    "board": "",
    "status": "dead",
-   "notes": "All 5 empty shells, idle 36h. CI/Infra lane capped at 4 in the shared pool. board 11514 archived 2026-11-17"
+   "notes": "All 5 empty shells, idle 36h. CI/Infra lane capped at 4 in the shared pool. Fleet CI & Infra archived 2026-11-17; incidents go to Chief Of Staff on board 2060"
   },
   {
    "name": "infra-runner-{n}",
@@ -281,7 +281,7 @@
    "login": "Infra Runner {n}",
    "board": "",
    "status": "live",
-   "notes": "board 11514 archived 2026-11-17"
+   "notes": "Fleet CI & Infra archived 2026-11-17; incidents go to Chief Of Staff on board 2060"
   },
   {
    "name": "mp-runner-{n}",
