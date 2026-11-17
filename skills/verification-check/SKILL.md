@@ -29,7 +29,7 @@ If pstack added a demand that the list in step 4 lacks, add it as an extra item 
 ## 3. Collect the facts
 
 ```sh
-~/.local/share/house-rules/skills/verification-check/facts.sh <repo-path | session-name>
+"$(dirname "$(readlink -f ~/.claude/skills/verification-check/SKILL.md)")/facts.sh" <repo-path | session-name>
 ```
 
 It prints the repo, surface hints, verify skills with headings and feature-file counts, workflows with triggers and concurrency, required checks, rule-table size and the last merged PRs' verifier verdicts. Then open the files it names. A filename or a keyword match is not evidence; read the step and confirm it does what the item demands.

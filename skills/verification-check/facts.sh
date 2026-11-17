@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -u
 
 [ $# -ge 1 ] || { echo "usage: facts.sh <repo-path | session-name>"; exit 2; }
 target="$1"
