@@ -30,7 +30,7 @@ def passed(pr, comments):
 
 def stage(pr, comments):
     if pr.get('state') == 'MERGED':
-        return 'Done' if passed(pr, comments) else None
+        return 'Verifier'
     if pr.get('state') != 'OPEN' or pr.get('isDraft'):
         return None
     latest = {}

@@ -8,7 +8,7 @@ Canonical order: Todo, Building, Checks, Verifier, Valentin Review, Done.
 
 - PR opened -> Checks.
 - checks green -> Verifier.
-- current-head PASS and merged -> Done.
+- merged -> Verifier pending live proof. current-head PASS, merged, and live proof -> Done.
 
 `fleet/workflow_columns.py` defines names and verdict handling.
 `fleet/pr-merge` updates columns during its existing timer.
