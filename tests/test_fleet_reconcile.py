@@ -298,9 +298,11 @@ class ReconcileTest(unittest.TestCase):
                 patch.object(r.Path, 'home', return_value=Path(directory)), \
                 patch.object(sys, 'argv', ['reconcile']), \
                 patch.object(r, 'tickets', return_value=[task('Future')]), \
+                patch.object(r, 'api', side_effect=AssertionError('unexpected board read')) as api, \
                 patch.object(r, 'discover', return_value={}) as discover, \
                 patch.object(r, 'collect') as collect, contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(r.main(), 0)
+            api.assert_not_called()
             discover.assert_called_once_with([])
             collect.assert_not_called()
             self.assertIn('KEEP SOFT-1 Future -> Future | unknown column; kept', out.getvalue())
