@@ -109,7 +109,8 @@ def table(res, keys):
 
 
 def brief(res, keys):
-    return (HERE / "briefs/ticket-fixer.txt").read_text().replace("{{TICKETS}}", table(res, keys))
+    return ((HERE / "briefs/ticket-fixer.txt").read_text().replace("{{TICKETS}}", table(res, keys))
+            + "\n" + (HERE.parent / "docs/worker-brief.md").read_text())
 
 
 def decision_line(**row):
