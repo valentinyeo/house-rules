@@ -11,6 +11,7 @@ import sys
 import time
 
 CAP = 10
+DEFAULT_CAP = 2  # Projects without a cap in roster.json (Valentin 2026-11-17: others 3 or lower).
 BUSY_TARGET = 0.75
 BUSY_MAX = 0.85
 CORES_PER_WORKER = 0.5  # CPU allowance while a worker builds.
@@ -347,9 +348,15 @@ def self_test():
     with patch.dict(globals(), reserve=Mock(return_value=(idle, 0, f"held for {ht}"))):
         with redirect_stdout(output):
             main(["--running", "0", "--ready", "10", "--project", other])
-        reserve.assert_called_once_with(0, 10, CAP, project=other)
+        reserve.assert_called_once_with(0, 10, roster_cap(other), project=other)
     assert output.getvalue() == f"start 0: held for {ht}\n"
     print("slots self-test ok")
+
+
+def roster_cap(project):
+    """The project's worker cap from roster.json; unlisted projects get DEFAULT_CAP."""
+    rows = json.loads(Path(__file__).with_name("roster.json").read_text())["rows"]
+    return next((row.get("workers", DEFAULT_CAP) for row in rows if row["name"] == project), DEFAULT_CAP)
 
 
 def main(argv):
@@ -367,7 +374,8 @@ def main(argv):
         parser.error("--running and --ready are required")
     if min(args.running, args.ready, args.cap) < 0:
         parser.error("--running, --ready and --cap must be nonnegative")
-    snapshot, k, why = reserve(args.running, args.ready, args.cap, project=args.project)
+    cap = min(args.cap, roster_cap(args.project)) if args.project else args.cap
+    snapshot, k, why = reserve(args.running, args.ready, cap, project=args.project)
     if args.why:
         print(snapshot, file=sys.stderr)
     print(f"start {k}" + (f": {why}" if why else ""))
