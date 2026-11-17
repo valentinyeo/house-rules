@@ -344,6 +344,20 @@ class Board15Test(unittest.TestCase):
             self.assertEqual(r.discover(['HTPR-1'], board=r.BOARDS[15]), {'HTPR-1': [pr]})
             self.assertIn('repo:hypertask-ai/hypertask', run.call_args.args[-1])
 
+    def test_closed_pr_during_preflight_never_moves(self):
+        t = {'ticketNumber': 'HTPR-1', 'section': 'In Progress', 'projectId': 15,
+             'updatedAt': NOW - 8000}
+        pr = {'url': 'https://github.com/hypertask-ai/hypertask/pull/1', 'state': 'OPEN',
+              'number': 1, 'repository': {'nameWithOwner': 'hypertask-ai/hypertask'}}
+        plans = [(t, r.Facts('In Progress', 8000, False, (pull(),)))]
+        with patch.object(r, 'api', return_value={'tasks': [t]}), \
+                patch.object(r, 'live_product_worker', return_value=False), \
+                patch.object(r, 'run', return_value=json.dumps({'url': pr['url'], 'state': 'CLOSED'})) as run, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(r.apply_plan(plans, 5, {'HTPR-1': [pr]}, board=r.BOARDS[15]), 0)
+            self.assertIn('facts changed since preview', out.getvalue())
+            self.assertEqual(run.call_args.args[:3], ('gh', 'pr', 'view'))
+
     def test_board15_requires_explicit_agent_token(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(r, 'api') as api:
             with self.assertRaises(ValueError):
@@ -365,12 +379,15 @@ class Board15Test(unittest.TestCase):
 
 
 class ProductWorkerTest(unittest.TestCase):
+    def setUp(self):
+        r.product_workers.cache_clear()
+
     def test_queue_requires_active_service_and_recent_ticket_work(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / 'hypertask-test'
             state.mkdir()
             with sqlite3.connect(state / 'queue.sqlite3') as db:
-                db.execute('CREATE TABLE deliveries (project_id INTEGER,ticket TEXT,state TEXT,event TEXT,progress_at TEXT,started_at TEXT)')
+                db.execute('CREATE TABLE deliveries (project_id INTEGER,ticket TEXT,state TEXT,event TEXT,progress_at REAL,started_at REAL)')
                 for key, board, status, age, event in (
                     ('HTPR-1', 15, 'running', 1, 'task.assigned'),
                     ('HTPR-2', 15, 'running', 901, 'task.assigned'),
@@ -388,7 +405,7 @@ class ProductWorkerTest(unittest.TestCase):
                 self.assertEqual(r.product_workers(NOW), {'HTPR-1', 'HTPR-6', 'HTPR-7'})
             with patch.object(r, 'run', side_effect=[listed, shown]), \
                     patch.object(r, 'pid_alive', return_value=False):
-                self.assertEqual(r.product_workers(NOW), set())
+                self.assertEqual(r.product_workers(NOW + 1), set())
 
     def test_active_worker_missing_queue_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory, \
