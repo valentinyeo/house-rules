@@ -16,8 +16,8 @@ Sessions come in two shapes:
 - Plain tmux Claude sessions (roster "name" is the tmux session): busy or idle from session-list; the wake goes
   through session-say.
 
-Loop watch (every orchestrator row: chief, lead, solo-dev): the chat's current transcript must show a scheduled turn
-(turnOrigin "scheduled", fired by /loop or CronCreate) in the last 45 minutes. A chat's own report is not proof. When
+Loop watch (every orchestrator row: chief, lead, solo-dev): the chat's current transcript must show a scheduled or watcher-result turn
+(turnOrigin "scheduled" or native user "task_notification") in the last 45 minutes. A chat's own report is not proof. When
 none shows and the chat is idle or stopped, send one arm-your-loop message (one per 30 minutes); after two unanswered,
 log ESCALATE for Chief Of Staff.
 
@@ -48,8 +48,8 @@ TAKE = {"Doing": 0, "AI Review": 0, "Todo": 1}  # own work in flight first, then
 DRY_RUN = "--dry-run" in sys.argv
 LOOP_GAP = 45 * 60  # a 30-minute heartbeat plus the scheduler's jitter
 LOOP_KINDS = ("chief", "lead", "solo-dev")
-LOOP_MESSAGE = ("Your drain loop is not running: this chat shows no scheduled turn in 45 minutes. Arm it now per the "
-                "valentin-mode Drain rule (/loop or CronCreate, exit condition: no ticket you can move), run the Drain "
+LOOP_MESSAGE = ("Your drain loop is not running: this chat shows no scheduled or watcher-result turn in 45 minutes. Arm it now per the "
+                "valentin-mode Drain rule (watch worker, CI and verdict events; /loop or CronCreate as a slow fallback; exit condition: no ticket you can move), run the Drain "
                 "check, fix what it finds, and reply with its one line.")
 
 sys.path.insert(0, str(HERE.parent / "skills/hypertask-triage/scripts"))
@@ -191,22 +191,26 @@ def session_of(row, chats, panes):
 
 
 def last_loop_fire(transcript_sid, tail=3_000_000):
-    """Epoch of the newest scheduled turn in the chat's current transcript, or None."""
+    """Epoch of the newest scheduled or native watcher-result turn in the chat's current transcript, or None."""
+    newest = None
+    now = time.time()
     for f in (HOME / ".claude/projects").glob(f"*/{transcript_sid}.jsonl"):
         with open(f, "rb") as fh:
             fh.seek(0, 2)
             fh.seek(max(0, fh.tell() - tail))
             lines = fh.read().decode(errors="ignore").splitlines()
         for line in reversed(lines):
-            if '"turnOrigin":"scheduled"' not in line:
-                continue
             try:
-                fired = datetime.fromisoformat(json.loads(line)["timestamp"].replace("Z", "+00:00")).timestamp()
+                turn = json.loads(line)
+                origin = turn.get("turnOrigin")
+                if origin != "scheduled" and not (origin == "task_notification" and turn.get("type") == "user"):
+                    continue
+                fired = datetime.fromisoformat(turn["timestamp"].replace("Z", "+00:00")).timestamp()
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
-            if fired <= time.time() + 60:
-                return fired
-    return None
+            if fired <= now + 60:
+                newest = max(newest or fired, fired)
+    return newest
 
 
 def loop_verdict(session, last_fire, nudges, now):
@@ -221,7 +225,7 @@ def loop_verdict(session, last_fire, nudges, now):
         return "skip", f"no loop, busy ({session['state']}); next run"
     if nudges and now - nudges[-1] < COOLDOWN:
         return "skip", f"no loop, asked {int((now - nudges[-1]) // 60)} min ago"
-    return "arm", "no scheduled turn in 45 min"
+    return "arm", "no scheduled or watcher-result turn in 45 min"
 
 
 SESSIONS = HOME / ".config/hypertask-agents/credentials/sessions"
