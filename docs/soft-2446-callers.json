@@ -1,0 +1,247 @@
+[
+  {
+    "installed": "/home/valentin/.local/share/house-rules/skills/hypertask-triage/scripts/flag-links",
+    "sha256": "000e625541c909b7a414a1db1fff300b010849b0a4af7ab71dee0ca2ca9e036b",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "skills/hypertask-triage/scripts/flag-links",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/skills/hypertask-triage/scripts/wrong-status",
+    "sha256": "b5bdb8bc22d615325d7f0201b87c3da4773264a9ef15de33b448b0df7b12306c",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "skills/hypertask-triage/scripts/wrong-status",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/skills/solo-dev/scripts/parked-review",
+    "sha256": "a9045be998d627cc6a84e4e306551f42046d4d576aa17c53cee54c1e134801e6",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "skills/solo-dev/scripts/parked-review",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/skills/hypertask-triage/scripts/flow-check",
+    "sha256": "77e159a67c2e16eaaa4144b81b03e0257a6698bf1b84dacd091b1bbea8a2a7a0",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "skills/hypertask-triage/scripts/flow-check",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/skills/hypertask-triage/scripts/pileup-watch",
+    "sha256": "cabd8fbf1aa8908fbd674e1286a16aecb625d9dbbdae38fd284578210ede8a8b",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "skills/hypertask-triage/scripts/pileup-watch",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/skills/solo-dev/SKILL.md",
+    "sha256": "f300580ea9eecabb1a5077b69e2e3771b4c4086324fab92b5aa6579b0fb1affa",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "skills/solo-dev/SKILL.md",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/bin/flag-links",
+    "sha256": "000e625541c909b7a414a1db1fff300b010849b0a4af7ab71dee0ca2ca9e036b",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "bin/flag-links",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/skills/hypertask-triage/scripts/pr-queue",
+    "sha256": "c32203354663dc68f069b3f82a48524cd1c8e7ddf3794650bc22f7fc2873f84b",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "skills/hypertask-triage/scripts/pr-queue",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/skills/hypertask-triage/scripts/board-health",
+    "sha256": "a8b5046fed720abe7aa700093f909516bcfd1b78f5eee208e7a7858ce5701b96",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "skills/hypertask-triage/scripts/board-health",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/fleet/pr-merge",
+    "sha256": "2c2be0d19bda55b43d15cb847baef37254ddd45f0b660b8c3de6b446bcaf5c34",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "fleet/pr-merge",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/fleet/briefs/infra.txt",
+    "sha256": "684a527dbee899baab0cd733182af37170e969c8602cc4f39e7956efed7ade47",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "fleet/briefs/infra.txt",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/tests/test_ticket_ownership.py",
+    "sha256": "35e82d8e0a3b3ba67a3108613ede56187f559d020be5ba6a6798dcf108f29531",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "tests/test_ticket_ownership.py",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/fleet/pick",
+    "sha256": "97f85ae3e2eb96d92a46e5606f265c7133f10c9084e119b316a9a80e3372c19e",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "fleet/pick",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/fleet/roster.json",
+    "sha256": "70557fc0b6740cf1a78549c336929df4d0e1f4f192bbe62a2db2edbcc41ebe58",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "fleet/roster.json",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/fleet/park",
+    "sha256": "f78e595853414ea9da5bc59f4ad148c97662941398dbaf19e3c82584fa6169ff",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "fleet/park",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/fleet/briefs/ci.txt",
+    "sha256": "b7cd4e46009af1bd6bb943cc3b74822ebe819c1dd8bf58e625f25e2d2edc1ac0",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "fleet/briefs/ci.txt",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/fleet/sf-release-watch",
+    "sha256": "3ec6d9118b6c91765a3b9a909839d1fa353c7d612efd60de3d7a9f690d93f1e5",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "fleet/sf-release-watch",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/share/house-rules/fleet/solo-wake",
+    "sha256": "277f79477a8f2a83864ffd101e0d08b44a58a29bb8d5babd898ffe273720275c",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "fleet/solo-wake",
+    "disposition": "migrate source"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/pr-table.py",
+    "sha256": "7aae2d7ab0c5f0690a7bdea80e78a34411e19801b594056f678fcc4e1b390d06",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "bin/pr-table.py",
+    "disposition": "adopt unversioned host source; accept Checks and Verifier"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/ht-drain-watch.bak-retire-bug-fixer",
+    "sha256": "e3f9e00286d22e11a730b1d40427099cf3a5e06bc2a01236c88f278f25dd11ad",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "retired board 15 snapshot; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/grok-drain-worker-v5",
+    "sha256": "c21eb43c900a659b7dfc95aeee48e5ae63e2e47a6c50f45711651473e11614fe",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "board 15 / infrastructure; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/wazig-fleet-guard.bak-20260908T001524Z",
+    "sha256": "cfcd716f18195abbdea3eddb03d5a8f4659078da48e1f2320298cf64ee248568",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "board 4874, outside board 2060; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/fleet.bak-models0930",
+    "sha256": "b16dad0d4add3d34ef2dab4391273d2313f805d6151196d3d5120edc43292193",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "retired fleet snapshot; active source migrated in agent-worker"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/ht-scorecard.bak-health-1789502324",
+    "sha256": "ed56a7bff78f48ae9c9efcc3c23ee16cab9e1086bd72ad3fcf77a4cad7ef9164",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "board 15 comment only; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/wazig-fleet-guard",
+    "sha256": "1165172f30603a4a0ca8dc47f7ef5ed835921af24a6671c61ee2a7699f7afc7e",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "board 4874, outside board 2060; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/wazig-manager-tick.bak-models0930",
+    "sha256": "b1f46f5eff2252fa1c979ebf254882c9cc67df20bcb0efd0e29bbca86fd2220c",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "board 4874, outside board 2060; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/wazig-manager-tick",
+    "sha256": "d5c9a714cb11ec885c8a8c6f024df9886cbc3019350834b6c6093a1ccc5b40d0",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "board 4874, outside board 2060; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/ht-drain-watch.before-done-finalization-1789069112",
+    "sha256": "e6e9e4dc11c6746155dd3a909deb39f25849fabca9dfbfb9ab3bce8d5ea4b692",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "retired board 15 snapshot; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/pr-feedback-loop",
+    "sha256": "af11923c44b01f0c99343f618932cbbd9b899450fada8e190c1f38699a1465b0",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "GitHub AI Review check name, not a board column; preserve check names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/mp-pick.bak-mb-rename",
+    "sha256": "7340fc47f0bc18a130e59113adb622ed2640d0fd95fb71ee198c6b951489161d",
+    "source_repo": "valentinyeo/house-rules",
+    "source_path": "migrations/soft-2446-mp-pick.patch",
+    "disposition": "retired unversioned snapshot; migration patch supplied; do not activate"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/drainer",
+    "sha256": "59fe2d46da2f15975ce184172604dbdc212eda9db4f199c9596eb806731a00db",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "GitHub AI Review check name, not a board column; preserve check names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/fleet",
+    "sha256": "3df692c53f38fff7bca7b7ede7057da08cbf78e554f53bd06c2fc3d4de2368c1",
+    "source_repo": "hypertask-ai/agent-worker",
+    "source_path": "scripts/fleet",
+    "disposition": "migrate source; installed copy has unrelated drift"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/grok-drain-worker-v4",
+    "sha256": "c417d88fae72ab77a1cd4674a70c2570c40648a2b95a372b561f013c32d50ed2",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "board 15 / infrastructure; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/wazig-manager-tick.bak.20260908T140229Z",
+    "sha256": "eab45b4605a4564ba164a5f7340b7be1057681544258b756a67f33da0a5832b8",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "board 4874, outside board 2060; preserve names"
+  },
+  {
+    "installed": "/home/valentin/.local/bin/ht-scorecard",
+    "sha256": "cf4f9855b744ef5cdc5a4321e22dab3d6db8a720b97e884dcc54430fcf948bd4",
+    "source_repo": null,
+    "source_path": null,
+    "disposition": "board 15 comment only; preserve names"
+  }
+]

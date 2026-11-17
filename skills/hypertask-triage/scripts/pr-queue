@@ -35,7 +35,7 @@ import scopes  # noqa: E402
 KEY = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
 NOT_KEYS = {"DEV", "RUNNER", "AGENT", "CURSOR", "CODEX", "WORKER", "INFRA-RUNNER"}
 BOTS = ("dependabot", "renovate")
-BUILD = {"in progress", "doing", "ai review"}
+BUILD = {"in progress", "building", "doing", "checks", "verifier", "ai review"}
 QUEUE = {"bugs", "improvements", "features", "backlog", "todo"}
 CLOSED = re.compile(r"^(done|flag:|no flag)", re.I)
 

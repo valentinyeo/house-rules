@@ -102,7 +102,8 @@ def file_broken_picker_incident(sha, detail):
 def promote_lkg(sha):
     LKG_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(PICK_SRC, LKG_PICK)
-    shutil.copy2(PICK_SRC.with_name("ticket_owner.py"), LKG_DIR / "ticket_owner.py")
+    for name in ("ticket_owner.py", "workflow_columns.py"):
+        shutil.copy2(PICK_SRC.with_name(name), LKG_DIR / name)
     os.chmod(LKG_PICK, 0o755)
     RUNNER_STATE.mkdir(parents=True, exist_ok=True)
     (RUNNER_STATE / "pick-lkg.sha").write_text(sha + "\n")
@@ -112,8 +113,8 @@ def ensure_pick(as_json=False):
     if not PICK_SRC.is_file():
         note(f"pick gate: missing source {PICK_SRC}")
         return 1
-    owner_src = PICK_SRC.with_name("ticket_owner.py")
-    dependency_sha = file_sha(owner_src) if owner_src.is_file() else "missing ticket_owner.py"
+    dependencies = [PICK_SRC.with_name(name) for name in ("ticket_owner.py", "workflow_columns.py")]
+    dependency_sha = "".join(file_sha(p) if p.is_file() else f"missing {p.name}" for p in dependencies)
     sha = hashlib.sha256((file_sha(PICK_SRC) + dependency_sha).encode()).hexdigest()
     lkg_sha = ""
     lkg_path = RUNNER_STATE / "pick-lkg.sha"
@@ -129,11 +130,13 @@ def ensure_pick(as_json=False):
     with tempfile.TemporaryDirectory() as alone:
         served = Path(alone) / "pick"
         shutil.copy2(PICK_SRC, served)
-        if owner_src.is_file():
-            shutil.copy2(owner_src, Path(alone) / "ticket_owner.py")
+        missing = [p.name for p in dependencies if not p.is_file()]
+        if not missing:
+            for dependency in dependencies:
+                shutil.copy2(dependency, Path(alone) / dependency.name)
             ok, detail = run_self_test(served, ("--self-test",))
         else:
-            ok, detail = False, "missing ticket_owner.py"
+            ok, detail = False, "missing " + ", ".join(missing)
     if ok:
         promote_lkg(sha)
         out = str(LKG_PICK)

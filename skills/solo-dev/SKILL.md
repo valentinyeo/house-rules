@@ -60,7 +60,7 @@ Do it yourself, before any ticket. Never ask Valentin. Never print a token.
 
 Run the board check below before this loop.
 
-1. Move the ticket to Doing. Read it and its screenshots.
+1. Move the ticket to Building, accepting Doing before rename. Read it and its screenshots.
 2. One small change per commit, straight to the default branch. No new PRs.
 3. Put the one-line undo in the commit message.
 4. Push. Never build or test on the VPS. CI on GitHub-hosted runners does it (free, public repo).
@@ -91,9 +91,9 @@ Do this once per repo, as its own commit, before the first ticket.
 Behave on the board exactly like a fleet runner, just alone. Follow the `tickets` skill.
 Run `~/.local/share/house-rules/skills/tickets/scripts/ticket-lint <file>` before every description or people comment; raw `hypertask --token` writes skip no check. (2026-10-30, why: IGSH-1169 passed jargon to Valentin)
 
-- Same columns as the fleet: Doing while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; `blocker-sweep.py` flags it. (2026-11-02, why: IGSH-1353 sat there with "Decision: None")
-- No ticket sits in Doing overnight.
-- AI Review is not a waiting room. Run `scripts/parked-review --board <id>` at every board check; it must print 0 parked. (2026-11-02, why: "fix the origin of tickets not being moved")
+- Same columns as the fleet: Building while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; `blocker-sweep.py` flags it. (2026-11-02, why: IGSH-1353 sat there with "Decision: None")
+- No ticket sits in Building or Doing overnight.
+- Verifier accepts AI Review during the rename. Neither is a waiting room. Run `scripts/parked-review --board <id>` at every board check; it must print 0 parked. (2026-11-02, why: "fix the origin of tickets not being moved")
 - Every ticket runs through pstack `poteto-mode`: its Bug fix or Feature playbook, `how` before nontrivial changes, `architect` across function boundaries. Name the playbook in your first ticket comment. (2026-10-30, why: Valentin asked "are the agents using pstack?")
 - Prove every change with the repo's own verify skill (`.claude/skills/verify-<app>/`) and link its output on the ticket. No verify skill yet? Make one with pstack `create-verification-skill` first. (2026-11-03, why: "We have never set it up properly")
 - A question from Valentin is not a stop. Answer it, then go back to the queue in the same turn. Never end a turn while the view has open tickets. (2026-10-30, why: answering his question left the session idle)
@@ -113,11 +113,11 @@ Repeat after releases, before replies and before stopping.
 - Read the saved view's current filters. Follow renames; never guess its labels.
 - Read every open ticket in that view. Include all pages and review columns.
 - Check your agent UUID, not merely `me`. Human ownership can hide agent assignment mistakes.
-- Claim your current ticket using your own identity. Keep it in Doing during active work.
+- Claim your current ticket using your own identity. Keep it in Building during active work.
 - Rewrite its Now line when progress changes. Keep evidence and next steps in agent activity.
 - Close completed tickets that have release proof. Match every acceptance condition before marking Done.
 - Record release tag, link and elapsed minutes. A partial release never completes unfinished acceptance.
-- Reconcile old Doing tickets before taking more work. Resume them or return inactive work to Todo. Record the reason; preserve another active owner's work.
+- Reconcile old Building or Doing tickets before taking more work. Resume them or return inactive work to Todo. Record the reason; preserve another active owner's work.
 - Keep umbrellas linked to their current child ticket. Preserve cross-app ownership and outstanding release requirements.
 - Clear answered blockers through the tickets skill. Ask only for decisions Valentin must make.
 - Re-read changed tickets after writing. Verify column, ownership, labels and current Now text.
@@ -151,3 +151,22 @@ Valentin and other people message you in the Hypertask sidebar chat. Nothing rea
 ## Report to Valentin
 
 Short plain lines only: what shipped, release tag, ticket link. Technical detail only if he asks.
+
+## Software Factory columns
+
+Board 2060 supplies every project view's columns.
+Use Todo, Building, Checks, Verifier, Valentin Review, Done.
+
+- Starting work -> Building.
+- PR opened -> Checks.
+- checks green -> Verifier.
+- current-head PASS and merged -> Done.
+- Valentin Review holds only Valentin's decisions.
+
+Building accepts Doing during the migration.
+Verifier accepts AI Review during the migration.
+Prefer the new name when both exist.
+Read actual columns before choosing a move.
+Never rename the columns during caller migration.
+Remove aliases in one follow-up after the rename.
+Other boards retain their own column names.

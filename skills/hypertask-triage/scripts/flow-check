@@ -59,8 +59,8 @@ BOARDS = {
         "blocked_cap": 5,
     },
     2060: {
-        "in_progress": "Doing",
-        "waits": {"AI Review": 6},
+        "in_progress": "Building",
+        "waits": {"Checks": 6, "Verifier": 6},
         "blocked_cap": 5,
     },
     8783: {
@@ -144,6 +144,10 @@ def workers_for(scope):
 
 
 def column(board, name, labels=None):
+    if board == 2060:
+        aliases = {"Building": ("Building", "Doing"), "Verifier": ("Verifier", "AI Review")}
+        return [t for t in open_tickets(board) if t.get("section") in aliases.get(name, (name,))
+                and scopes.in_view(t, labels)]
     tickets, offset = [], 0
     while True:
         page = ht("task", "list", "--project", str(board), "--section", name, "--status", "Normal",
@@ -253,7 +257,7 @@ def run(key):
     cols = {name: column(board, name, labels) for name in [cfg["in_progress"], *cfg["waits"]]}
     with ThreadPoolExecutor(6) as ex:
         info = {num: (log, moved) for num, log, moved in ex.map(details, [t for ts in cols.values() for t in ts])}
-    building = (cfg["in_progress"], "AI Review", "QA")  # a runner stays on its ticket until it is live
+    building = (cfg["in_progress"], "Checks", "Verifier", "AI Review", "QA")  # a runner stays on its ticket until it is live
     own = ownership([t for c in building if c in cols for t in cols[c]], w, own_live)
     rows = []
     for t in cols[cfg["in_progress"]]:

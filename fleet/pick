@@ -181,7 +181,7 @@ ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without 
 # board -> (new-work columns, building columns)
 BOARDS = {
     "15": (("Backlog", "Bugs", "Improvements", "Features"), ("In Progress", "AI Review", "QA")),
-    "2060": (("Todo",), ("Doing", "AI Review")),
+    "2060": (("Todo",), ("Building", "Doing", "Checks", "Verifier", "AI Review")),
 }
 BOARD_ORDER = {b: i for i, b in enumerate(BOARDS)}
 PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYCI": "2060"}
@@ -577,7 +577,15 @@ def load_snapshot():
         return json.load(open(cache))
     snap = {"tickets": [], "rel": {}, "prs": None, "prs_at": None, "incidents": []}
     for board, (new, building) in BOARDS.items():
+        available = None
+        if board == "2060":
+            response = ht("section", "list", "--project", board)
+            if not response or "sections" not in response:
+                raise RuntimeError("board 2060 sections unreadable")
+            available = {s.get("name") or s.get("section_title") for s in response["sections"]}
         for section in new + building:
+            if available is not None and section not in available:
+                continue
             snap["tickets"] += list_section(board, section)
     snap["incidents"] = list_incidents()
     if cache:
@@ -1513,7 +1521,7 @@ def wait_end(r):
     return bool(WAIT_FAULT.search(text))
 
 
-BUILT_PR_END = re.compile(r"\b(AI Review|QA)\b", re.I)
+BUILT_PR_END = re.compile(r"\b(Checks|Verifier|AI Review|QA)\b", re.I)
 # HYCI-396, 13 Nov (HTPR-8207, run on R2): the run left "In Progress (PR 3476 checks running; recheck after 2026-11-13T23:54Z)" on a BUILDING
 # row. That names neither AI Review nor QA, so no gate saw it, and the ticket was picked again 19 minutes before its own recheck time.
 BUILT_PR_NOTE = re.compile(r"\bPR\s*#?\d+\b[^;]{0,40}\bchecks?\s+(?:running|pending)|\brecheck(?:\s+after|\s+at)?\s+\d", re.I)
@@ -2584,7 +2592,10 @@ def try_claim(n, t, source, dry, own_resume=False):
     if adopting:
         ok = adopt(n, t, "Adopted from a runner that no longer works it; staying on it until it is live" if source != "board" else "Picked by fleet/pick")
         if ok and t["board"] == "2060" and t["section"] == "Todo":
-            ceo(n, "task", "move", t["key"], "--section", "Doing")
+            from workflow_columns import resolve
+            response = ht("section", "list", "--project", "2060")
+            target = resolve("Building", (response or {}).get("sections", []))
+            ceo(n, "task", "move", t["key"], "--section", target)
         if ok:
             record_claim(n, t["key"], False)
         else:

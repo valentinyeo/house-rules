@@ -44,7 +44,7 @@ HOME = Path.home()
 STATE = Path(os.environ.get("FLEET_STATE") or HOME / ".local/state/fleet")
 OUT = Path(os.environ.get("SF_RELEASE_WAIT") or STATE / "sf-release-wait.json")
 BOARD = "2060"
-COLUMNS = ("Doing", "AI Review")
+COLUMNS = ("Building", "Doing", "Checks", "Verifier", "AI Review")
 # ticket label -> (GitHub repository, release tag prefix). Only apps whose release workflow runs on merge belong here.
 APPS = {"multiprompt": "valentinyeo/multiprompt", "wazig": "valentinyeo/postbox", "postbox": "valentinyeo/postbox"}
 # Fleet CI & Infra tickets whose PR is not in a Software Factory app repo (HYCI-388). SF_EXTRA_REPOS overrides, comma separated.
@@ -179,7 +179,7 @@ def classify(number, prs, releases, contains, notes, run_failed, now, section="A
         return "attention", f"PR #{pr['number']} merged but GitHub gave no merge commit", iso(at), "", ""
     for rel in sorted((r for r in releases if epoch(r["publishedAt"]) >= at), key=lambda r: r["publishedAt"]):
         if contains(sha, rel["tagName"]):
-            if section != "AI Review":
+            if section not in ("Verifier", "AI Review"):
                 return "none", "", "", "", ""
             if names_ticket(notes(rel["tagName"]), number):
                 return "done", f"PR #{pr['number']} released as {rel['tagName']}, notes name the ticket", iso(at), rel["tagName"], sha
@@ -229,22 +229,27 @@ class Hub:
     def tickets(self, board=BOARD, columns=COLUMNS):
         """(key, number, labels, section) of a board's tickets in `columns` (board 2060 in COLUMNS unless asked)."""
         out = []
-        for section in columns:
-            r = subprocess.run(["hypertask", "--json", "task", "list", "--project", board, "--section", section, "--limit", "100"],
+        for offset in range(0, 100000, 100):
+            r = subprocess.run(["hypertask", "--json", "task", "list", "--project", board, "--status", "Normal", "--limit", "100", "--offset", str(offset)],
                                capture_output=True, text=True, timeout=300)
             try:
                 rows = json.loads(r.stdout[r.stdout.index("{"):])["tasks"]
             except (ValueError, KeyError):
-                raise RuntimeError(f"board {board} column {section} unreadable")
+                raise RuntimeError(f"board {board} tickets unreadable")
             for t in rows:
+                section = t.get("section")
+                if section not in columns:
+                    continue
                 n = int(str(t.get("ticketNumber") or "x-0").rpartition("-")[2] or 0)
                 if n:
                     out.append((t["ticketNumber"], n, {(l.get("name") or "").strip().lower() for l in t.get("labels") or []}, section))
-        return out
+            if len(rows) < 100:
+                return out
+        raise RuntimeError(f"board {board} pagination exceeded")
 
     def prs(self, repo):
         return self.gh("pr", "list", "-R", repo, "--state", "all", "--limit", "30", "--json",
-                       "number,title,headRefName,state,isDraft,mergedAt,mergeCommit,updatedAt,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus",
+                       "number,title,headRefName,headRefOid,state,isDraft,mergedAt,mergeCommit,updatedAt,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus",
                        plain=repo in EXTRA_REPOS)
 
     def find_prs(self, repo, number):
@@ -252,9 +257,14 @@ class Hub:
         23:03 and released, yet newer PRs hid it, so the ticket read "none", never moved to Done and a runner waited on it again
         and again). A GitHub title search for the number, kept only when the title or branch names the ticket."""
         rows = self.gh("pr", "list", "-R", repo, "--state", "all", "--limit", "10", "--search", f"{number} in:title", "--json",
-                       "number,title,headRefName,state,isDraft,mergedAt,mergeCommit,updatedAt,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus",
+                       "number,title,headRefName,headRefOid,state,isDraft,mergedAt,mergeCommit,updatedAt,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus",
                        plain=repo in EXTRA_REPOS) or []
         return [p for p in rows if names_ticket(p.get("title"), number) or names_ticket(p.get("headRefName"), number)]
+
+    def verified(self, repo, pr):
+        from workflow_columns import passed
+        comments = self.gh("api", "--paginate", "--slurp", f"repos/{repo}/issues/{pr['number']}/comments")
+        return passed(pr, [c for page in comments for c in page])
 
     def releases(self, repo):
         rows = self.gh("release", "list", "-R", repo, "--limit", "20", "--json", "tagName,publishedAt,isDraft,isPrerelease")
@@ -323,6 +333,11 @@ def sweep(hub, now):
                 state, detail, since, tag, sha = classify(
                     n, mine_prs, lazy_releases() if any(p["state"] == "MERGED" for p in mine_prs) else [],
                     lambda s, t: hub.contains(repo, s, t), lambda t: hub.notes(repo, t), lambda s: hub.run_failed(repo, s), now, section)
+                if state == "done":
+                    latest = max((p for p in mine_prs if p["state"] == "MERGED" and (names_ticket(p.get("title"), n) or names_ticket(p.get("headRefName"), n))),
+                                 key=lambda p: p.get("mergedAt") or "", default={})
+                    if not hub.verified(repo, latest):
+                        state, detail = "attention", "Merged release lacks a current-head PASS verifier verdict"
                 if state == "done":
                     hub.finish(key, f"sf-release-watch (script, no model): {detail}. Moved to Done. Repo {repo}, release {tag}.")
                     moved.append(key)
@@ -441,6 +456,9 @@ def self_test():
 
         def find_prs(self, repo, number):
             return []
+
+        def verified(self, repo, pr):
+            return True
 
         def releases(self, repo):
             return self._rel

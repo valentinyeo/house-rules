@@ -112,6 +112,19 @@ class OwnershipTests(unittest.TestCase):
             self.assertEqual(api.call_count, 1)
             self.assertEqual(self.owners.read("HYCI-404")["runner"], 6)
 
+    def test_software_factory_pr_opens_in_checks_and_keeps_its_owner(self):
+        park = load("park")
+        for column in ("Doing", "Building"):
+            ticket = {"projectId": 2060, "section": column, "pullRequests": [{"number": 12}],
+                      "assignees": [{"agent": {"displayName": "Runner 6"}}]}
+            with patch.dict(os.environ, {"SHIP_SESSION_NAME": "RUNNER 6"}), \
+                    patch.object(park, "preserve_owner", return_value={"runner": 6}), \
+                    patch.object(park, "blockers", return_value=[]), patch.object(park, "free_claim"), \
+                    patch.object(park, "note"), patch.object(park, "record_event"), patch.object(park, "vcc") as api:
+                result = park.park_hand_back("SOFT-2446", "checks pending; recheck later", ticket)
+                self.assertIn("Runner 6 retained", result)
+                api.assert_called_once_with("task", "move", "SOFT-2446", "--section", "Checks")
+
     def test_last_good_picker_keeps_its_ownership_dependency(self):
         gate = load("tool-gate.py")
         source = self.state / "source"
@@ -120,6 +133,8 @@ class OwnershipTests(unittest.TestCase):
         script.write_text("print('fixture')\n")
         dependency = source / "ticket_owner.py"
         dependency.write_text("VERSION = 1\n")
+        columns = source / "workflow_columns.py"
+        columns.write_text("VERSION = 1\n")
         destination = self.state / "lkg"
         gate.PICK_SRC, gate.LKG_DIR = script, destination
         gate.LKG_PICK, gate.RUNNER_STATE = destination / "pick", self.state / "runner"
@@ -127,6 +142,7 @@ class OwnershipTests(unittest.TestCase):
 
         def hosted_check(served, extra):
             self.assertEqual(served.with_name("ticket_owner.py").read_text(), dependency.read_text())
+            self.assertEqual(served.with_name("workflow_columns.py").read_text(), columns.read_text())
             return True, "passed"
 
         with patch.object(gate, "run_self_test", side_effect=hosted_check) as check:
