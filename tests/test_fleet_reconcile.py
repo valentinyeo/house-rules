@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -361,6 +362,46 @@ class Board15Test(unittest.TestCase):
             with self.subTest(name=name), patch.dict(os.environ, {'HT_TOKEN': 'token'}), \
                     patch.object(r, 'api', return_value={'connected_agent': {'id': 'agent', 'displayName': name}}):
                 r.require_board15_agent()
+
+
+class ProductWorkerTest(unittest.TestCase):
+    def test_queue_requires_active_service_and_recent_ticket_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'hypertask-test'
+            state.mkdir()
+            with sqlite3.connect(state / 'queue.sqlite3') as db:
+                db.execute('CREATE TABLE deliveries (project_id INTEGER,ticket TEXT,state TEXT,event TEXT,progress_at TEXT,started_at TEXT)')
+                for key, board, status, age, event in (
+                    ('HTPR-1', 15, 'running', 1, 'task.assigned'),
+                    ('HTPR-2', 15, 'running', 901, 'task.assigned'),
+                    ('HTPR-3', 2060, 'running', 1, 'task.assigned'),
+                    ('HTPR-4', 15, 'pending', 1, 'task.assigned'),
+                    ('HTPR-5', 15, 'running', 1, 'chat.message'),
+                    ('HTPR-6', 15, 'claiming', 1, 'comment.mention'),
+                    ('HTPR-7', 15, 'launching', 1, 'scope.discovery')):
+                    db.execute('INSERT INTO deliveries VALUES (?,?,?,?,?,?)', (board,key,status,event,NOW-age,NOW-age))
+            listed = 'hypertask-agent-worker@test.service loaded active running test worker'
+            shown = 'MainPID=1234\nActiveState=active\n'
+            with patch.object(r, 'run', side_effect=[listed, shown]), \
+                    patch.object(r, 'pid_alive', return_value=True), \
+                    patch.object(r, 'worker_state_directory', return_value=state):
+                self.assertEqual(r.product_workers(NOW), {'HTPR-1', 'HTPR-6', 'HTPR-7'})
+            with patch.object(r, 'run', side_effect=[listed, shown]), \
+                    patch.object(r, 'pid_alive', return_value=False):
+                self.assertEqual(r.product_workers(NOW), set())
+
+    def test_active_worker_missing_queue_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(r, 'run', side_effect=['hypertask-agent-worker@test.service loaded active running test', 'MainPID=1234\nActiveState=active']), \
+                patch.object(r, 'pid_alive', return_value=True), \
+                patch.object(r, 'worker_state_directory', return_value=Path(directory)):
+            with self.assertRaises((ValueError, sqlite3.Error)):
+                r.product_workers(NOW)
+
+    def test_service_read_failure_fails_closed(self):
+        with patch.object(r, 'run', side_effect=RuntimeError('systemctl failed')):
+            with self.assertRaises(RuntimeError):
+                r.product_workers(NOW)
 
 
 class LeaseTest(unittest.TestCase):
