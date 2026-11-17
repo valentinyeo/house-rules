@@ -3,7 +3,11 @@
 `fleet/reconcile` reads board 2060 and GitHub.
 Default runs print plans without moving tickets.
 `--section Doing` limits a dry run.
-`--apply` moves tickets and writes agent-log entries.
+`--apply` previews first, then permits five moves.
+`--limit N` changes that per-run cap.
+Exceeding the cap refuses every move.
+Any UNKNOWN also refuses every move.
+Each move writes an agent-log entry.
 Owners and assignees stay unchanged.
 
 ## Column rules
@@ -12,18 +16,28 @@ Earlier rows take priority.
 
 | Fact | Column |
 | --- | --- |
-| Already Valentin Review or Done | Keep |
+| Already Valentin Review, Done, or Not now | Keep |
+| Any column outside this table | Keep |
 | Ticket touched within two hours | Keep |
 | Fresh lease with a live local PID | Doing |
 | Open PR, checks running, red, or missing | Checks |
 | Open PR, checks green | AI Review |
-| Every matching PR merged, current-head PASS | Done |
+| Every matching PR merged, current-head PASS | AI Review, live proof pending |
 | Merged PR without current-head PASS | AI Review |
 | No live lease or matching PR | Todo |
 
 A passing open PR waits in AI Review.
+Merged work waits there for live proof.
+This script never moves work into Done.
 Searches include both fleet owners across repositories.
-Exact ticket keys and board links match.
+PR ownership requires one structural link.
+The title or branch contains the ticket key.
+An anchored `Ticket:` line also qualifies.
+An exact Hypertask ticket URL qualifies anywhere.
+Other body mentions establish no ownership.
+Branch discovery scans both owners, including merged PRs.
+Date partitions avoid GitHub search truncation.
+Malformed keys report UNKNOWN without stopping other tickets.
 Closed, unmerged PRs count as no PR.
 Read failures print UNKNOWN and prevent that move.
 Fresh foreign-host leases also prevent moves.
@@ -77,7 +91,9 @@ Repeated ends are harmless.
 ## Server timer
 
 The supplied timer runs every fifteen minutes.
-Installation enables real board moves.
+Installation enables capped board moves after preview.
+The current backlog may exceed the default cap.
+Such runs refuse writes until reviewed separately.
 Keep installation for the approved release.
 
 The service uses `~/.local/share/house-rules/fleet/reconcile`.
@@ -96,6 +112,9 @@ bin/install-fleet-reconcile.sh
 
 The installer installs supplied user-service files.
 Runs serialize through the board-specific lock.
+An overlapping run reports SKIP and succeeds.
+Apply rechecks tickets and PR facts after preview.
+Changed tickets skip that run.
 
 ## Self-test
 

@@ -98,7 +98,7 @@ class ReconcileTest(unittest.TestCase):
     def test_apply_previews_and_caps_before_any_write(self):
         plans = [(dict(task(), ticketNumber=f'SOFT-{i}'), r.Facts('Doing', 8000)) for i in range(1, 7)]
         with patch.object(r, 'api') as api, patch.object(r, 'run') as run, contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(r.apply_plan(plans, 5), 1)
+            self.assertEqual(r.apply_plan(plans, 5, {'SOFT-1': []}), 1)
             self.assertIn('move cap', out.getvalue())
             api.assert_not_called()
             run.assert_not_called()
@@ -108,9 +108,41 @@ class ReconcileTest(unittest.TestCase):
         with patch.object(r, 'api', return_value={'tasks': [task('Not now')]}), \
                 patch.object(r, 'collect') as collect, patch.object(r, 'reconcile') as reconcile, \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(r.apply_plan(plans, 5), 0)
+            self.assertEqual(r.apply_plan(plans, 5, {'SOFT-1': []}), 0)
             collect.assert_not_called()
             reconcile.assert_not_called()
+
+    def test_apply_writes_only_the_preflighted_move(self):
+        plans = [(task(), r.Facts('Doing', 8000))]
+        with patch.object(r, 'api', return_value={'tasks': [task()]}) as api, \
+                patch.object(r, 'discover', return_value={'SOFT-1': []}), \
+                patch.object(r, 'collect', return_value=r.Facts('Doing', 8000)), \
+                patch.object(r, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(r.apply_plan(plans, 5, {'SOFT-1': []}), 0)
+            self.assertEqual(api.call_args_list[-1].args, ('task', 'move', 'SOFT-1', '--section', 'Todo'))
+            self.assertEqual(run.call_count, 1)
+
+    def test_parked_during_preflight_never_moves(self):
+        plans = [(task(), r.Facts('Doing', 8000))]
+        with patch.object(r, 'api', side_effect=[{'tasks': [task()]}, {'tasks': [task('Not now')]}]), \
+                patch.object(r, 'discover', return_value={'SOFT-1': []}), \
+                patch.object(r, 'collect', return_value=r.Facts('Doing', 8000)), \
+                patch.object(r, 'reconcile') as reconcile, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(r.apply_plan(plans, 5, {'SOFT-1': []}), 0)
+            reconcile.assert_not_called()
+
+    def test_malformed_ticket_does_not_abort_remaining_board(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(r.Path, 'home', return_value=Path(directory)), \
+                patch.object(sys, 'argv', ['reconcile']), \
+                patch.object(r, 'tickets', return_value=[dict(task(), ticketNumber='BROKEN'), task()]), \
+                patch.object(r.time, 'time', return_value=NOW), \
+                patch.object(r, 'discover', return_value={'BROKEN': [], 'SOFT-1': []}), \
+                patch.object(r, 'live_lease', return_value=False), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(r.main(), 1)
+            self.assertIn('UNKNOWN BROKEN | invalid board-2060 ticket key', out.getvalue())
+            self.assertIn('PLAN SOFT-1 Doing -> Todo', out.getvalue())
 
     def test_overlap_is_a_clean_skip(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -134,7 +166,7 @@ class ReconcileTest(unittest.TestCase):
             (r.Facts('Doing', 8000, False, (pull(checks='missing'),)), 'Checks'),
             (r.Facts('Doing', 8000, False, (pull(),)), 'AI Review'),
             (r.Facts('Checks', 8000, False, (pull(passed=True),)), 'AI Review'),
-            (r.Facts('Doing', 8000, False, (pull('MERGED', passed=True),)), 'Done'),
+            (r.Facts('Doing', 8000, False, (pull('MERGED', passed=True),)), 'AI Review'),
             (r.Facts('Doing', 8000, False, (pull('MERGED'),)), 'AI Review'),
             (r.Facts('Doing', 8000, False, (pull('MERGED', passed=True), pull(checks='red'))), 'Checks'),
             (r.Facts('Doing', 7199), 'Doing'),
@@ -186,12 +218,43 @@ class ReconcileTest(unittest.TestCase):
         p = {'title': 'SOFT-1 fix', 'body': '', 'url': pull().url, 'state': 'OPEN',
              'repository': {'nameWithOwner': 'valentinyeo/another-repo'}, 'number': 1}
         result = {'data': {'q0': {'pageInfo': {'hasNextPage': False}, 'nodes': [p, {**p, 'state': 'CLOSED'}, {**p, 'title': 'SOFT-10 fix'}]}}}
-        with patch.object(r, 'run', return_value=json.dumps(result)) as run:
+        with patch.object(r, 'run', return_value=json.dumps(result)) as run, patch.object(r, 'branch_pulls', return_value=[]):
             self.assertEqual(r.discover(['SOFT-1']), {'SOFT-1': [p]})
             self.assertIn('user:hypertask-ai', run.call_args.args[-1])
         result['data']['q0']['pageInfo']['hasNextPage'] = True
         with patch.object(r, 'run', return_value=json.dumps(result)), self.assertRaisesRegex(ValueError, 'truncated'):
             r.discover(['SOFT-1'])
+
+    def test_branch_only_pr_is_discovered(self):
+        pr = {'url': pull().url, 'state': 'OPEN', 'headRefName': 'feature/soft-1-work',
+              'number': 1, 'repository': {'nameWithOwner': 'valentinyeo/another-repo'}}
+        result = {'data': {'q0': {'pageInfo': {'hasNextPage': False}, 'nodes': []}}}
+        with patch.object(r, 'run', return_value=json.dumps(result)), patch.object(r, 'branch_pulls', return_value=[pr]):
+            self.assertEqual(r.discover(['SOFT-1']), {'SOFT-1': [pr]})
+
+    def test_branch_search_splits_over_limit_and_paginates(self):
+        pr = {'url': pull().url, 'state': 'OPEN', 'headRefName': 'fix/soft-1',
+              'number': 1, 'repository': {'nameWithOwner': 'valentinyeo/another-repo'}}
+        def page(count, nodes=(), more=False, cursor=None):
+            return json.dumps({'data': {'search': {'issueCount': count, 'nodes': list(nodes),
+                'pageInfo': {'hasNextPage': more, 'endCursor': cursor}}}})
+        responses = [page(1001), page(101, [pr], True, 'next'), page(101), page(0)]
+        with patch.object(r, 'run', side_effect=responses) as run:
+            self.assertEqual(list(r.branch_pulls()), [pr])
+            self.assertIn('after:"next"', run.call_args_list[2].args[-1])
+            self.assertEqual(run.call_count, 4)
+
+    def test_unknown_column_bypasses_discovery_and_lease(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(r.Path, 'home', return_value=Path(directory)), \
+                patch.object(sys, 'argv', ['reconcile']), \
+                patch.object(r, 'tickets', return_value=[task('Future')]), \
+                patch.object(r, 'discover', return_value={}) as discover, \
+                patch.object(r, 'collect') as collect, contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(r.main(), 0)
+            discover.assert_called_once_with([])
+            collect.assert_not_called()
+            self.assertIn('KEEP SOFT-1 Future -> Future | unknown column; kept', out.getvalue())
 
     def test_board_paginates_server_clamped_pages(self):
         with patch.object(r, 'api', side_effect=[{'tasks': [task()], 'total': 2, 'nextCursor': 'next'},

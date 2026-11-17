@@ -4,7 +4,7 @@ import argparse
 import base64
 from functools import lru_cache
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -16,7 +16,8 @@ import sys
 import time
 
 BOARD = 2060
-PROTECTED = {'Valentin Review', 'Done'}
+PROTECTED = {'Valentin Review', 'Done', 'Not now'}
+MANAGED = {'Todo', 'Doing', 'Checks', 'AI Review'}
 LEASES = Path(os.environ.get('FLEET_LEASE_DIR', Path.home() / '.local/state/fleet/leases'))
 
 
@@ -39,11 +40,12 @@ class Facts:
 # Priority is deliberate: protected columns and grace precede live work.
 RULES = (
     (lambda f: f.column in PROTECTED, None, 'protected column'),
+    (lambda f: f.column not in MANAGED, None, 'unknown column; kept'),
     (lambda f: f.age < 7200, None, 'touched within 2h'),
     (lambda f: f.alive, 'Doing', 'live lease'),
     (lambda f: any(p.state == 'OPEN' and p.checks != 'green' for p in f.pulls), 'Checks', 'open PR checks running, red, or missing'),
     (lambda f: any(p.state == 'OPEN' for p in f.pulls), 'AI Review', 'open PR checks green; verifier or merge pending'),
-    (lambda f: bool(f.pulls) and all(p.state == 'MERGED' and p.passed for p in f.pulls), 'Done', 'merged PR with PASS on current head'),
+    (lambda f: bool(f.pulls) and all(p.state == 'MERGED' and p.passed for p in f.pulls), 'AI Review', 'merged PR with PASS; live proof pending'),
     (lambda f: any(p.state == 'MERGED' for p in f.pulls), 'AI Review', 'merged PR missing PASS on current head'),
     (lambda f: True, 'Todo', 'no live lease and no PR'),
 )
@@ -127,22 +129,80 @@ def tickets(section=None):
     return rows
 
 
+def ticket_index(key):
+    match = re.fullmatch(r'SOFT-([1-9]\d*)', key, re.I)
+    if not match:
+        raise ValueError('invalid board-2060 ticket key')
+    return match[1]
+
+
 def names_ticket(pull, key):
-    text = (pull.get('title') or '') + '\n' + (pull.get('body') or '')
-    return bool(re.search(r'(?<![\w-])' + re.escape(key) + r'(?![\w-])', text, re.I) or
-                re.search(r'project-2060/' + key.split('-')[1] + r'(?![\w-])', text))
+    try:
+        index = ticket_index(key)
+    except ValueError:
+        return False
+    exact = r'(?<![\w-])' + re.escape(key) + r'(?![\w-])'
+    branch = r'(?<![a-z0-9])' + re.escape(key) + r'(?![a-z0-9])'
+    body = pull.get('body') or ''
+    field = r'^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?Ticket:(?:\*\*)?[ \t]*\[?' + exact
+    url = r'https://app\.hypertask\.ai/detail/project-2060/' + index + r'(?=$|[\s?#)\]>,.])'
+    return bool(re.search(exact, pull.get('title') or '', re.I) or
+                re.search(branch, pull.get('headRefName') or '', re.I) or
+                re.search(field, body, re.I | re.M) or re.search(url, body))
+
+
+def branch_pulls():
+    """Search does not index branch substrings. Scan branch metadata, sharding
+    dates before GitHub's 1,000-result search limit can hide a match.
+    """
+    windows = [(date(2008, 1, 1), datetime.now(timezone.utc).date())]
+    while windows:
+        start, end = windows.pop()
+        cursor = None
+        while True:
+            query = f'is:pr user:valentinyeo user:hypertask-ai created:{start}..{end}'
+            after = ',after:' + json.dumps(cursor) if cursor else ''
+            result = json.loads(run('gh', 'api', 'graphql', '-f', 'query=query{search(query:' + json.dumps(query) +
+                                    ',type:ISSUE,first:100' + after + '){issueCount pageInfo{hasNextPage endCursor} '
+                                    'nodes{... on PullRequest{url headRefName state number repository{nameWithOwner}}}}}'))
+            if result.get('errors'):
+                raise ValueError('GitHub branch search errors')
+            page = result['data']['search']
+            if page['issueCount'] > 1000:
+                if start == end:
+                    raise ValueError('GitHub branch search exceeds daily limit')
+                middle = start + (end - start) // 2
+                windows.extend([(start, middle), (middle + timedelta(days=1), end)])
+                break
+            for pull in page['nodes']:
+                if pull and pull['state'] != 'CLOSED' and pull['repository']['nameWithOwner'].split('/')[0] in ('valentinyeo', 'hypertask-ai'):
+                    yield pull
+            if not page['pageInfo']['hasNextPage']:
+                break
+            next_cursor = page['pageInfo']['endCursor']
+            if not next_cursor or next_cursor == cursor:
+                raise ValueError('invalid GitHub branch cursor')
+            cursor = next_cursor
 
 
 def discover(keys):
     """Batch independent searches; all repositories under both fleet owners."""
-    found = {}
+    found = {key: [] for key in keys}
+    valid = []
+    for key in keys:
+        try:
+            ticket_index(key)
+            valid.append(key)
+        except ValueError:
+            continue
+    keys = valid
     for offset in range(0, len(keys), 12):
         batch = keys[offset:offset + 12]
         fields = []
         for n, key in enumerate(batch):
-            query = f'is:pr user:valentinyeo user:hypertask-ai "{key}" OR "project-2060/{key.split("-")[1]}"'
+            query = f'is:pr user:valentinyeo user:hypertask-ai "{key}" OR "project-2060/{ticket_index(key)}"'
             fields.append(f'q{n}:search(query:{json.dumps(query)},type:ISSUE,first:100)' +
-                          '{pageInfo{hasNextPage} nodes{... on PullRequest{url title body state number repository{nameWithOwner}}}}')
+                          '{pageInfo{hasNextPage} nodes{... on PullRequest{url title body headRefName state number repository{nameWithOwner}}}}')
         result = json.loads(run('gh', 'api', 'graphql', '-f', 'query=query{' + ' '.join(fields) + '}'))
         if result.get('errors'):
             raise ValueError('GitHub search errors')
@@ -151,6 +211,13 @@ def discover(keys):
             if page['pageInfo']['hasNextPage']:
                 raise ValueError(f'{key}: GitHub search truncated')
             found[key] = [p for p in page['nodes'] if p and p.get('url') and p['repository']['nameWithOwner'].split('/')[0] in ('valentinyeo', 'hypertask-ai') and names_ticket(p, key) and p['state'] != 'CLOSED']
+    by_key = {key.upper(): key for key in keys}
+    if by_key:
+        for pull in branch_pulls():
+            for match in re.finditer(r'(?<![a-z0-9])SOFT-[1-9]\d*(?![a-z0-9])', pull['headRefName'], re.I):
+                key = by_key.get(match[0].upper())
+                if key and all(p['url'] != pull['url'] for p in found[key]):
+                    found[key].append(pull)
     return found
 
 
@@ -221,6 +288,7 @@ def read_pull(repo, number):
 
 
 def collect(task, pulls, now):
+    ticket_index(task['ticketNumber'])
     return Facts(task['section'], now - stamp(task['updatedAt']), live_lease(task['ticketNumber'], now), tuple(pull_facts(p) for p in pulls))
 
 
@@ -239,16 +307,54 @@ def reconcile(task, facts, apply=False):
     return column
 
 
+def apply_plan(plans, limit, pulls):
+    moves = [(task, facts) for task, facts in plans if target(facts)[0] != task['section']]
+    if len(moves) > limit:
+        print(f'REFUSE move cap: planned={len(moves)} limit={limit}; no writes', flush=True)
+        return 1
+    fresh_tasks = []
+    for old, facts in moves:
+        fresh = api('task', 'get', old['ticketNumber'])['tasks'][0]
+        if fresh['section'] != old['section'] or fresh['updatedAt'] != old['updatedAt']:
+            print(f'SKIP {old["ticketNumber"]} | ticket changed since preview', flush=True)
+            continue
+        if str(fresh['projectId']) != str(BOARD) or fresh['section'] not in MANAGED:
+            raise ValueError('ticket no longer eligible')
+        fresh_tasks.append((fresh, facts))
+    read_pull.cache_clear()
+    ready = []
+    for fresh, facts in fresh_tasks:
+        latest = collect(fresh, pulls[fresh['ticketNumber']], time.time())
+        if target(latest) != target(facts):
+            print(f'SKIP {fresh["ticketNumber"]} | facts changed since preview', flush=True)
+            continue
+        ready.append((fresh, latest))
+    for task, facts in ready:
+        current = api('task', 'get', task['ticketNumber'])['tasks'][0]
+        if current['section'] != task['section'] or current['updatedAt'] != task['updatedAt']:
+            print(f'SKIP {task["ticketNumber"]} | ticket changed during preflight', flush=True)
+            continue
+        final = collect(current, pulls[current['ticketNumber']], time.time())
+        if target(final) != target(facts):
+            print(f'SKIP {task["ticketNumber"]} | facts changed during preflight', flush=True)
+            continue
+        reconcile(current, final, apply=True)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--section', help='Restrict the board-2060 dry run to one column')
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--limit', type=int, default=5, help='Maximum moves per apply run; default 5')
     args = parser.parse_args()
     if args.self_test:
         return subprocess.call([sys.executable, '-m', 'unittest', 'tests.test_fleet_reconcile'], cwd=Path(__file__).resolve().parents[1])
     if args.apply and args.section:
         parser.error('--section is read-only')
+    if args.limit < 1:
+        parser.error('--limit must be positive')
     if args.apply and (not os.environ.get('SHIP_SESSION_NAME') or os.environ['SHIP_SESSION_NAME'] == 'Valentins Claude Code'):
         parser.error('--apply requires SHIP_SESSION_NAME for an agent login')
     os.environ['PATH'] = f'{Path.home()}/.local/bin:' + os.environ.get('PATH', '')
@@ -256,25 +362,30 @@ def main():
     lock = Path.home() / '.local/state/fleet/reconcile.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
     with lock.open('a') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('SKIP board=2060 | reconciliation already running', flush=True)
+            return 0
         tasks = tickets(args.section)
-        candidates = [t for t in tasks if t['section'] not in PROTECTED]
+        candidates = [t for t in tasks if t['section'] in MANAGED]
         pulls = discover([t['ticketNumber'] for t in candidates])
         now, errors = time.time(), 0
+        plans = []
         for task in tasks:
             try:
-                if task['section'] in PROTECTED or now - stamp(task['updatedAt']) < 7200:
+                if task['section'] not in MANAGED or now - stamp(task['updatedAt']) < 7200:
                     facts = Facts(task['section'], now - stamp(task['updatedAt']))
                 else:
-                    # Re-read immediately before planning/writing, including grace.
-                    if args.apply:
-                        task = api('task', 'get', task['ticketNumber'])['tasks'][0]
-                    facts = collect(task, pulls[task['ticketNumber']], time.time() if args.apply else now)
-                reconcile(task, facts, args.apply)
+                    facts = collect(task, pulls[task['ticketNumber']], now)
+                reconcile(task, facts)
+                plans.append((task, facts))
             except (ValueError, KeyError, TypeError, OSError, RuntimeError, subprocess.SubprocessError) as error:
                 errors += 1
                 print(f'UNKNOWN {task["ticketNumber"]} | {error}', flush=True)
-        print(f'{"APPLY" if args.apply else "DRY RUN"} board={BOARD} tickets={len(tasks)} unknown={errors}', flush=True)
+        print(f'{"PREVIEW" if args.apply else "DRY RUN"} board={BOARD} tickets={len(tasks)} unknown={errors}', flush=True)
+        if args.apply and not errors:
+            return apply_plan(plans, args.limit, pulls)
         return bool(errors)
 
 

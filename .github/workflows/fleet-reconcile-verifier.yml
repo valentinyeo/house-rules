@@ -1,0 +1,71 @@
+name: Fleet reconcile verifier
+on:
+  pull_request:
+    paths:
+      - fleet/reconcile
+      - fleet/lease
+      - tests/test_fleet_reconcile.py
+      - tests/fixtures/reconcile/**
+      - docs/fleet-reconcile.md
+      - .github/workflows/fleet-reconcile-verifier.yml
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  reconcile-verifier:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: change
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: cursor/plugins
+          ref: e1cc03121a0e71129a4fb730d7c5528a0a3e43c8
+          path: pstack-source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install -g @earendil-works/pi-coding-agent@1.5.0
+      - name: DeepSeek challenges the reconciliation fix
+        working-directory: change
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          set -o pipefail
+          test -n "$OPENCODE_API_KEY"
+          pi --provider opencode-go --model deepseek-v4.1-flash --thinking low \
+            --no-extensions --no-mcp --no-skills --no-context-files \
+            --no-prompt-templates --no-themes --tools read,bash \
+            --no-session --mode json -p \
+            'Read '"$GITHUB_WORKSPACE"'/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
+          Goal: board 2060 tickets stay in their true columns; Doing holds only live work. Independently verify PR 597 after the Codex fix round. Read ../pstack-source/pstack/skills/poteto-mode/SKILL.md and docs/worker-brief.md. Read the complete fleet/reconcile, its focused tests, docs/fleet-reconcile.md, and git diff origin/main. Do not edit tracked files or merge. Never run the live --apply command. No live board credentials exist on this runner. Run python3 fleet/reconcile --self-test and python3 -m unittest tests.test_fleet_reconcile -v. Exercise the real CLI with a fake hypertask and gh if useful. Break the two original failures: Not now and unknown columns must KEEP even with old timestamps, a fresh lease, and a red PR; pecunia#52 must not own SOFT-1915 and multiprompt-android#370 must not own SOFT-1974. Full live PR bodies are in tests/fixtures/reconcile. Ownership requires title key, branch key, anchored Ticket: field, or exact ticket URL. Prose never counts. Test branch-only discovery, pagination and search partitions, closed PRs, malformed keys, cap refusal before any writes, overlap success, stale lease, another repository, current-head FAIL, grace, and merged PASS remaining in AI Review for live proof. Confirm rules-lint runs the self-test. Inspect new comments under pstack no-comments. Scope checks to this change. Existing base failures are notes. End with one verdict line PASS, PASS+NOTES, or FAIL, followed by exact evidence and any user-visible bugs. A requested behavior that fails means FAIL. Keep prose sentences at most eight words. Commands and logs stay exact.' \
+            > verifier.jsonl
+      - run: git -C change diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deepseek-fleet-reconcile-trace
+          path: change/verifier.jsonl
+      - name: Post the independent verdict
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const events = fs.readFileSync('change/verifier.jsonl', 'utf8').split('\n').filter(Boolean).map(x => JSON.parse(x));
+            const messages = events.filter(x => x.type === 'message_end' && x.message?.role === 'assistant');
+            const last = messages.at(-1)?.message?.content || [];
+            const verdict = last.filter(x => x.type === 'text').map(x => x.text).join('\n');
+            const match = verdict.match(/^(PASS\+NOTES|PASS|FAIL)\s*$/m);
+            if (!match) throw new Error('DeepSeek returned no verdict');
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${verdict}\n\nDeepSeek Flash verifier. Head ${context.payload.pull_request.head.sha}.\nTrace: ${run}`;
+            await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});
+            if (match[1] === 'FAIL') core.setFailed('DeepSeek verdict FAIL');
