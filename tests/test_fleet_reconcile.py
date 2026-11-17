@@ -291,6 +291,28 @@ class Board15Test(unittest.TestCase):
     def target(self, column, age=8000, alive=False, pulls=()):
         return r.target(r.Facts(column, age, alive, pulls), board=r.BOARDS[15])[0]
 
+    def test_service_path_finds_agent_cli_before_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            executable = home / '.local/bin/hypertask'
+            executable.parent.mkdir(parents=True)
+            executable.write_text(f'#!{sys.executable}\n' + '''import json, os, sys
+assert os.environ['HT_TOKEN'] == 'service-agent-token'
+args = sys.argv[1:]
+if args == ['--json', 'context']:
+    print(json.dumps({'connected_agent': {'id': 'agent', 'displayName': 'HT Product Lead'}}))
+elif args[:3] == ['--json', 'task', 'list']:
+    print(json.dumps({'tasks': [], 'total': 0}))
+else:
+    raise SystemExit('unexpected command: ' + repr(args))
+''')
+            executable.chmod(0o755)
+            result = subprocess.run([sys.executable, str(ROOT / 'fleet/reconcile'), '--board', '15', '--apply'],
+                                    env={'HOME': directory, 'PATH': '/usr/bin:/bin', 'HT_TOKEN': 'service-agent-token'},
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('PREVIEW board=15 tickets=0 unknown=0', result.stdout)
+
     def test_live_worker_moves_to_in_progress(self):
         self.assertEqual(self.target('Backlog', alive=True), 'In Progress')
         self.assertEqual(self.target('AI Review', alive=True, pulls=(pull(),)), 'In Progress')
