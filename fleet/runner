@@ -354,7 +354,7 @@ launch() {
   fi
   [ "$eng" = opencode ] && [ -z "${OC_KEY:-}" ] && { echo "no OpenCode Go key loaded" >&2; return 1; }
   [ "$eng" = claude ] && { claude_token || echo "no Claude runner token from stack-key: this run uses the shared login" >&2; }
-  local attempt=0 rc=0 apid
+  local attempt=0 rc=0 apid lease_watch=""
   while :; do
     attempt=$((attempt+1))
     rm -f "$(stall_mark)"
@@ -386,11 +386,20 @@ launch() {
         printf '%s' "$brief" | timeout 3h "${base[@]}"
       ) & apid=$!
     fi
+    if ticket_key_ok "${pick_ticket:-}"; then
+      "$HERE/lease" "$pick_ticket" start --pid "$apid" || { kill_tree "$apid"; wait "$apid" 2>/dev/null; return 1; }
+      "$HERE/lease" "$pick_ticket" watch --pid "$apid" & lease_watch=$!
+    fi
     if [ -n "$beat" ]; then
       wait_reply "$apid" "$beat"; rc=$?
       wait "$apid" 2>/dev/null
     else
       wait "$apid"; rc=$?
+    fi
+    if [ -n "$lease_watch" ]; then
+      kill "$lease_watch" 2>/dev/null; wait "$lease_watch" 2>/dev/null
+      "$HERE/lease" "$pick_ticket" end --pid "$apid"
+      lease_watch=""
     fi
     [ -n "$sid" ] && rm -rf "$CLAUDE_PROJECTS"/*/"$sid".jsonl "$CLAUDE_PROJECTS"/*/"$sid" 2>/dev/null
     [ -f "$(stall_mark)" ] || break
