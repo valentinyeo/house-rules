@@ -1,0 +1,44 @@
+name: SOFT-2588 DeepSeek verification
+on:
+  push:
+    branches: [verify/soft-2588-house]
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: driver
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: d094e106bd669153d45fe0a56ba69d0ef8adcb9e
+          fetch-depth: 0
+          path: subject
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install pstack worker instructions
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/cursor/plugins /tmp/cp
+          git -C /tmp/cp sparse-checkout set pstack
+      - name: Independent DeepSeek drives the real scripts
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          SUBJECT_KIND: house
+          SUBJECT_SHA: d094e106bd669153d45fe0a56ba69d0ef8adcb9e
+          SUBJECT_PR: '595'
+        run: python3 driver/scripts/soft-2588-verifier.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soft-2588-deepseek-evidence
+          path: verification-output
+          retention-days: 14
