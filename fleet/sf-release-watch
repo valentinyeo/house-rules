@@ -52,7 +52,7 @@ APPS = {"multiprompt": "valentinyeo/multiprompt", "wazig": "valentinyeo/postbox"
 # checks, because the picker saw no PR for them. astro-rs holds the hypertask.ai site PRs of board 15; multiprompt holds a CI ticket's PR.
 EXTRA_REPOS = [r for r in (os.environ.get("SF_EXTRA_REPOS") or "valentinyeo/house-rules,valentinyeo/astro-rs,hypertask-ai/astro-rs").split(",") if r]
 EXTRA_BOARD = "2060"
-EXTRA_COLUMNS = ("Doing", "AI Review")
+EXTRA_COLUMNS = COLUMNS
 # (board, columns, repos read for that board). A board 15 ticket is matched only against the PRs of its site repos here; the main repo
 # PRs of board 15 are the picker's own read (one_run_hold).
 EXTRA_SWEEPS = [(EXTRA_BOARD, EXTRA_COLUMNS, EXTRA_REPOS + ["valentinyeo/multiprompt"]),
@@ -394,7 +394,7 @@ def self_test():
     from unittest.mock import patch
     from types import SimpleNamespace
     with patch("subprocess.run", return_value=SimpleNamespace(stdout=json.dumps({"tasks": [
-            {"ticketNumber": "HYCI-404", "labels": [{"name": "CI"}]}]}))):
+            {"ticketNumber": "HYCI-404", "section": "Doing", "labels": [{"name": "CI"}]}]}))):
         assert Hub(False).tickets(BOARD, ("Doing",)) == [("HYCI-404", 404, {"ci"}, "Doing")], "HYCI rows on the live board reach the PR watcher"
     t = lambda hh, mm: calendar.timegm((2026, 11, 13, hh, mm, 0))
     checks = lambda *s: [{"name": f"c{i}", "conclusion": c if c != "RUN" else "", "status": "IN_PROGRESS" if c == "RUN" else "COMPLETED"}
