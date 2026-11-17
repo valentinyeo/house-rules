@@ -517,6 +517,8 @@ def plan_fixes(board, flow, status):
     plan = []
     for r in (status or {}).get("rows", []):
         n = r["ticket"]
+        if board == 2060 and r["verdict"] == "MERGED-NOT-MOVED":
+            continue  # pr-merge and sf-release-watch require the current-head verifier verdict
         if r["verdict"] == "MERGED-NOT-MOVED" and board == 15:
             plan.append((n, [["vcc", "task", "move", n, "QA"]],
                          f"{NOTE} moved to QA. Its PR is merged: {r['pr']}. Runner proves it live, then Done."))
@@ -621,7 +623,7 @@ def queue_counts(rows):
 # Send back abandoned work (Valentin 2026-11-07: "what do we do with abandoned tickets? we have 5 runners").
 # Closest to live stays for the orphan lane in fleet/pick: QA (merged, the live check) and a green, mergeable PR.
 # The rest of the building columns goes back to the queue, unassigned, and re-enters it by priority.
-BUILD_COLUMNS = {15: ("In Progress", "AI Review"), 2060: ("Doing", "AI Review")}
+BUILD_COLUMNS = {15: ("In Progress", "AI Review"), 2060: ("Building", "Doing", "Checks", "Verifier", "AI Review")}
 SENDBACK_IDLE_H = 48
 WORKING_H = 3  # a live runner's ticket that moved within this many hours is being worked
 SENDBACK_SKIP_LABELS = {"incident", "design-pass"}
@@ -888,7 +890,7 @@ def run_fix(cmd):
 # Flag: Only Me + QA at 23:06:45; the sendback, planned from a read taken while it was In Progress, moved it back to QA at
 # 23:07:09 and the picker started a third run. The move to QA only fits a ticket that still sits in a column nobody finishes
 # from, and that nobody touched in the last quarter hour.
-MERGED_MOVE_FROM = re.compile(r"^(?:In Progress|AI Review|Agent Blocked|Valentin Review)\b", re.I)
+MERGED_MOVE_FROM = re.compile(r"^(?:In Progress|Building|Doing|Checks|Verifier|AI Review|Agent Blocked|Valentin Review)\b", re.I)
 MERGED_MOVE_QUIET_MIN = 15
 
 

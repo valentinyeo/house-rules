@@ -39,7 +39,7 @@ from ticket_owner import store
 HOME = Path.home()
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
 RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
-BUILDING = {"15": ("In Progress", "AI Review", "QA"), "2060": ("Doing", "AI Review")}
+BUILDING = {"15": ("In Progress", "AI Review", "QA"), "2060": ("Building", "Doing", "Checks", "Verifier", "AI Review")}
 HOME_COLUMN = {"2060": "Todo"}
 TICKET = re.compile(r"^(HTPR|HYFA|IGSH|SOFT|HYCI)-[0-9]+$")
 RUNNERISH = re.compile(r"^(?:runner \d+|ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
@@ -211,8 +211,8 @@ def park_hand_back(key, why, t=None):
     if not record or mine[0].lower() != f"runner {record['runner']}":
         raise RuntimeError(f"{key}: only its starting runner may schedule its next run")
     section = t.get("section")
-    if section in ("In Progress", "Doing"):
-        section = "AI Review" if t.get("pullRequests") else home_section(t.get("projectId"), [], t.get("title"))
+    if section in ("In Progress", "Building", "Doing"):
+        section = ("Checks" if str(t.get("projectId")) == "2060" else "AI Review") if t.get("pullRequests") else home_section(t.get("projectId"), [], t.get("title"))
         vcc("task", "move", key, "--section", section)
     free_claim(key)
     note(key, f"Paused by fleet/park: {mine[0]} keeps this ticket until Done. Left to do: {why.strip()} "
@@ -323,8 +323,8 @@ def park_too_hard(key, why, t=None, dry=False, labels=None):
         return park_lead(key, f"TOO HARD at extra-hard, no stronger brain exists: {why.strip()}", t)
     held = holders(t)
     section = t.get("section")
-    if section in ("In Progress", "Doing"):
-        section = "AI Review" if t.get("pullRequests") else home_section(t.get("projectId"), names, t.get("title"))
+    if section in ("In Progress", "Building", "Doing"):
+        section = ("Checks" if str(t.get("projectId")) == "2060" else "AI Review") if t.get("pullRequests") else home_section(t.get("projectId"), names, t.get("title"))
     plan = (f"{key}: {', '.join(old) or 'no brain tag'} -> {new}; unassign {', '.join(held) or 'nobody'}; "
             f"owner pin dropped; column {section}")
     if dry:

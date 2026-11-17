@@ -1,0 +1,25 @@
+--- a/.local/bin/mp-pick.bak-mb-rename
++++ b/.local/bin/mp-pick.bak-mb-rename
+@@ -16,11 +16,11 @@
+ def tasks(section):
+     out, offset = [], 0
+     while True:
+-        r = subprocess.run([HT, 'task', 'list', '--project', '2060', '--section', section,
++        r = subprocess.run([HT, 'task', 'list', '--project', '2060',
+                             '--limit', '100', '--offset', str(offset), '--json'],
+                            capture_output=True, text=True, check=True).stdout
+         page = json.loads(r).get('tasks', [])
+-        out += page
++        out += [t for t in page if t.get('section') == section]
+         if len(page) < 100:
+             return out
+         offset += 100
+@@ -94,7 +94,7 @@
+         print(f"{'CLAIMED ' + sys.argv[3] if sys.argv[2] == '--claim' else 'RELEASED'} for runner {me}")
+         return
+     taken = {v.get('ticket') for k, v in owners.items() if k != me}
+-    every = [t for s in ('Todo', 'Doing', 'AI Review') for t in tasks(s)]
++    every = [t for s in ('Todo', 'Building', 'Doing', 'Checks', 'Verifier', 'AI Review') for t in tasks(s)]
+     # House rule 2026-11-05: orphans first (unassigned Doing or AI Review, usually with an open PR), then Todo.
+     pool = [t for t in every if eligible(t, taken) and (t['section'] == 'Todo' or not t.get('assignees'))]
+     pool.sort(key=lambda t: (0 if t['section'] != 'Todo' else 1, priority(t)[0], t['createdAt']))

@@ -33,6 +33,8 @@ when no other PR of the repo had its branch updated in the last UPDATE_WINDOW_S.
 
 Log: STATE/pr-merge/merges.jsonl, one row per merge, update, rerun and refusal. Per-PR memory: STATE/pr-merge/pr/<repo>-<n>.json.
 """
+from workflow_columns import INFLIGHT, resolve, stage, passed
+
 import calendar
 import fcntl
 import json
@@ -64,7 +66,7 @@ REPOS = {
     "valentinyeo/house-rules": ("sf", "main"),
 }
 DEPLOY_REPOS = {"hypertask-ai/hypertask"}
-BUILDING = {"in progress", "ai review", "doing", "qa"}
+BUILDING = {"in progress", "building", "doing", "checks", "verifier", "ai review", "qa"}
 HOLD_LABELS = {"hold", "valentin-review", "do-not-merge"}
 TICKET = re.compile(r"^\[?([A-Z][A-Z0-9]*-\d+)\b")
 RUN_URL = re.compile(r"/actions/runs/(\d+)")
@@ -335,6 +337,42 @@ def enroll_deploy(repo, key, n, sha):
     p.write_text(json.dumps({"repo": repo, "pr": n, "sha": sha, "at": time.time()}))
 
 
+def sync_column(repo, key, pr, env, dry=False, comments=None):
+    if not key.startswith(("SOFT-", "IGSH-")):
+        return
+    rc, out, err = sh([HT, "--json", "task", "get", key], timeout=90)
+    if rc:
+        raise RuntimeError(f"{key}: ticket unreadable")
+    task = json.loads(out)["tasks"][0]
+    if str(task.get("projectId")) != "2060" or task.get("status", "Normal") != "Normal":
+        return
+    if task.get("section") not in INFLIGHT or task.get("waitingOnUserId") or task.get("blockerCommentId"):
+        return
+    target = stage(pr, comments or [])
+    if target is None:
+        return
+    rc, out, err = sh([HT, "--json", "section", "list", "--project", "2060"], timeout=90)
+    if rc:
+        raise RuntimeError("board 2060 sections unreadable")
+    target = resolve(target, json.loads(out)["sections"])
+    if target == task.get("section"):
+        return
+    print(f"pr-merge: {key} {task['section']} -> {target}" + (" (dry run)" if dry else ""))
+    if not dry:
+        rc, out, err = sh([VCC, "task", "move", key, "--section", target], timeout=90)
+        if rc:
+            raise RuntimeError(f"{key}: column move failed: {(err or out)[:120]}")
+        cache = STATE / "tickets" / f"{key}.json"
+        cache.unlink(missing_ok=True)
+
+
+def verifier_comments(repo, n, env):
+    rc, out, err = sh([GH, "api", "--paginate", "--slurp", f"repos/{repo}/issues/{n}/comments"], env)
+    if rc:
+        raise RuntimeError(f"PR {n}: verifier comments unreadable")
+    return [c for page in json.loads(out) for c in page]
+
+
 # ---------------------------------------------------------------- one PR
 def one(repo, n, dry=False, now=None, hooks=None):
     """Look after one PR. Returns the action taken as a string. hooks: the self-test swaps sh, ticket_of and the PR reader."""
@@ -363,6 +401,15 @@ def one(repo, n, dry=False, now=None, hooks=None):
         st = load_pr_state(repo, n)
         action, reason, detail = decide(repo, pr, now, st, FREEZE.exists())
         key = ticket_key(pr) or ""
+        comments = []
+        factory = key.startswith(("SOFT-", "IGSH-"))
+        if factory and not h:
+            if action == "merge" or pr.get("state") == "MERGED":
+                comments = verifier_comments(repo, n, env)
+            sync_column(repo, key, pr, env, dry, comments)
+            if action == "merge" and not passed(pr, comments):
+                print(f"pr-merge: PR {n} wait: no current-head PASS verifier verdict")
+                return "wait"
         if action in ("ignore", "wait"):
             print(f"pr-merge: PR {n} {action}: {reason}")
             return action
@@ -407,10 +454,12 @@ def one(repo, n, dry=False, now=None, hooks=None):
             note_once(repo, pr, st, "refused:" + re.sub(r"\W+", "", err)[:24], f"the merge was refused: {err[:120]}", dry)
             save_pr_state(repo, n, st)
             return "refused"
-        sha, by, _ = ("", "", "") if "merge" in h else merge_commit(repo, n, env)
+        sha, by, merged_state = ("", "", "") if "merge" in h else merge_commit(repo, n, env)
         record({"repo": repo, "pr": n, "ticket": key, "merged": True, "merged_by": by, "sha": sha[:12]})
         print(f"pr-merge: merged PR {n} ({key}) {repo} by {by or '?'}")
         if "merge" not in h:
+            if factory and merged_state == "MERGED":
+                sync_column(repo, key, dict(pr, state=merged_state), env, dry, comments)
             enroll_deploy(repo, key, n, sha)
             note(key, f"pr-merge: PR {n} https://github.com/{repo}/pull/{n} merged by the script. Its owner takes the live check next"
                       + (" once the production deploy ends." if repo in DEPLOY_REPOS else "."))
@@ -531,7 +580,7 @@ def sweep(dry, only_repo=None, spawn=None, lister=None, now=None):
             continue
         for pr in prs:
             action, reason, _ = decide(repo, pr, now, load_pr_state(repo, pr["number"]), frozen)
-            if action in ("ignore", "wait"):
+            if action in ("ignore", "wait") and not (action == "wait" and (ticket_key(pr) or "").startswith(("SOFT-", "IGSH-"))):
                 if ticket_key(pr):
                     print(f"pr-merge: {repo}#{pr['number']} {action}: {reason}")
                 continue

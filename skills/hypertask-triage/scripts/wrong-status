@@ -31,7 +31,7 @@ from pathlib import Path
 BOARDS = {
     15: (["In Progress", "AI Review", "Agent Blocked (Infra)", "Valentin Review"], "QA"),
     11514: (["In Progress", "AI Review", "Agent Blocked", "Valentin Review"], "Done"),
-    2060: (["Doing", "AI Review", "Valentin Review"], "Done"),
+    2060: (["Building", "Doing", "Checks", "Verifier", "AI Review", "Valentin Review"], "Done"),
     8783: (["Doing"], "Done"),
 }
 PR = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
@@ -48,11 +48,12 @@ def ht(*args):
 def column(board, name):
     out, offset = [], 0
     while True:
-        page = ht("task", "list", "--project", str(board), "--section", name, "--status", "Normal",
+        selector = () if board == 2060 else ("--section", name)
+        page = ht("task", "list", "--project", str(board), *selector, "--status", "Normal",
                   "--limit", "100", "--offset", str(offset)).get("tasks", [])
         out += page
         if len(page) < 100:
-            return out
+            return [t for t in out if t.get("section") == name] if board == 2060 else out
         offset += 100
 
 
@@ -177,7 +178,7 @@ def verdict(col, prs, states, waiting_on_him=False):
     if col == "Valentin Review" and waiting_on_him:
         return None
     if not prs:
-        return "NO-PR" if col == "AI Review" else None
+        return "NO-PR" if col in ("Checks", "Verifier", "AI Review") else None
     if any(states.get(p, ("",))[0] == "OPEN" for p in prs):
         return None
     newest, live = states.get(prs[-1], ("UNKNOWN", False))

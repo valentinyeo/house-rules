@@ -23,7 +23,7 @@ from pathlib import Path
 HT_FLAG = Path(os.environ.get("HT_FLAG", Path.home() / "projects/hypertask/.claude/skills/ship/scripts/ht-flag"))
 VCC = str(Path.home() / ".local/bin/vcc")
 BOARD = "15"
-OPEN = ["Backlog", "UX needed", "UX Sign-off", "In Progress", "Agent Blocked (Infra)", "Valentin Review", "AI Review",
+OPEN = ["Backlog", "UX needed", "UX Sign-off", "In Progress", "Agent Blocked (Infra)", "Valentin Review", "Verifier", "AI Review", "Checks", "Building",
         "QA", "Flag: Only Me + QA", "Flag: Everyone", "Flag: Off", "No Flag"]
 NEEDS_FLAG = {"QA", "Flag: Only Me + QA", "Flag: Everyone", "Flag: Off"}
 MODE = {"OFF": "Off", "OWNER_ONLY": "Only Me", "OWNER_AND_QA": "Owner + QA", "EVERYONE": "Everyone"}
