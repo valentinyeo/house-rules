@@ -59,7 +59,7 @@ Focused regression after fixes:
 
 ```text
 python3 -m unittest tests.test_workflow_columns tests.test_ticket_ownership -v
-Ran 16 tests
+Ran 18 tests
 OK
 pr-merge: SOFT-2446 Doing -> AI Review
 pr-merge: SOFT-2446 Building -> Verifier
@@ -86,3 +86,12 @@ Historical rule notes moved from edited lines:
 (2026-11-02, why: IGSH-1353 sat there with "Decision: None")
 (2026-11-02, why: "fix the origin of tickets not being moved")
 ```
+
+Additional break attempts failed before correction:
+
+```text
+Missing checks plus PASS: merged != wait
+Successful rerun: Checks != Verifier
+```
+
+Both now pass the focused regression.
