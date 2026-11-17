@@ -976,7 +976,7 @@ TM
       if ! known_engine "$pick_engine" || { [ "$pick_engine" = opencode ] && ! opencode_key; }; then
         echo "$(date -u +%FT%TZ) gate: engine $pick_engine cannot start (unknown engine or no OpenCode Go key)" >> "$rlog"; sleep 900; continue
       fi
-      brief=$(run_brief "$n" "$pick")
+      brief=$(run_brief "$n" "$pick") || exit 1
       echo "$(date -u +%FT%TZ) start" >> "$rlog"
       clear; tmux clear-history -t "$TMUX_PANE"
       : > "$runlog"
