@@ -1,0 +1,78 @@
+name: Verification check verifier
+on:
+  pull_request:
+    paths:
+      - skills/verification-check/**
+      - tests/test_verification_check.py
+      - .github/workflows/verification-check-verifier.yml
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: verification-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  pstack-verifier:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: change
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: cursor/plugins
+          ref: e1cc03121a0e71129a4fb730d7c5528a0a3e43c8
+          path: pstack-source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install -g @earendil-works/pi-coding-agent@1.5.0
+      - name: Independent DeepSeek Flash verification
+        working-directory: change
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          set -o pipefail
+          test -n "$OPENCODE_API_KEY"
+          pi --provider opencode-go --model deepseek-v4.1-flash --thinking low \
+            --no-extensions --no-mcp --no-skills --no-context-files \
+            --no-prompt-templates --no-themes --tools read,bash \
+            --no-session --mode json -p \
+            'Read '"$GITHUB_WORKSPACE"'/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
+          Goal: /verification-check audits a repo against pstack end to end, stays read only, and detects pstack drift. Verify this PR independently against the base checkout at ../base. Author family is OpenAI; you are DeepSeek.
+          Shared worker rules: read docs/worker-brief.md. Hypertask faults go through hypertask feedback; shared house-rules or script faults go to board 2060 with label Poteto. Report faults before workarounds. This isolated verifier has no board credentials: record any reporting blocker in the verdict, never borrow a personal login.
+          Read skills/verification-check/SKILL.md, facts.sh, and tests/test_verification_check.py. The required 22-item audit covers an independent base/head PASS/PASS+NOTES/FAIL verdict as the sole required check; touched-feature journeys plus repro and reused base results; scheduled default-branch heavy UI, cheap PR checks, no full-suite PR runs; last three PR heads under 20 jobs via paginated runs/jobs; cancellation; emergency revert first. It must find the highest installed pstack across plugin caches, require a recorded pstack version in each verify skill, and diff all eight named sources when newer. Missing skill and drift warnings must precede the normal repo count and icons. No audited repo writes or fetches.
+          Run only this feature. Run python3 -m unittest tests.test_verification_check -v against head, then FACTS_SCRIPT="$GITHUB_WORKSPACE/base/skills/verification-check/facts.sh" python3 -m unittest tests.test_verification_check -v against base. Base failures reproduce missing functionality; distinguish them from new regressions. Challenge unknown API results, version ordering, missing version files, queued jobs, and no-skill behavior. All fixtures must use temporary repos, never live repos. Inspect the reply instructions against these source facts. Run bash -n skills/verification-check/facts.sh. Do not run the full suite. Do not edit tracked files, install runners, use real services, or change branch protection. Finish with one standalone verdict line PASS, PASS+NOTES, or FAIL, followed by commands, observed results, and concrete findings. A FAIL needs an executable reproduction.' \
+            > verifier.jsonl
+      - run: git -C change diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification-check-verifier-trace
+          path: change/verifier.jsonl
+      - name: Post the independent verdict
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const events = fs.readFileSync('change/verifier.jsonl', 'utf8').split('\n').filter(Boolean).map(x => JSON.parse(x));
+            const messages = events.filter(x => x.type === 'message_end' && x.message?.role === 'assistant');
+            const verdict = (messages.at(-1)?.message?.content || []).filter(x => x.type === 'text').map(x => x.text).join('\n');
+            const match = verdict.match(/^(PASS\+NOTES|PASS|FAIL)\s*$/m);
+            if (!match) throw new Error('DeepSeek returned no verdict');
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number,
+              body: `pstack-verifier: ${match[1]}\n\n${verdict}\n\nDeepSeek Flash. Head ${context.payload.pull_request.head.sha}.\nTrace: ${run}`});
+            if (match[1] === 'FAIL') core.setFailed('DeepSeek verdict FAIL');
