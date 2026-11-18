@@ -41,14 +41,19 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
-      - name: DeepSeek challenges the fleet tool change
+      - name: Pick verifier model
+        working-directory: change
+        run: |
+          model=$(python3 scripts/pick-verifier-model)
+          echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
+      - name: Verifier challenges the fleet tool change
         working-directory: change
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
           set -o pipefail
           test -n "$OPENCODE_API_KEY"
-          pi --provider opencode-go --model deepseek-v4.1-flash --thinking low \
+          pi --provider opencode-go --model "$VERIFIER_MODEL" --thinking low \
             --no-extensions --no-mcp --no-skills --no-context-files \
             --no-prompt-templates --no-themes --tools read,bash \
             --no-session --mode json -p \
@@ -79,8 +84,8 @@ jobs:
             const last = messages.at(-1)?.message?.content || [];
             const verdict = last.filter(x => x.type === 'text').map(x => x.text).join('\n');
             const match = verdict.match(/^(PASS\+NOTES|PASS|FAIL)\s*$/m);
-            if (!match) throw new Error('DeepSeek returned no verdict');
+            if (!match) throw new Error('Verifier returned no verdict');
             const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = `${verdict}\n\nDeepSeek Flash verifier. Head ${context.payload.pull_request.head.sha}.\nTrace: ${run}`;
+            const body = `${verdict}\n\nVerifier model: ${process.env.VERIFIER_MODEL}. Head ${context.payload.pull_request.head.sha}.\nTrace: ${run}`;
             await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});
-            if (match[1] === 'FAIL') core.setFailed('DeepSeek verdict FAIL');
+            if (match[1] === 'FAIL') core.setFailed('Verifier verdict FAIL');
