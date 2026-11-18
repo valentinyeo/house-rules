@@ -17,7 +17,7 @@ permissions:
   actions: read
   id-token: write
 concurrency:
-  group: verify-gate-${{ github.event.pull_request.number || github.ref }}
+  group: verify-gate-${{ inputs.pr-number }}-${{ inputs.mode }}
   cancel-in-progress: true
 jobs:
   collect:
