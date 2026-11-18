@@ -31,6 +31,11 @@ jobs:
           persist-credentials: false
       - name: Install the vstack skill the shim execs
         run: git clone --depth 1 https://github.com/valentinyeo/vstack "$HOME/.local/share/vstack"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: picker-base
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -49,7 +54,7 @@ jobs:
         run: |
           set -o pipefail
           test -n "$OPENCODE_API_KEY"
-          model=$(python3 scripts/pick-verifier-model) && echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV" && pi --provider opencode-go --model "$model" --thinking low \
+          model=$(python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/pick-verifier-model") && echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV" && pi --provider opencode-go --model "$model" --thinking low \
             --no-extensions --no-mcp --no-skills --no-context-files \
             --no-prompt-templates --no-themes --tools read,bash \
             --no-session --mode json -p \
