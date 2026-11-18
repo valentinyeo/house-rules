@@ -2,7 +2,7 @@
 """One ticket picker for every runner (YPER4-1371).
 
     fleet/pick <N> [--dry-run] [--json]    pick (and claim) one ticket for Runner N
-    fleet/pick --check-access              does every Runner N login sit on boards 15, 2060, 11514?
+    fleet/pick --check-access              does every Runner N login sit on boards 15 and 2060?
     fleet/pick --wip                       read only: wip: N of M, the units counted and the ones left out
     fleet/pick --replay-waits [DAYS]       offline: runs the wait gate would have held, from the run ledger
 
@@ -26,15 +26,15 @@ ci-pick, infra-pick, mp-pick and mb-pick (verbatim copies live in fleet/legacy/)
      run, not already holding a unit, able to do its brain, and a checks slot free when the ticket is checks work.
      A full checks lane, or a brain only a busy runner can do, does not fill the cap (HYCI-232). Then only the PR queue
      and new-work tickets with an open PR remain.
-      Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI & Infra (11514)
-     tickets that are Urgent or that an open ticket is BlockedBy still go out, to runners that can join 11514 (LANE_CAP applies).
-  Kept slot (HYCI-186, HYCI-386): while no other runner is on a Fleet CI & Infra (11514) ticket, this runner takes
+      Logged as "wip: N of M, new work closed". The cap never holds back the release pipeline: at the cap, Fleet CI & Infra
+     tickets that are Urgent or that an open ticket is BlockedBy still go out, to runners that can join board 2060 (LANE_CAP applies).
+  Kept slot (HYCI-186, HYCI-386): while no other runner is on a Fleet CI & Infra ticket, this runner takes
      one blocking ticket before its own app ticket, before orphans and before the PR queue. Blocking means an open app
      ticket (board 15 or 2060) waits on it, or it is an incident. A plain infra ticket does not. The WIP cap and LANE_CAP
      do not hold that one ticket. The stderr line starts with "kept slot:". Urgent app work runs when no blocker is open.
   c. Urgent new work on any board, then the PR queue (pr-drain-pick rules)
   d. CI or infra work that is Urgent or blocks an app ticket, while fewer than LANE_CAP runners hold CI or infra work
-  e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060, then 11514
+  e. new work by priority (Urgent, High, Medium, Low) across boards; same priority: board 15 (ai-feedback included), then 2060
   f. the rest of the CI or infra lane, same cap
 One runner holds one ticket until it is live. brain-extra-hard runs on the codex engine (Sol high) or the claude engine (Opus high); every other engine skips it.
 Second ticket (HYCI-431, 14 Nov): when every ticket a runner owns in a building column has waited 30+ minutes on something outside the
@@ -149,8 +149,8 @@ SECOND = [None]  # this pick: {"keys": the runner's waiting tickets, "wait": sec
 CLAIM_TTL = 3 * 3600 + 600  # a run may last 3h (timeout in fleet/runner)
 FRESH_CLAIM = 120  # seconds: a claim younger than this has not started its run yet, so the log cannot show it
 INCIDENT_LABEL = "incident"
-# 11514: the release pipeline is broken (production deploys or production CI fail), so no fix can ship
-INCIDENT_BOARDS = ("15", "11514")
+# CI and infra incidents: the release pipeline is broken (production deploys or production CI fail), so no fix can ship
+INCIDENT_BOARDS = ("15", "2060")
 INCIDENT_DONE = {"done", "archive", "archived", "flag: everyone", "flag: only me + qa"}
 CACHE_TTL = 120
 BLOCK_LOOKUPS = 20
@@ -182,10 +182,9 @@ ALLOCATION_MAX_AGE = 3600  # the pacer writes every 15 minutes; an hour without 
 BOARDS = {
     "15": (("Backlog", "Bugs", "Improvements", "Features"), ("In Progress", "AI Review", "QA")),
     "2060": (("Todo",), ("Doing", "AI Review")),
-    "11514": (("Backlog",), ("In Progress", "AI Review")),
 }
 BOARD_ORDER = {b: i for i, b in enumerate(BOARDS)}
-PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYCI": "11514"}
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYCI": "2060"}
 RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
 CI_LABELS = {"ci", "hypertask ci"}
 BASE_SKIP = set()
@@ -792,11 +791,11 @@ def free_for(t, me):
 
 
 def is_ci(t):
-    return bool(set(t["labels"]) & CI_LABELS) or t["board"] == "11514"
+    return bool(set(t["labels"]) & CI_LABELS) or t["key"].startswith("HYCI-")
 
 
 def lane(t):
-    if t["board"] == "11514" and not set(t["labels"]) & CI_LABELS:
+    if t["key"].startswith("HYCI-") and not set(t["labels"]) & CI_LABELS:
         return "infra"
     if is_ci(t):
         return "ci"
@@ -837,7 +836,7 @@ def sf_repo(t):
 
 
 def repo_for(t):
-    return sf_repo(t) if t["board"] == "2060" else str(HYPERTASK_REPO)
+    return sf_repo(t) if t["board"] == "2060" and not t["key"].startswith("HYCI-") else str(HYPERTASK_REPO)
 
 
 def url(t):
@@ -1206,14 +1205,14 @@ def eligible_reason(t):
     nr = ready_reason(t)
     if nr:
         return nr
-    if t["board"] == "2060":
+    if t["board"] == "2060" and not in_lane(t):
         return sf_reason(t)
     if t["board"] == "15" and not is_ci(t):
         if labels & SKIP_APP:
             return "label skip: " + ", ".join(sorted(labels & SKIP_APP))
         agents = [h[0] for h in t["holders"] if h[1]]
         return "held by agent " + ", ".join(agents) if agents else None
-    if t["board"] == "11514":
+    if in_lane(t):
         if labels & SKIP_INFRA:
             return "label skip: " + ", ".join(sorted(labels & SKIP_INFRA))
         agents = [h[0] for h in t["holders"] if h[1]]
@@ -1227,7 +1226,7 @@ def eligible_new(t):
 
 
 def orphan_ok(t):
-    if t["board"] == "2060":
+    if t["board"] == "2060" and not in_lane(t):
         return sf_eligible(t)
     return is_ci(t) or t["board"] != "15" or not set(t["labels"]) & SKIP_APP
 
@@ -2355,7 +2354,7 @@ def blocks_open_app(t):
         CHECKED[0] += 1
         rel = relations(t["key"])
     for k in rel[1]:
-        if PREFIX_BOARD.get((k or "").split("-")[0]) not in ("15", "2060"):
+        if (k or "").split("-")[0] not in ("HTPR", "HYFA", "IGSH", "SOFT"):
             continue
         if is_open(k):
             return True
@@ -2406,10 +2405,10 @@ def other_on_blocker(n):
 
 
 def slot_candidates(n, me, skip):
-    """(candidates, log line or None). Candidates are Fleet CI & Infra (11514) tickets this runner may take."""
+    """(candidates, log line or None). Candidates are Fleet CI & Infra tickets this runner may take."""
     cands, missed, waiting = [], False, False
     for t in SNAP["tickets"]:
-        if t["board"] != "11514":
+        if not in_lane(t):
             continue
         if t["waiting"] or "design-pass" in t["labels"] or skipped(t) or t["key"] in skip or repark_suppressed(t):
             continue
@@ -2434,7 +2433,7 @@ def slot_candidates(n, me, skip):
         elif building_col and (me in names(t) or (orphan(t) and orphan_ok(t))):
             cands.append(t)
     if cands:
-        cands.sort(key=lambda t: (t["prio"] != "Urgent", not blocks_known(t), rank(t), 0 if t["board"] == "11514" else 1, t["created"]))
+        cands.sort(key=lambda t: (t["prio"] != "Urgent", not blocks_known(t), rank(t), 0 if in_lane(t) else 1, t["created"]))
         return cands, None
     if waiting:
         return [], "kept slot: blocker open; its runner is not on it"
@@ -2460,14 +2459,14 @@ def take_kept_slot(n, me, cands, dry):
 def ci_blockers(cands):
     """Fleet CI & Infra tickets the WIP cap must not hold: Urgent ones, then ones an open ticket waits on (one relations read per
     ticket, so only the top BLOCK_LOOKUPS non-Urgent are checked). They unblock the pipeline the cap is waiting on."""
-    ci = [t for t in cands if t["board"] == "11514"]
+    ci = [t for t in cands if in_lane(t)]
     urgent = [t for t in ci if t["prio"] == "Urgent"]
     rest = [t for t in ci if t["prio"] != "Urgent"][:BLOCK_LOOKUPS]
     return sorted(urgent + [t for t in rest if blocks_open(t)], key=lambda t: (t["prio"] != "Urgent", rank(t), t["created"]))
 
 
 def blocks_app(t):
-    return any(PREFIX_BOARD.get(k.split("-")[0]) in ("15", "2060") for k in relations(t["key"])[1])
+    return any(k.split("-")[0] in ("HTPR", "HYFA", "IGSH", "SOFT") for k in relations(t["key"])[1])
 
 
 def park_ledger():
@@ -3365,7 +3364,7 @@ def render(n, t, source):
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + (HERE / "briefs" / "park.txt").read_text().rstrip()
         label, model, effort = ("brain-light", *paced_models().get("park", ENGINES[ENGINE]["park"]))
     if source == "incident":
-        brief_file = HERE / "briefs" / ("release-stop.txt" if t["board"] == "11514" else "incident.txt")
+        brief_file = HERE / "briefs" / ("release-stop.txt" if in_lane(t) else "incident.txt")
         brief = brief_file.read_text().replace("$n", str(n)) + "\n" + brief
         label, model, effort = ("brain-hard", *INCIDENT_MODEL[INCIDENT_ENGINE])
     if source == "cross-qa":
@@ -3699,12 +3698,12 @@ def wait_gate_self_test():
         fresh([wait("HTPR-1", 5)], [tk("HTPR-1")], [pr(1, "HTPR-1", merge="CONFLICTING")])
         assert held() == set(), "a conflicting PR too"
         # BlockedBy
-        blocker = tk("HYCI-9", section="Backlog")
+        blocker = tk("HYCI-9", section="Todo")
         fresh([wait("HTPR-2", 5, "RUNNER IDLE waits on HYCI-9")], [tk("HTPR-2"), blocker], rel={"HTPR-2": [["HYCI-9"], []]})
         assert held() == {"HTPR-2"}, "a ticket whose blocker has not moved is held"
         blocker["section"] = "Done"
         assert held() == set(), "the blocker moving lifts the hold"
-        fresh([wait("HTPR-2", 5, "RUNNER IDLE waits on HYCI-9")], [tk("HTPR-2"), tk("HYCI-9", section="Backlog")], rel={"HTPR-2": [["HYCI-9"], []]})
+        fresh([wait("HTPR-2", 5, "RUNNER IDLE waits on HYCI-9")], [tk("HTPR-2"), tk("HYCI-9", section="Todo")], rel={"HTPR-2": [["HYCI-9"], []]})
         held()
         SNAP["tickets"] = [tk("HTPR-2")]
         assert held() == set(), "the blocker leaving the board lifts the hold"
@@ -4163,6 +4162,12 @@ def self_test():
     SECOND_OFF = STATE / "no-second-ticket.off"  # likewise the live kill switch of the second-ticket lane
     MEMBERS.update({b: None for b in BOARDS})  # membership unknown: the offline test offers every board
     t = {"key": "HTPR-1", "idx": 1, "board": "15", "section": "In Progress", "title": "x", "labels": [], "prio": "Medium"}
+    hyci = {**t, "key": "HYCI-1", "board": PREFIX_BOARD["HYCI"], "section": "Doing"}
+    sf = {**hyci, "key": "SOFT-1"}
+    assert lane(hyci) == "infra" and lane(sf) == "sf", "a shared board keeps separate lanes"
+    assert lane({**sf, "labels": ["ci"]}) == "ci", "CI labels retain the CI lane"
+    assert repo_for(hyci) == str(HYPERTASK_REPO), "a live board does not change the default HYCI repo"
+    assert BOARDS[hyci["board"]] == (("Todo",), ("Doing", "AI Review"))
     SKIP[0] = Skip(set(), set())
     assert parkable(t), "a resting building ticket with no job yet is due one"
     record_park(3, "HTPR-1")
@@ -4267,11 +4272,11 @@ def self_test():
     saved_runners = RUNNERS
     globals()["RUNNERS"] = 5
     names = {"runner 1", "runner 2", "runner 4"}
-    check_all_members("11514", names)
+    check_all_members("2060", names)
     rows = [json.loads(x) for x in (WATCH / "incidents.jsonl").read_text().splitlines()]
-    assert {(r["runner"], r["board"]) for r in rows} == {("runner 3", "11514"), ("runner 5", "11514")}, \
+    assert {(r["runner"], r["board"]) for r in rows} == {("runner 3", "2060"), ("runner 5", "2060")}, \
         "an hourly read reports each missing runner once"
-    check_all_members("11514", names)
+    check_all_members("2060", names)
     assert len(rows) == len((WATCH / "incidents.jsonl").read_text().splitlines()), \
         "one incident an hour per runner and board"
     globals()["RUNNERS"] = saved_runners
@@ -4672,17 +4677,17 @@ def wip_self_test():
         return {"number": num, "title": f"{key} x", "draft": draft, "branch": f"runner-1/{key.lower()}",
                 "updated": iso(0.2), "red": False}
 
-    assert slim({"ticketNumber": "HYCI-9", "section": "Backlog", "waitingOnUserId": 7}, "11514")["waiting"], \
+    assert slim({"ticketNumber": "HYCI-9", "section": "Todo", "waitingOnUserId": 7}, "2060")["waiting"], \
         "a wait on Valentin is not pool work"
-    assert slim({"ticketNumber": "HYCI-9", "section": "Backlog", "waitingOnAgentId": "lead-id"}, "11514")["waiting"], \
+    assert slim({"ticketNumber": "HYCI-9", "section": "Todo", "waitingOnAgentId": "lead-id"}, "2060")["waiting"], \
         "a wait on the board lead is not pool work: fleet/park --lead sets it (HYCI-276)"
-    assert not slim({"ticketNumber": "HYCI-9", "section": "Backlog"}, "11514")["waiting"], \
+    assert not slim({"ticketNumber": "HYCI-9", "section": "Todo"}, "2060")["waiting"], \
         "a ticket nobody waits on stays pool work"
-    assert eligible_reason(tk("HYCI-9", "Backlog", "Chief Of Staff")) == "held by agent Chief Of Staff", \
-        "a 11514 ticket the fleet chief holds is not new work (board 15 makes the same call)"
-    assert eligible_reason(tk("HYCI-9", "Backlog")) is None, "an unheld 11514 ticket is still new work"
+    assert eligible_reason(tk("HYCI-9", "Todo", "Chief Of Staff")) == "held by agent Chief Of Staff", \
+        "a 2060 ticket the fleet chief holds is not new work (board 15 makes the same call)"
+    assert eligible_reason(tk("HYCI-9", "Todo")) is None, "an unheld 2060 ticket is still new work"
 
-    def need(key, text, section="Backlog", labels=(), prs=()):
+    def need(key, text, section="Todo", labels=(), prs=()):
         """eligible_reason for a ticket whose title/body says text, with the open PR list given (HYCI-355)."""
         t = slim({"ticketNumber": key, "section": section, "title": text, "labels": [{"name": l} for l in labels]},
                  PREFIX_BOARD[key.split("-")[0]])
@@ -4695,14 +4700,14 @@ def wip_self_test():
 
     assert need("HYCI-9", "Needs Valentin's go before any code") == "cannot be built yet: needs Valentin", \
         "a ticket that says it needs Valentin never starts a model"
-    assert need("HYCI-9", "Keys", "Backlog") is None, "no such words: still new work"
+    assert need("HYCI-9", "Keys", "Todo") is None, "no such words: still new work"
     assert need("HYCI-9", "Rotate the Stripe key from the vault") is None, \
         "a build task that mentions a key is still buildable"
     assert need("HYCI-9", "Security fixes need a fresh Vercel scan. Risk: no paid service. Undo any scan.") is None, \
         "'no paid service' is not a need (HYCI-299)"
     assert need("HYCI-9", 'The app answers "Project not found or access denied"') is None, \
         "a quoted error is not a need (HYCI-271)"
-    assert need("HYCI-9", "Wireframe first", "Backlog") is None, "design work without the words is not held"
+    assert need("HYCI-9", "Wireframe first", "Todo") is None, "design work without the words is not held"
     assert need("HYCI-9", "Session sidebar needs a design sign-off") == "cannot be built yet: needs a design", \
         "a design sign-off holds the ticket (HYCI-355)"
     assert need("HYCI-9", "Agents cannot reach the laptop. Restore the connection.") == "cannot be built yet: needs a person at a PC", \
@@ -4742,7 +4747,7 @@ def wip_self_test():
     tickets = [tk("HTPR-20", "In Progress", "runner 9"), tk("HTPR-21", "AI Review", "runner 1"),
                tk("HTPR-22", "QA", labels=["design-pass"]), tk("HTPR-23", "In Progress", labels=["incident"]),
                tk("HTPR-24", "In Progress", "postbox dev"), tk("HTPR-25", "Bugs"), tk("HTPR-26", "Bugs"),
-               tk("HTPR-27", "AI Review", "runner 9"), tk("HYCI-1", "Backlog"), tk("HTPR-29", "QA", "runner 3")]
+               tk("HTPR-27", "AI Review", "runner 9"), tk("HYCI-1", "Todo"), tk("HTPR-29", "QA", "runner 3")]
     SNAP = {"tickets": tickets, "rel": {t["key"]: [[], []] for t in tickets}, "prs": [pr(999991, "HTPR-21"),
             pr(999992, "HTPR-25"), pr(999993, "HTPR-21")], "incidents": [], "open": {}}
     SNAP["rel"]["HTPR-27"] = [["HYCI-1"], []]
@@ -4766,8 +4771,8 @@ def wip_self_test():
         units, workers, excluded = pipeline()
         assert "HTPR-41" not in units and excluded.get("no free taker") == ["HTPR-41"], (units, excluded)
         LANE_CAP = 1
-        ci_held = tk("HYCI-60", "In Progress", "runner 1")
-        ci_loose = tk("HYCI-61", "In Progress")
+        ci_held = tk("HYCI-60", "Doing", "runner 1")
+        ci_loose = tk("HYCI-61", "Doing")
         SNAP["tickets"] = [ci_held, ci_loose]
         SNAP["rel"] = {"HYCI-60": [[], []], "HYCI-61": [[], []]}
         SNAP["prs"] = []
@@ -4855,9 +4860,9 @@ def wip_self_test():
         assert (t["key"], source) == ("HTPR-40", "park"), "an own ticket that rests is parked before anything else"
         (STATE / "runner-1.idle").unlink()
         # a runner whose login the board never added is offered nothing from it (HYCI-159: ship-claim refused Runner 5)
-        set_members("11514", {"runner 1"})
-        SNAP = {"tickets": [tk("HYCI-1", "Backlog")], "rel": {"HYCI-1": [[], []]}, "prs": [], "incidents": [], "open": {}}
-        assert can_join(1, "11514") and not can_join(2, "11514") and can_join(2, "15")
+        set_members("2060", {"runner 1"})
+        SNAP = {"tickets": [tk("HYCI-1", "Todo")], "rel": {"HYCI-1": [[], []]}, "prs": [], "incidents": [], "open": {}}
+        assert can_join(1, "2060") and not can_join(2, "2060") and can_join(2, "15")
         assert choose(1, True)[0]["key"] == "HYCI-1", "a member is offered the board's ticket"
         try:
             choose(2, True)
@@ -4865,9 +4870,9 @@ def wip_self_test():
         except SystemExit as e:
             assert str(e).startswith("none:"), e
         # cap hit, Fleet CI & Infra blocker offered: Urgent and open-BlockedBy tickets go out, a plain one and a non-member do not
-        set_members("11514", {"runner 1"})
+        set_members("2060", {"runner 1"})
         full_wip = [tk("HTPR-50", "In Progress", "runner 2"), tk("HTPR-51", "AI Review", "runner 2"), tk("HTPR-52", "Bugs")]
-        ci = [tk("HYCI-2", "Backlog"), tk("HYCI-3", "Backlog"), tk("HYCI-4", "Backlog")]
+        ci = [tk("HYCI-2", "Todo"), tk("HYCI-3", "Todo"), tk("HYCI-4", "Todo")]
         ci[2]["prio"] = "Urgent"
         SNAP = {"tickets": full_wip + ci, "rel": {t["key"]: [[], []] for t in full_wip + ci}, "prs": [], "incidents": [], "open": {}}
         SNAP["rel"]["HYCI-3"] = [[], ["HTPR-52"]]
@@ -4905,29 +4910,29 @@ def wip_self_test():
         (STATE / "runner-2.log").unlink()
         RUNNING.clear()
         SNAP["rel"]["HYCI-3"] = [[], ["HTPR-52"]]
-        set_members("11514", {"runner 2"})
+        set_members("2060", {"runner 2"})
         try:
             choose(1, True)
             raise AssertionError("cap hit: a non-member was offered a Fleet CI & Infra ticket")
         except SystemExit as e:
             assert "new work closed" in str(e), e
         # every runner that is picking while the others are on app work still gets the blocker
-        set_members("11514", {"runner 1", "runner 2"})
+        set_members("2060", {"runner 1", "runner 2"})
         (STATE / "runner-2.log").write_text(f"{iso(0.05)} cursor: HTPR-50 composer-2.5 medium\n")
         RUNNING.clear()
         ci[2]["prio"] = "Urgent"
         assert choose(1, True) == (ci[1], "kept-slot"), "busy pool: the free runner still takes the app blocker"
         # HYCI-277: a Backlog alarm that waits on an open ticket is not the kept slot. A closed blocker offers it again.
-        alarm = tk("HYCI-277", "Backlog")
+        alarm = tk("HYCI-277", "Todo")
         alarm["prio"] = "Urgent"
         blocker = tk("HYCI-233", "Agent Blocked", "runner 9")
-        plain = tk("HYCI-1", "Backlog")
+        plain = tk("HYCI-1", "Todo")
         SNAP["tickets"] = [alarm, blocker, plain]
         SNAP["rel"] = {"HYCI-277": [["HYCI-233"], []], "HYCI-233": [[], ["HYCI-277"]], "HYCI-1": [[], []]}
         SNAP["prs"] = []
         SNAP["open"] = {}
         CHECKED[0] = 0
-        set_members("11514", {"runner 1", "runner 2"})
+        set_members("2060", {"runner 1", "runner 2"})
         slot_logs.clear()
         got = choose(2, True)
         assert (got[0]["key"], got[1]) == ("HYCI-1", "ci-lane"), got
@@ -4972,14 +4977,14 @@ def wip_self_test():
         # HYCI-386: plain and Urgent infra yield to an Urgent app ticket. An app waiter, or an incident, still goes first.
         urgent_app = tk("HTPR-386", "Bugs")
         urgent_app["prio"] = "Urgent"
-        plain_infra = tk("HYCI-386", "Backlog")
-        urgent_infra = tk("HYCI-387", "Backlog")
+        plain_infra = tk("HYCI-386", "Todo")
+        urgent_infra = tk("HYCI-387", "Todo")
         urgent_infra["prio"] = "Urgent"
-        infra_only = tk("HYCI-390", "Backlog")
-        app_blocker = tk("HYCI-388", "Backlog")
+        infra_only = tk("HYCI-390", "Todo")
+        app_blocker = tk("HYCI-388", "Todo")
         soft = tk("SOFT-1", "Todo")
-        soft_blocker = tk("HYCI-391", "Backlog")
-        incident = tk("HYCI-389", "Backlog", labels=["incident"])
+        soft_blocker = tk("HYCI-391", "Todo")
+        incident = tk("HYCI-389", "Todo", labels=["incident"])
         set_members("15", {"runner 1", "runner 2"})
         set_members("2060", {"runner 1", "runner 2"})
         SNAP["tickets"] = [urgent_app, plain_infra, urgent_infra, infra_only]

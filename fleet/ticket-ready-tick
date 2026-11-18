@@ -4,7 +4,7 @@
 Valentin, 14 Nov: "you need to review the tickets every hour at least to basically make sure that any new ticket is actually
 written in a way where it's doable to do it in one run."
 
-1. Read every pickable ticket of boards 15, 2060 and 11514 (skills/hypertask-triage/scripts/ticket-ready, no model) and write
+1. Read every pickable ticket of boards 15 and 2060 (skills/hypertask-triage/scripts/ticket-ready, no model) and write
    ~/.local/state/fleet/ticket-ready.json. fleet/pick judges each ticket itself, so this file is for the page, the brief and
    the fixer; the picker does not wait on it.
 2. Not Ready for a reason a script cannot fix (multi-step, needs Valentin, no done line, too vague): hand the first BUDGET
@@ -109,7 +109,8 @@ def table(res, keys):
 
 
 def brief(res, keys):
-    return (HERE / "briefs/ticket-fixer.txt").read_text().replace("{{TICKETS}}", table(res, keys))
+    return ((HERE / "briefs/ticket-fixer.txt").read_text().replace("{{TICKETS}}", table(res, keys))
+            + "\n" + (HERE.parent / "docs/worker-brief.md").read_text())
 
 
 def decision_line(**row):
@@ -183,7 +184,7 @@ def self_test():
 
     res = {"HTPR-1": row("HTPR-1", ["multi-step"], "Low"), "HTPR-2": row("HTPR-2", ["blocked"]), "HTPR-3": row("HTPR-3", []),
            "HTPR-4": row("HTPR-4", ["brain-tag"]), "HTPR-5": row("HTPR-5", ["no-done", "blocked"], "Urgent"),
-           "HYCI-6": row("HYCI-6", ["needs-valentin"], "High", "11514")}
+           "HYCI-6": row("HYCI-6", ["needs-valentin"], "High", "2060")}
     take, waiting, pruned = decide(res, {}, tr)
     assert take == ["HTPR-5", "HYCI-6", "HTPR-1"], take  # Urgent first; blocked-only, brain-only and Ready are not handed over
     at = now()

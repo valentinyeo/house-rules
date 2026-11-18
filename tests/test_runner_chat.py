@@ -1,5 +1,6 @@
 import json
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -167,6 +168,25 @@ class RunnerChatTests(unittest.TestCase):
         self.run_chat("reply", "chat?not/a-path", "message-one", "--text", "Answer", success=False)
         self.assertEqual(self.calls[-1][1], "/chat/sessions/chat%3Fnot%2Fa-path/messages")
         self.assertEqual(self.calls[-1][3], {"text": "Answer", "replyToMessageId": "message-one"})
+
+    def test_ticket_fixer_brief_includes_shared_fault_routes(self):
+        tick = runpy.run_path(str(ROOT / "fleet/ticket-ready-tick"))
+        self.assertIn((ROOT / "docs/worker-brief.md").read_text(), tick["brief"]({}, []))
+
+    def test_live_launcher_stops_when_brief_generation_fails(self):
+        line = next(line for line in (ROOT / "fleet/runner").read_text().splitlines() if "brief=$(run_brief" in line)
+        result = subprocess.run(["bash", "-c", "run_brief() { return 1; }; " + line + "; echo MODEL_STARTED"], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("MODEL_STARTED", result.stdout)
+
+    def test_every_launcher_engine_includes_shared_fault_routes(self):
+        for engine in ("codex", "claude", "opencode", "cursor", "pi-codex", "pi-opencode", "pi-vercel"):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as state:
+                pick = {"ticket": "SOFT-2588", "source": "kept-slot", "lane": "sf", "brief": "Only this ticket.", "repo": str(ROOT), "title": "Fault routing", "engine": engine, "model": "named-model", "effort": "medium"}
+                result = subprocess.run(["bash", str(ROOT / "fleet/runner"), "brief-check", "3"], input=json.dumps(pick), env={**os.environ, "FLEET_RUNNER_STATE": state}, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertRegex(result.stdout, r"(?m)^Faults: .*hypertask feedback.*board 2060.*label Poteto")
+                self.assertIn("Never include task, board or comment content", result.stdout)
 
     def test_actual_launcher_brief_attaches_codex_and_claude_without_changing_claim(self):
         for engine in ("codex", "claude", "opencode", "cursor", "pi-codex", "pi-opencode"):

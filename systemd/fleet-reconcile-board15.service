@@ -1,0 +1,8 @@
+[Unit]
+Description=Reconcile Hypertask product board columns
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/fleet/reconcile-board15.env
+ExecStart=%h/.local/share/house-rules/fleet/reconcile --board 15 --apply
+TimeoutStartSec=14min

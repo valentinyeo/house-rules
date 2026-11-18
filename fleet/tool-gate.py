@@ -25,7 +25,7 @@ LKG_DIR = Path(os.environ.get("FLEET_PICK_LKG", Path.home() / ".local/state/flee
 LKG_PICK = LKG_DIR / "pick"
 RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", Path.home() / ".local/state/ht-or-runners"))
 FSW = Path(os.environ.get("FLEET_WATCH_STATE", Path.home() / ".local/state/fleet-switch"))
-CI_BOARD = "11514"
+CI_BOARD = "2060"
 
 
 def stamp():
@@ -54,6 +54,7 @@ def run_self_test(script, extra=()):
         text=True,
         timeout=180,
         cwd=str(REPO),
+        env=dict(os.environ, FLEET_HOME=str(HERE)),
     )
     tail = (r.stderr or r.stdout or "").strip()[-400:]
     return r.returncode == 0, tail
@@ -89,7 +90,7 @@ def file_broken_picker_incident(sha, detail):
     title = f"Picker self-test failed; rolled back (sha {sha[:12]})"
     r = ci_vcc(
         "task", "create", "--project", CI_BOARD, "--title", title, "--description-file", str(path),
-        "--priority", "urgent", "--labels", "CI,Hypertask CI,incident,brain-medium", "--section", "Backlog",
+        "--priority", "urgent", "--labels", "CI,Hypertask CI,incident,brain-medium", "--section", "Todo",
     )
     if r.returncode == 0:
         json.dump({"sha": sha, "at": time.time()}, open(dedupe, "w"))

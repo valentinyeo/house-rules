@@ -18,7 +18,7 @@ import time
 FSW = os.environ.get("FLEET_WATCH_STATE") or os.path.expanduser("~/.local/state/fleet-switch")
 S = os.environ.get("FLEET_WATCH_RUNNER_STATE") or os.path.expanduser("~/.local/state/ht-or-runners")
 ALLOC = os.environ.get("FLEET_PICK_ALLOCATION") or os.path.expanduser("~/.local/state/pacing/allocation.json")
-CI_BOARD = "11514"
+CI_BOARD = "2060"
 NOW = time.time()
 DRY = "--dry-run" in sys.argv
 FILE_CI = "--file-ci" in sys.argv
@@ -97,7 +97,7 @@ def file_incident(title, body, labels, klass):
     os.makedirs(FSW, exist_ok=True)
     open(path, "w").write(body)
     r = ci_vcc("task", "create", "--project", CI_BOARD, "--title", title, "--description-file", path,
-                "--priority", "urgent", "--labels", labels, "--section", "Backlog")
+                "--priority", "urgent", "--labels", labels, "--section", "Todo")
     note(f"slo {klass}: filed {title}" if r.returncode == 0 else f"slo {klass}: file failed {(r.stderr or r.stdout)[-120:]}")
     if r.returncode == 0:
         mark(klass)

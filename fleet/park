@@ -18,7 +18,7 @@
     fleet/park --sweep [--apply] [--waits-on KEY=T1,T2 ...] [--valentin KEY[=COMMENT] ...]
     fleet/park --self-test
 
-Home column: board 15 Bugs, Features or Improvements by label then title tag; 2060 Todo; 11514 Backlog.
+Home column: board 15 Bugs, Features or Improvements by label then title tag; 2060 Todo.
 A runner calls it before it ends a run with `RUNNER IDLE`. It writes as the caller (SHIP_SESSION_NAME), never as Valentin.
 --sweep is the one-time cleanup through the same code: it reads the runner launcher logs, finds board 15 tickets still In
 Progress that a runner ended IDLE on, classifies each (open BlockedBy link, waiting on Valentin, no PR at all) and prints the
@@ -39,9 +39,8 @@ from ticket_owner import store
 HOME = Path.home()
 os.environ["PATH"] = f"{HOME}/.local/bin:{HOME}/bin:{os.environ.get('PATH', '')}"
 RUNNER_STATE = Path(os.environ.get("FLEET_RUNNER_STATE", HOME / ".local/state/ht-or-runners"))
-BUILDING = {"15": ("In Progress", "AI Review", "QA"), "2060": ("Doing", "AI Review"),
-            "11514": ("In Progress", "AI Review")}
-HOME_COLUMN = {"2060": "Todo", "11514": "Backlog"}
+BUILDING = {"15": ("In Progress", "AI Review", "QA"), "2060": ("Doing", "AI Review")}
+HOME_COLUMN = {"2060": "Todo"}
 TICKET = re.compile(r"^(HTPR|HYFA|IGSH|SOFT|HYCI)-[0-9]+$")
 RUNNERISH = re.compile(r"^(?:runner \d+|ci runner \d+|infra runner \d+|mp runner \d+|multi bot runner [a-z])$")
 VALENTIN_REVIEW = "Valentin Review"
@@ -94,14 +93,19 @@ def blockers(key):
     return out
 
 
-PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYCI": "11514"}
+PREFIX_BOARD = {"HTPR": "15", "HYFA": "15", "IGSH": "2060", "SOFT": "2060", "HYCI": "2060"}
 
 
 def lead_for(key):
     """(lead name, board id) from scopes.json. The board key with no view wins."""
-    board = PREFIX_BOARD[key.split("-", 1)[0]]
+    board = PREFIX_BOARD.get(key.split("-", 1)[0])
+    if board is None:
+        raise RuntimeError(f"no live board configured for {key}")
     scopes = json.loads((Path(__file__).resolve().parents[1] / "skills/hypertask-triage/scripts/scopes.json").read_text())
-    return scopes[board]["lead"], board
+    scope = scopes.get(board)
+    if not scope or not scope.get("lead"):
+        raise RuntimeError(f"no live lead configured for {key} on board {board}")
+    return scope["lead"], board
 
 
 def record_event(key):
@@ -473,7 +477,7 @@ def sweep(apply, forced):
 def self_test():
     assert CHECK_WAIT.search("PR 3364 is pending hosted tests. Recheck after 11:45") and not CHECK_WAIT.search("QA FAIL: 8px corners")
     assert home_section(15, ["AI Cost", "Bug", "brain-hard"], "Own AI keys") == "Backlog"
-    assert home_section(2060, [], "x") == "Todo" and home_section(11514, [], "x") == "Backlog"
+    assert home_section(2060, [], "x") == "Todo"
     t = {"ticketNumber": "HTPR-1", "pullRequests": [], "waitingOnUserId": None, "blockerCommentId": None}
     assert classify(t, ["HTPR-2"], {}) == ("waits", ["HTPR-2"])
     assert classify(t, [], {}) == ("unstarted", None)
@@ -485,22 +489,28 @@ def self_test():
     assert co_holders(co, "RUNNER 6") == (["Runner 6"], ["Infra Runner 3"]), "the caller leaves, the owner stays"
     assert co_holders(co, "RUNNER 7") == ([], ["Infra Runner 3", "Runner 6"]), "a runner that is not assigned releases nothing"
     assert lead_for("HTPR-1") == ("HT Product Lead", "15")
-    assert lead_for("HYCI-1")[0] == "Chief Of Staff" and lead_for("IGSH-1")[0] == "Chief Of Staff"
+    assert lead_for("HYCI-1") == ("Chief Of Staff", "2060") and lead_for("IGSH-1")[0] == "Chief Of Staff"
+    try:
+        lead_for("UNKNOWN-1")
+    except RuntimeError as e:
+        assert str(e) == "no live board configured for UNKNOWN-1"
+    else:
+        raise AssertionError("unknown prefix must be refused clearly")
     from unittest.mock import patch
 
     tasks = {
-        "HYCI-244": {"projectId": 11514, "sectionId": 32929, "status": "Normal"},
+        "HYCI-244": {"projectId": 2060, "sectionId": 32929, "status": "Normal"},
         "IGSH-3": {"projectId": 2060, "sectionId": 900, "status": "Normal"},
         "HTPR-4": {"projectId": 15, "sectionId": 29521, "status": "Normal"},
         "HTPR-5": {"projectId": 15, "sectionId": 4312, "status": "Normal"},
         "HTPR-6": {"projectId": 15, "sectionId": 29803, "status": "Normal"},
         "HTPR-7": {"projectId": 15, "sectionId": 30997, "status": "Normal"},
-        "HYCI-8": {"projectId": 11514, "sectionId": 32924, "status": "Normal"},
-        "HYCI-9": {"projectId": 11514, "status": "Archive"},
+        "HYCI-8": {"projectId": 2060, "sectionId": 32924, "status": "Normal"},
+        "HYCI-9": {"projectId": 2060, "status": "Archive"},
     }
     sections = {
-        "11514": [{"id": 32929, "name": "Done", "isDone": True}, {"id": 32924, "name": "In Progress"}],
-        "2060": [{"id": 900, "name": "Released", "isDone": True}],
+        "2060": [{"id": 32929, "name": "Done", "isDone": True}, {"id": 32924, "name": "Doing"},
+                 {"id": 900, "name": "Released", "isDone": True}],
         "15": [{"id": n, "isDone": n != 30997} for n in (29521, 4312, 29803, 30997)],
     }
     relations = [{"relationType": "BlockedBy", "direction": "outgoing",

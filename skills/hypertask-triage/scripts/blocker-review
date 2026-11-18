@@ -26,7 +26,7 @@ Allowed writers: Chief Of Staff and the lead of that board in scopes.json. A run
 Exit 0 allowed, 3 refused with the reason on stderr. No board call is made.
   blocker-review --classify   (Question text on stdin: prints his call classes, exit 1 when none)
 
-usage: blocker-review [--boards 15,11514,2060] [--apply] [--clear-only] [--self-test]
+usage: blocker-review [--boards 15,2060] [--apply] [--clear-only] [--self-test]
        blocker-review --clear HTPR-1 --to home --why "reason"
 """
 import argparse
@@ -410,7 +410,7 @@ def self_test():
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--boards", default="15,11514,2060")
+    p.add_argument("--boards", default="15,2060")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--clear-only", action="store_true", help="with --apply: clear only, post no notes, skip the parked report")
     p.add_argument("--gate", action="store_true", help="may --who make Valentin the blocker on --board? exit 0 or 3")

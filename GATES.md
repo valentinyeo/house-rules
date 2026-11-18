@@ -9,5 +9,5 @@ CHECK: `python3 fleet/drill broken-picker`
 EXPECT: `broken-picker pass`
 
 ## ci-workflow
-CHECK: `grep -q tool-gate fleet/../.github/workflows/pick.yml`
+CHECK: `grep -q tool-gate .github/workflows/rules-lint.yml`
 EXPECT: `tool-gate`

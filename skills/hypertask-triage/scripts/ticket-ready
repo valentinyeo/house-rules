@@ -23,7 +23,7 @@ Reasons, one code each:
   too-vague       fewer than MIN_WORDS words in title and description
 
 usage:
-  ticket-ready                        all pickable columns of boards 15, 2060 and 11514: table and counts
+  ticket-ready                        all pickable columns of boards 15 and 2060: table and counts
   ticket-ready --board 15             one board
   ticket-ready --ticket HTPR-1        one ticket, read by key
   ticket-ready --json                 machine output (also the shape of the state file)
@@ -52,7 +52,7 @@ VCC = str(HOME / ".local/bin/vcc")
 STATE = Path(os.environ.get("TICKET_READY_STATE", HOME / ".local/state/fleet/ticket-ready.json"))
 
 # Pickable (new-work) columns: the same table as fleet/pick BOARDS. fleet/pick's self-test asserts they match.
-COLUMNS = {"15": ("Backlog", "Bugs", "Improvements", "Features"), "2060": ("Todo",), "11514": ("Backlog",)}
+COLUMNS = {"15": ("Backlog", "Bugs", "Improvements", "Features"), "2060": ("Todo",)}
 
 MULTI, VALENTIN, BLOCKED, BRAIN, NODONE, VAGUE = "multi-step", "needs-valentin", "blocked", "brain-tag", "no-done", "too-vague"
 TITLES = {MULTI: "Multi-step", VALENTIN: "Needs Valentin", BLOCKED: "Blocked", BRAIN: "Brain tag", NODONE: "No done condition",
@@ -465,7 +465,7 @@ def self_test():
                          "--labels", "Bug,brain-medium"]) == "", "a ready new ticket prints nothing"
     assert check_create(["task", "create", "--project", "7", "--title", "x", "--description", "short"]) == "", "other boards are not asked"
     assert check_create(["task", "list", "--project", "15"]) == "", "other commands are not asked"
-    res = verdicts([("15", mk()), ("15", mk(ticketNumber="HTPR-2", labels=[])), ("11514", mk(ticketNumber="HYCI-3", sub_tasks=[{}] * 9))])
+    res = verdicts([("15", mk()), ("15", mk(ticketNumber="HTPR-2", labels=[])), ("2060", mk(ticketNumber="HYCI-3", sub_tasks=[{}] * 9))])
     c = counts(res)
     assert (c["ready"], c["not_ready"]) == (1, 2) and c["by_reason"][MULTI] == 1 and c["by_reason"][BRAIN] == 1, c
     assert fixable(res) == ["HYCI-3"], "a missing brain tag is the tagger's, not the fixer's"

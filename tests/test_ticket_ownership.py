@@ -30,7 +30,7 @@ class OwnershipTests(unittest.TestCase):
         self.roster = self.state / "roster.json"
         self.roster.write_text('{"runners": 17}')
         self.owners = Owners(self.state, self.roster)
-        self.ticket = {"key": "HYCI-404", "idx": 404, "board": "11514", "section": "In Progress",
+        self.ticket = {"key": "HYCI-404", "idx": 404, "board": "2060", "section": "Doing",
                        "title": "Keep the owner", "holders": [["runner 6", True]], "created": "2026-11-13",
                        "waiting": False, "labels": ["brain-hard"], "prio": "Urgent", "updated": "2026-11-13T10:00:00Z"}
         self.selection = {"engine": "codex", "model": "gpt-6.1-sol", "effort": "high"}
@@ -99,7 +99,7 @@ class OwnershipTests(unittest.TestCase):
 
     def test_park_keeps_assignment_and_leaves_in_progress(self):
         park = load("park")
-        ticket = {"projectId": 11514, "section": "In Progress", "pullRequests": [{"number": 12}],
+        ticket = {"projectId": 2060, "section": "Doing", "pullRequests": [{"number": 12}],
                   "assignees": [{"agent": {"displayName": "Runner 6"}}]}
         with patch.dict(os.environ, {"SHIP_SESSION_NAME": "RUNNER 6"}), \
                 patch.object(park, "store", return_value=self.owners), \

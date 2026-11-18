@@ -1,18 +1,13 @@
 {
   "_doc": "One scope per board or board view a lead owns. Workers: the shared pool (pool: Runner N, live only when fleet/pick says it works: no pacer stop, or still running), tmux_prefix pools (agent has {n} or {x}), exact tmux sessions for solo devs, a state file of sessions, or always-on workers. The PR queue cap and the building cap both come from here.",
   "15": {
-    "board": 15, "lead": "HT Product Lead", "alarm_board": 11514,
+    "board": 15, "lead": "HT Product Lead", "alarm_board": 15,
     "repos": ["hypertask-ai/hypertask"],
     "workers": [
       {"pool": true, "agent": "Runner {n}"},
       {"agent": "HT Design Builder", "always": true},
       {"agent": "Speed Runner", "always": true}
     ]
-  },
-  "11514": {
-    "board": 11514, "lead": "Chief Of Staff", "alarm_board": 11514,
-    "repos": ["hypertask-ai/hypertask"],
-    "workers": [{"pool": true, "agent": "Runner {n}"}]
   },
   "2060": {
     "board": 2060, "lead": "Chief Of Staff", "alarm_board": 2060,
@@ -35,17 +30,17 @@
     "workers": [{"tmux": "upwork-auto-applier", "agent": "Upwork Auto Applier Dev"}]
   },
   "10450": {
-    "board": 10450, "lead": "HT Support Lead", "alarm_board": 11514,
+    "board": 10450, "lead": "HT Support Lead", "alarm_board": 10450,
     "repos": ["valentinyeo/ai-chatbot", "hypertask-ai/docs"],
     "workers": [{"agent": "HT Support Lead", "always": true}]
   },
   "2108": {
-    "board": 2108, "lead": "HT Growth Lead", "alarm_board": 11514,
+    "board": 2108, "lead": "HT Growth Lead", "alarm_board": 2108,
     "repos": ["hypertask-ai/astro"],
     "workers": [{"agent": "HT Growth Lead", "always": true}]
   },
   "2128": {
-    "board": 2128, "lead": "HT Growth Lead", "alarm_board": 11514,
+    "board": 2128, "lead": "HT Growth Lead", "alarm_board": 2128,
     "repos": [],
     "workers": [{"agent": "HT Growth Lead", "always": true}]
   },

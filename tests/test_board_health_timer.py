@@ -8,7 +8,7 @@ TIMER = (ROOT / "systemd/ht-board-health.timer").read_text()
 SCOPES = {k: v for k, v in json.loads(
     (ROOT / "skills/hypertask-triage/scripts/scopes.json").read_text()).items() if not k.startswith("_")}
 
-HOURLY = ["15", "11514", "2060", "2060/multi-bot", "2060/postbox", "2060/multi-bot-android", "8525"]
+HOURLY = ["15", "2060", "2060/multi-bot", "2060/postbox", "2060/multi-bot-android", "8525"]
 
 
 def targets():
@@ -26,6 +26,10 @@ def targets():
 class BoardHealthTimerTest(unittest.TestCase):
     def test_every_fleet_board_runs_hourly(self):
         self.assertEqual(sorted(targets()), sorted(HOURLY))
+
+    def test_archived_board_stays_dropped(self):
+        self.assertNotIn("11514", targets())
+        self.assertNotIn("11514", SCOPES)
 
     def test_targets_are_known_scopes(self):
         for target in targets():
