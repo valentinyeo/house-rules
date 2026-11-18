@@ -5,7 +5,8 @@ import tempfile
 import unittest
 
 
-FACTS = Path(__file__).resolve().parents[1] / 'skills/verification-check/facts.sh'
+FACTS = Path(os.environ.get('FACTS_SCRIPT',
+                           Path(__file__).resolve().parents[1] / 'skills/verification-check/facts.sh'))
 DRIFT_FILES = [
     'create-verification-skill/SKILL.md',
     'maintain-verification-skill/SKILL.md',
@@ -64,7 +65,7 @@ elif '/runs/11/jobs' in args:
 elif '/runs/12/jobs' in args:
     print(json.dumps({'jobs': [{'id': 103}]}))
 elif '/actions/runs?' in args:
-    print(json.dumps({'workflow_runs': [{'id': 11, 'name': 'verify'}, {'id': 12, 'name': 'lint'}]}))
+    print(json.dumps({'workflow_runs': [{'id': 11, 'name': 'verify', 'status': os.environ.get('RUN_STATUS', 'completed')}, {'id': 12, 'name': 'lint', 'status': 'completed'}]}))
 elif 'rules' in args:
     print('[]')
 elif 'required_status_checks' in args:
@@ -143,6 +144,25 @@ else:
         p.mkdir(parents=True)
         out = self.run_facts()
         self.assertIn('installed pstack: 0.15.43', out)
+
+    def test_unfinished_runs_do_not_prove_job_budget(self):
+        self.env['RUN_STATUS'] = 'in_progress'
+        out = self.run_facts()
+        self.assertIn('PR #3 sha3: UNKNOWN (3 known jobs', out)
+        self.assertIn('in_progress', out)
+
+    def test_conflicting_pins_are_a_gap(self):
+        self.put('.claude/skills/verify-app/SKILL.md',
+                 '# Verify\npstack: 0.15.42\npstack: 0.15.43\n')
+        self.commit()
+        self.assertIn('conflicting pstack versions', self.run_facts())
+
+    def test_current_pin_does_not_claim_drift(self):
+        self.put('.claude/skills/verify-app/SKILL.md', '# Verify\npstack: 0.15.43\n')
+        self.commit()
+        out = self.run_facts()
+        self.assertIn('recorded version matches installed', out)
+        self.assertNotIn('PSTACK CHANGED', out)
 
     def test_recorded_version_unavailable_is_explicit(self):
         self.put('.claude/skills/verify-app/SKILL.md', '# Verify\npstack: 0.14.0\n')
