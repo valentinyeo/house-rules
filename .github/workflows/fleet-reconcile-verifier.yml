@@ -41,7 +41,7 @@ jobs:
         run: |
           set -o pipefail
           test -n "$OPENCODE_API_KEY"
-          pi --provider opencode-go --model deepseek-v4.1-flash --thinking low \
+          model=$(python3 scripts/pick-verifier-model) && pi --provider opencode-go --model "$model" --thinking low \
             --no-extensions --no-mcp --no-skills --no-context-files \
             --no-prompt-templates --no-themes --tools read,bash \
             --no-session --mode json -p \

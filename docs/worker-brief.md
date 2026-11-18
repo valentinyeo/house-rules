@@ -22,3 +22,8 @@ Only shared house rules or pstack setup faults
 go to board 2060 with label Poteto.
 Keep working after recording the fault.
 These reporting rules override legacy workaround instructions.
+
+PR body: add one line `Author model: <family>/<model>` per author,
+for example `Author model: deepseek/deepseek-v4.1-flash`,
+`Author model: anthropic/claude-sonnet`, `Author model: openai/gpt-6.1-sol`.
+The verifier picks a model from another family. A PR without the line fails its verifier.
