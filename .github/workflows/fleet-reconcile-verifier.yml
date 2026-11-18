@@ -4,10 +4,9 @@ on:
     paths:
       - fleet/reconcile
       - fleet/lease
-      - systemd/fleet-reconcile-board15.service
-      - tests/test_fleet_reconcile.py
-      - tests/fixtures/reconcile/**
       - docs/fleet-reconcile.md
+      - house-rules.md
+      - systemd/fleet-reconcile-board15.service
       - .github/workflows/fleet-reconcile-verifier.yml
 permissions:
   contents: read
@@ -30,11 +29,20 @@ jobs:
           ref: e1cc03121a0e71129a4fb730d7c5528a0a3e43c8
           path: pstack-source
           persist-credentials: false
+      - name: Install the vstack skill the shim execs
+        run: git clone --depth 1 https://github.com/valentinyeo/vstack "$HOME/.local/share/vstack"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - run: npm install -g @earendil-works/pi-coding-agent@1.5.0
-      - name: DeepSeek challenges the reconciliation fix
+      - name: Prove both shims
+        working-directory: change
+        run: |
+          fleet/reconcile --self-test
+          export FLEET_LEASE_DIR="$RUNNER_TEMP/leases"
+          fleet/lease SOFT-1 run -- true
+          test ! -e "$FLEET_LEASE_DIR/SOFT-1.json"
+      - name: DeepSeek challenges the reconciliation move
         working-directory: change
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
@@ -46,7 +54,12 @@ jobs:
             --no-prompt-templates --no-themes --tools read,bash \
             --no-session --mode json -p \
             'Read '"$GITHUB_WORKSPACE"'/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
-          Goal: boards 15 and 2060 stay truthful. Independently challenge this PR head. Board 2060 behavior must remain unchanged. Board 15 uses HTPR keys and only hypertask-ai/hypertask PRs. The operator supplied the authoritative board 15 columns, confirmed by a live section read: Backlog | UX needed | UX Sign-off | In Progress | Agent Blocked (Infra) | Valentin Review | AI Review | QA | Flag: Only Me + QA | Flag: Everyone | Flag: Off | No Flag. Only Backlog, In Progress, and AI Review are managed. Older docs mentioning Todo or Bugs describe obsolete columns; those names must stay unknown and unchanged. Do not invent requirements from stale guides. Continue challenging every requested behavior and fail real violations. Live workers take priority into In Progress. Any open PR moves to AI Review. Never return tickets to Backlog. Never touch UX needed, UX Sign-off, Agent Blocked (Infra), Valentin Review, QA, any Flag column, No Flag, or unknown columns. Keep the two-hour grace and five-move cap. Board15 writes require an explicitly supplied live-authorized vcc or HT Product Lead agent token, never personal credentials. Check all write subprocesses inherit that token. Challenge product worker facts against dead services, stale queue rows, other boards, missing queues, and read failures. Inspect the service template; no timer may be installed or enabled. Read ../pstack-source/pstack/skills/poteto-mode/SKILL.md and docs/worker-brief.md. Read the complete fleet/reconcile, its focused tests, docs/fleet-reconcile.md, and git diff origin/main. Do not edit tracked files or merge. Never run the live --apply command. No live board credentials exist on this runner. Run python3 fleet/reconcile --self-test and python3 -m unittest tests.test_fleet_reconcile -v. Exercise the real CLI with a fake hypertask and gh if useful. Break the two original failures: Not now and unknown columns must KEEP even with old timestamps, a fresh lease, and a red PR; pecunia#52 must not own SOFT-1915 and multiprompt-android#370 must not own SOFT-1974. Full live PR bodies are in tests/fixtures/reconcile. Ownership requires title key, branch key, anchored Ticket: field, or exact ticket URL. Prose never counts. Test branch-only discovery, pagination and search partitions, closed PRs, malformed keys, cap refusal before any writes, overlap success, stale lease, another repository, current-head FAIL, grace, and merged PASS remaining in AI Review for live proof. Confirm rules-lint runs the self-test. Inspect new comments under pstack no-comments. Scope checks to this change. Existing base failures are notes. End with one verdict line PASS, PASS+NOTES, or FAIL, followed by exact evidence and any user-visible bugs. A requested behavior that fails means FAIL. Keep prose sentences at most eight words. Commands and logs stay exact.' \
+          Goal: the board sync script and its tests move to the hypertask-work skill in valentinyeo/vstack. House-rules keeps only a three-line shim for fleet/reconcile and fleet/lease, plus one pointer in house-rules.md and docs/fleet-reconcile.md. Independently challenge this PR head.
+          The vstack copy is installed at $HOME/.local/share/vstack. Run python3 -m unittest tests.test_hypertask_work -v there. Run fleet/reconcile --self-test through the shim. Exercise the shim with --board 2060 as a dry run if credentials allow; never run --apply.
+          Prove a running process with a lease reads live, and a dead pid reads not live. Prove the shim forwards arguments and exit codes. Prove no second copy of the board columns, lease rules, board 15 rules or timer remains in house-rules.
+          Board 2060 behavior must remain unchanged. Board 15 uses HTPR keys and only hypertask-ai/hypertask PRs. Live workers take priority. Never move into Valentin Review or Done. Keep the two-hour grace and five-move cap. Board15 writes require vcc or HT Product Lead, never personal credentials.
+          Read the complete changed files and git diff origin/main. Do not edit tracked files or merge. No live board credentials exist on this runner. Inspect new comments under pstack no-comments.
+          End with one verdict line PASS, PASS+NOTES, or FAIL, followed by exact evidence and any user-visible bugs. Keep prose sentences at most eight words. Commands and logs stay exact. Delete any lease file your checks create.' \
             > verifier.jsonl
       - run: git -C change diff --exit-code
       - uses: actions/upload-artifact@v4
