@@ -4,12 +4,18 @@ Rule: old runs cancel when newer code arrives. A workflow needs a top-level
 `concurrency:` block with `cancel-in-progress: true`.
 
   python3 tests/test_workflow_concurrency.py            run the tests
-  python3 tests/test_workflow_concurrency.py --lint DIR print offenders in DIR/*.yml, exit 1 on any
+  python3 tests/test_workflow_concurrency.py --lint DIR print offenders in DIR/*.yml and *.yaml, exit 1 on any
+
+Needs PyYAML (`python3 -m pip install pyyaml`); without it the script exits with an error.
 """
-import re
 import sys
 import unittest
 from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # never skip the lint quietly: a missing parser must fail loudly
+    sys.exit("workflow-concurrency needs PyYAML: run `python3 -m pip install pyyaml`")
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -22,48 +28,46 @@ ALLOWED_MISSING = {
 }
 
 
-def triggers(text):
-    """Trigger names in the top-level `on:` key (block, inline list or scalar form)."""
-    found = set()
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        m = re.match(r"^on:\s*(.*)$", line)
-        if not m:
-            continue
-        inline = re.sub(r"#.*", "", m.group(1)).strip()
-        if inline:
-            found.update(re.findall(r"[a-z_]+", inline))
-            break
-        for nxt in lines[i + 1:]:
-            if nxt and not nxt[0].isspace() and not nxt.startswith("#"):
-                break
-            k = re.match(r"^  ([a-z_]+):", nxt)
-            if k:
-                found.add(k.group(1))
-        break
-    return found & set(TRIGGERS)
+def load(text):
+    """Parse a workflow. A file that is not a YAML mapping is an error, never a pass."""
+    data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        raise ValueError("workflow is not a YAML mapping")
+    return data
 
 
-def cancels_old_runs(text):
-    """True when the top-level `concurrency:` block sets cancel-in-progress: true."""
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if not re.match(r"^concurrency:", line):
-            continue
-        for nxt in lines[i + 1:]:
-            if nxt and not nxt[0].isspace() and not nxt.startswith("#"):
-                break
-            if re.match(r"^\s+cancel-in-progress:\s*true\s*(#.*)?$", nxt):
-                return True
-    return False
+def triggers(data):
+    """Watched trigger names from the top-level `on:` key (string, list or mapping form).
+
+    YAML 1.1 reads the bare key `on` as the boolean True, so look up both.
+    """
+    on = data[True] if True in data else data.get("on")
+    if isinstance(on, str):
+        names = {on}
+    elif isinstance(on, (list, dict)):
+        names = {str(n) for n in on}
+    else:
+        names = set()
+    return names & set(TRIGGERS)
+
+
+def cancels_old_runs(data):
+    """True when the top-level `concurrency:` mapping sets cancel-in-progress to exactly true."""
+    block = data.get("concurrency")
+    return isinstance(block, dict) and block.get("cancel-in-progress") is True
 
 
 def problems(directory):
     out = []
-    for path in sorted(Path(directory).glob("*.yml")):
-        text = path.read_text(encoding="utf-8")
-        on = triggers(text)
-        if on and not cancels_old_runs(text) and path.name not in ALLOWED_MISSING:
+    paths = sorted(Path(directory).glob("*.y*ml"))
+    for path in paths:
+        try:
+            data = load(path.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, ValueError) as err:
+            out.append("%s: cannot parse workflow (%s)" % (path.name, str(err).splitlines()[0]))
+            continue
+        on = triggers(data)
+        if on and not cancels_old_runs(data) and path.name not in ALLOWED_MISSING:
             out.append("%s: runs on %s but has no top-level concurrency with cancel-in-progress: true"
                        % (path.name, "/".join(sorted(on))))
     return out
@@ -86,28 +90,63 @@ WITHOUT_BLOCK = WITH_BLOCK.replace(
 
 
 class WorkflowConcurrencyTest(unittest.TestCase):
+    def ok(self, text):
+        return cancels_old_runs(load(text))
+
     def test_block_present_passes(self):
-        self.assertTrue(cancels_old_runs(WITH_BLOCK))
+        self.assertTrue(self.ok(WITH_BLOCK))
 
     def test_block_missing_fails(self):
-        self.assertFalse(cancels_old_runs(WITHOUT_BLOCK))
+        self.assertFalse(self.ok(WITHOUT_BLOCK))
 
     def test_cancel_false_fails(self):
-        self.assertFalse(cancels_old_runs(WITH_BLOCK.replace("cancel-in-progress: true", "cancel-in-progress: false")))
+        self.assertFalse(self.ok(WITH_BLOCK.replace("cancel-in-progress: true", "cancel-in-progress: false")))
+
+    def test_cancel_string_or_expression_fails(self):
+        for value in ("'true'", "${{ github.ref != 'refs/heads/main' }}"):
+            self.assertFalse(self.ok(WITH_BLOCK.replace("cancel-in-progress: true", "cancel-in-progress: " + value)))
 
     def test_job_level_block_does_not_count(self):
         text = WITHOUT_BLOCK + "    concurrency:\n      group: g\n      cancel-in-progress: true\n"
-        self.assertFalse(cancels_old_runs(text))
+        self.assertFalse(self.ok(text))
+
+    def test_inline_flow_mapping_passes(self):
+        text = WITHOUT_BLOCK.replace("jobs:", "concurrency: {group: g, cancel-in-progress: true}\njobs:")
+        self.assertTrue(self.ok(text))
+
+    def test_four_space_indentation(self):
+        four = WITH_BLOCK.replace("\n  ", "\n    ")
+        self.assertEqual(triggers(load(four)), {"pull_request", "push"})
+        self.assertTrue(self.ok(four))
+        bad = WITHOUT_BLOCK.replace("\n  ", "\n    ")
+        self.assertEqual(triggers(load(bad)), {"pull_request", "push"})
+        self.assertFalse(self.ok(bad))
 
     def test_trigger_forms(self):
-        self.assertEqual(triggers(WITH_BLOCK), {"pull_request", "push"})
-        self.assertEqual(triggers("on: [push, pull_request]\njobs:\n"), {"push", "pull_request"})
-        self.assertEqual(triggers("on: push\njobs:\n"), {"push"})
-        self.assertEqual(triggers("on:\n  workflow_call:\n    inputs:\n      a:\n        type: string\njobs:\n"), {"workflow_call"})
-        self.assertEqual(triggers("on:\n  schedule:\n    - cron: '0 * * * *'\njobs:\n"), set())
+        self.assertEqual(triggers(load(WITH_BLOCK)), {"pull_request", "push"})
+        self.assertEqual(triggers(load("on: [push, pull_request]\njobs: {}\n")), {"push", "pull_request"})
+        self.assertEqual(triggers(load("on:\n  - pull_request\n  - schedule\njobs: {}\n")), {"pull_request"})
+        self.assertEqual(triggers(load("on: push\njobs: {}\n")), {"push"})
+        self.assertEqual(triggers(load("'on': push\njobs: {}\n")), {"push"})
+        self.assertEqual(triggers(load("on:\n  workflow_call:\n    inputs:\n      a:\n        type: string\njobs: {}\n")), {"workflow_call"})
+        self.assertEqual(triggers(load("on:\n  schedule:\n    - cron: '0 * * * *'\njobs: {}\n")), set())
 
     def test_scheduled_only_workflow_is_not_checked(self):
-        self.assertFalse(triggers("on:\n  schedule:\n    - cron: '0 * * * *'\njobs:\n"))
+        self.assertFalse(triggers(load("on:\n  schedule:\n    - cron: '0 * * * *'\njobs: {}\n")))
+
+    def test_problems_reads_yml_and_yaml_and_bad_files(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "a.yml").write_text("name: a\non:\n    pull_request:\njobs: {}\n")
+            (d / "b.yaml").write_text("name: b\non: [push]\njobs: {}\n")
+            (d / "c.yml").write_text("name: c\non: pull_request\nconcurrency: {group: c, cancel-in-progress: true}\njobs: {}\n")
+            (d / "d.yml").write_text("on: [unclosed\n")
+            got = problems(d)
+        self.assertEqual(len(got), 3, got)
+        self.assertTrue(got[0].startswith("a.yml: runs on pull_request"))
+        self.assertTrue(got[1].startswith("b.yaml: runs on push"))
+        self.assertTrue(got[2].startswith("d.yml: cannot parse workflow"))
 
     def test_repo_workflows(self):
         self.assertEqual(problems(WORKFLOWS), [])
