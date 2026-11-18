@@ -39,7 +39,7 @@ jobs:
         run: |
           model=$(python3 scripts/pick-verifier-model)
           echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
-      - name: DeepSeek runs the audit independently
+      - name: Verifier runs the audit independently
         working-directory: change
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}

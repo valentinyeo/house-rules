@@ -37,12 +37,74 @@ class PickVerifierModelTests(unittest.TestCase):
         self.assertEqual(result.stdout, "kimi-k3\n")
 
     def test_missing_declaration_fails_with_message(self):
-        for body in ("", None, "Author: me", "Author model: deepseek-v4.1-flash"):
+        for body in ("", None, "Author: me", "Author model:", "text Author model: deepseek/x"):
             with self.subTest(body=body):
                 result = self.run_picker(body)
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, "")
                 self.assertIn("Author model: <family>/<model>", result.stderr)
+
+    def test_family_comes_from_the_whole_string_not_the_prefix(self):
+        cases = {
+            "Author model: deepseek-ai/DeepSeek-V3": "glm-5.3-flash",
+            "Author model: opencode-go/deepseek-v4.1-flash": "glm-5.3-flash",
+            "Author model: openrouter/deepseek/deepseek-chat": "glm-5.3-flash",
+            "Author model: deepseek-v4.1-flash": "glm-5.3-flash",
+            "Author model: z.ai/glm-5.3-flash": "deepseek-v4.1-flash",
+            "Author model: Z.AI/GLM-4.6": "deepseek-v4.1-flash",
+            "Author model: moonshotai/kimi-k2": "deepseek-v4.1-flash",
+            "Author model: opencode-go/kimi-k3": "deepseek-v4.1-flash",
+            "Author model: openrouter/anthropic/claude-3.5": "deepseek-v4.1-flash",
+        }
+        for body, want in cases.items():
+            with self.subTest(body=body):
+                self.assertEqual(self.run_picker(body).stdout, want + "\n")
+
+    def test_odd_spellings_still_count(self):
+        for body in (
+            "Author model: DEEPSEEK/x",
+            "Author model: deep_seek/x",
+            "Author model: Deep-Seek-V4",
+            "Author model: \uff24\uff45\uff45\uff50\uff33\uff45\uff45\uff4b/x",  # fullwidth
+            "Author model: deep\u200bseek/x",  # zero-width space
+            "**Author model:** deepseek/x",
+            "Author model : deepseek/x",
+            "author MODEL: `deepseek/x`",
+            "Author model:deepseek/x",
+            "> - Author model: deepseek/x",
+            "Author model: anthropic/claude-sonnet, deepseek/x",
+            "Author model: deepseek-ai/deepseek-r1-distill-qwen-32b",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(self.run_picker(body).stdout, "glm-5.3-flash\n")
+
+    def test_other_families_are_known(self):
+        for body in (
+            "Author model: o3-mini",
+            "Author model: openai/o4-mini",
+            "Author model: x-ai/grok-4",
+            "Author model: google/gemini-3",
+            "Author model: qwen/qwen3-coder",
+            "Author model: xiaomi/mimo-v2",
+            "Author model: minimax/MiniMax-M2",
+            "Author model: Claude Sonnet 5.5",
+            "Author model: codex",
+        ):
+            with self.subTest(body=body):
+                result = self.run_picker(body)
+                self.assertEqual((result.returncode, result.stdout), (0, "deepseek-v4.1-flash\n"))
+
+    def test_unknown_family_fails_with_message(self):
+        for body in (
+            "Author model: acme/mystery-1",
+            "Author model: me",
+            "Author model: d\u0435epseek/x",  # Cyrillic e
+            "Author model: anthropic/claude\nAuthor model: acme/x",
+        ):
+            with self.subTest(body=body):
+                result = self.run_picker(body)
+                self.assertEqual((result.returncode, result.stdout), (1, ""))
+                self.assertIn("unknown model family", result.stderr)
 
     def test_all_verifier_families_authored_fails(self):
         result = self.run_picker("Author model: deepseek/a\nAuthor model: glm/b\nAuthor model: kimi/c")

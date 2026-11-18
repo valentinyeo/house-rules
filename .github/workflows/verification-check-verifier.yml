@@ -43,7 +43,7 @@ jobs:
         run: |
           model=$(python3 scripts/pick-verifier-model)
           echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
-      - name: Independent DeepSeek Flash verification
+      - name: Independent verification
         working-directory: change
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
