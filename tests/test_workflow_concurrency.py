@@ -1,8 +1,13 @@
-"""Every workflow that runs on pull_request, push or workflow_call must cancel its old runs.
+"""Every workflow that runs on code events must cancel its old runs.
 
 Rule: old runs cancel when newer code arrives. A workflow needs a top-level
 `concurrency:` block with a non-empty `group` that repeats across runs of the same
-code, and `cancel-in-progress: true`.
+change, and `cancel-in-progress: true`.
+
+The group may only use values that stay the same when new code arrives on the same
+branch or PR (ALLOWED_GITHUB, `inputs.*`, `vars.*`). Anything else is rejected, so a
+per-commit or per-run value (github.sha, github.run_id, github.event.after,
+github.event.pull_request.head.sha, ...) fails even when it sits next to a ref.
 
   python3 tests/test_workflow_concurrency.py            run the tests
   python3 tests/test_workflow_concurrency.py --lint DIR print offenders in DIR/*.yml and *.yaml, exit 1 on any
@@ -21,7 +26,9 @@ except ImportError:  # never skip the lint quietly: a missing parser must fail l
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
-TRIGGERS = ("pull_request", "push", "workflow_call")
+# Every trigger that fires when code changes. schedule, workflow_dispatch and the
+# issue/comment/release events do not run per commit, so they need no cancelling.
+TRIGGERS = ("pull_request", "pull_request_target", "push", "merge_group", "workflow_call", "workflow_run")
 
 # Workflows exempt for now, each with the reason and the ticket that removes it.
 ALLOWED_MISSING = {
@@ -53,26 +60,69 @@ def triggers(data):
     return names & set(TRIGGERS)
 
 
-# A group with any of these never matches an older run, so nothing cancels.
-NEVER_REPEATS = re.compile(r"github\.run_(id|number|attempt)\b")
-# github.sha only repeats across runs of one commit; it needs one of these beside it.
-STABLE_KEYS = re.compile(r"github\.(ref\b|head_ref|event\.pull_request\.number|event\.number)|\binputs\.")
+# `github.*` values that are the same for every run of the same branch or PR.
+ALLOWED_GITHUB = {
+    "ref", "ref_name", "head_ref", "base_ref", "workflow", "repository", "event_name",
+    "event.number", "event.pull_request.number",
+    "event.pull_request.head.ref", "event.pull_request.base.ref",
+    "event.workflow_run.head_branch", "event.merge_group.base_ref",
+}
+# A merge queue run gets its own ref (gh-readonly-queue/<branch>/pr-N-<sha>), so ref-like
+# values never repeat there.
+MERGE_QUEUE_UNSTABLE = {"ref", "ref_name", "head_ref"}
+SAFE_FUNCTIONS = {"format", "contains", "startswith", "endswith", "join"}
+KEYWORDS = {"true", "false", "null"}
+TOKEN = re.compile(r"[a-z_][\w-]*(?:\s*\.\s*[\w*-]+)*(\s*\()?")
 
 
-def group_repeats(group):
+def unstable_parts(group, on=()):
+    """Names in `group` that may differ between two runs of the same change (empty list = fine).
+
+    Allow-list: only ALLOWED_GITHUB, `inputs.*`, `vars.*` and a few string functions pass. Anything
+    else (github.sha, github.run_id, github.event.after, github.event.pull_request.head.sha,
+    toJSON(...), a bare `github`, a computed `[...]` index, an unknown context) is returned.
+    """
+    allowed = set(ALLOWED_GITHUB)
+    if "merge_group" in on:
+        allowed -= MERGE_QUEUE_UNSTABLE
+    if group.count("${{") != group.count("}}"):
+        return ["unbalanced ${{ }}"]
+    bad = []
+    for expr in re.findall(r"\$\{\{(.*?)\}\}", group, re.S):
+        expr = expr.lower()
+        expr = re.sub(r"\[\s*'([^']*)'\s*\]", r".\1", expr)  # github['sha'] is github.sha
+        expr = re.sub(r"'(?:[^']|'')*'", "''", expr)  # string literals are not names
+        if "[" in expr:
+            bad.append("computed index in " + expr.strip())
+        for m in TOKEN.finditer(expr):
+            name = re.sub(r"\s+", "", m.group(0).rstrip("( \t")).strip()
+            parts = name.split(".")
+            if m.group(1):  # function call
+                if name not in SAFE_FUNCTIONS:
+                    bad.append(name + "()")
+            elif name in KEYWORDS:
+                continue
+            elif parts[0] == "github" and len(parts) > 1 and ".".join(parts[1:]) in allowed:
+                continue
+            elif parts[0] in ("inputs", "vars") and len(parts) > 1 and "*" not in name:
+                continue
+            else:
+                bad.append(name)
+    return sorted(set(bad))
+
+
+def group_repeats(group, on=()):
     """True when `group` is a non-empty string that can match an older run of the same change."""
     if not isinstance(group, str) or not group.strip():
         return False
-    if NEVER_REPEATS.search(group):
-        return False
-    return not ("github.sha" in group and not STABLE_KEYS.search(group))
+    return not unstable_parts(group, on)
 
 
 def cancels_old_runs(data):
     """True when top-level `concurrency:` has a repeating group and cancel-in-progress is exactly true."""
     block = data.get("concurrency")
     return (isinstance(block, dict) and block.get("cancel-in-progress") is True
-            and group_repeats(block.get("group")))
+            and group_repeats(block.get("group"), triggers(data)))
 
 
 def problems(directory):
@@ -90,8 +140,12 @@ def problems(directory):
             continue
         on = triggers(data)
         if on and not cancels_old_runs(data) and path.name not in ALLOWED_MISSING:
-            out.append("%s: runs on %s but has no top-level concurrency with a repeating group and cancel-in-progress: true"
-                       % (path.name, "/".join(sorted(on))))
+            block = data.get("concurrency")
+            group = block.get("group") if isinstance(block, dict) else None
+            why = unstable_parts(group, on) if isinstance(group, str) else []
+            out.append("%s: runs on %s but has no top-level concurrency with a repeating group and cancel-in-progress: true%s"
+                       % (path.name, "/".join(sorted(on)),
+                          " (group uses per-run or per-commit values: %s)" % ", ".join(why) if why else ""))
     return out
 
 
@@ -146,17 +200,106 @@ class WorkflowConcurrencyTest(unittest.TestCase):
         for value in ("''", "'  '", "~", "[a]"):
             self.assertFalse(self.ok(WITH_BLOCK.replace("x-${{ github.event.pull_request.number || github.ref }}", value)), value)
 
-    def test_group_that_never_repeats_fails(self):
-        old = "x-${{ github.event.pull_request.number || github.ref }}"
-        for value in ("${{ github.run_id }}", "x-${{ github.run_number }}", "x-${{ github.run_attempt }}",
-                      "x-${{ github.ref }}-${{ github.run_id }}", "x-${{ github.sha }}"):
-            self.assertFalse(self.ok(WITH_BLOCK.replace(old, value)), value)
+    OLD = "x-${{ github.event.pull_request.number || github.ref }}"
+
+    def group_ok(self, value, on=None):
+        text = WITH_BLOCK.replace(self.OLD, value)
+        if on:
+            text = text.replace("  pull_request:\n  push:\n    branches: [main]\n", on)
+        return self.ok(text)
+
+    def test_per_run_values_fail(self):
+        for value in ("github.run_id", "github.run_number", "github.run_attempt"):
+            self.assertFalse(self.group_ok("x-${{ %s }}" % value), value)
+            self.assertFalse(self.group_ok("x-${{ github.ref }}-${{ %s }}" % value), value)
+
+    def test_per_commit_values_fail_even_beside_a_ref(self):
+        for value in ("github.sha", "github.workflow_sha", "github.event.after", "github.event.before",
+                      "github.event.pull_request.head.sha", "github.event.pull_request.base.sha",
+                      "github.event.pull_request.merge_commit_sha", "github.event.pull_request.updated_at",
+                      "github.event.head_commit.id", "github.event.head_commit.timestamp",
+                      "github.event.repository.pushed_at", "github.event.merge_group.head_sha",
+                      "github.event.merge_group.base_sha", "github.event.workflow_run.head_sha",
+                      "github.event.workflow_run.id", "github.event.workflow_run.run_attempt",
+                      "github.event.workflow_run.run_number", "github.event.check_suite.head_sha",
+                      "github.event.commits", "github.event.pull_request", "github.event", "github",
+                      "github.event.pull_request.head.repo.pushed_at"):
+            self.assertFalse(self.group_ok("x-${{ %s }}" % value), value)
+            self.assertFalse(self.group_ok("x-${{ github.ref }}-${{ %s }}" % value), value)
+            self.assertFalse(self.group_ok("x-${{ github.event.pull_request.number || %s }}" % value), value)
+
+    def test_per_commit_value_in_the_old_false_pass_cases_fails(self):
+        for value in ("x-${{ github.sha }}-${{ github.ref }}", "${{ github.event.pull_request.head.sha }}",
+                      "x-${{ github.head_ref || github.sha }}", "x-${{ github.sha }}-${{ inputs.pr-number }}"):
+            self.assertFalse(self.group_ok(value), value)
+
+    def test_hidden_spellings_of_a_per_commit_value_fail(self):
+        for value in ("x-${{ github['sha'] }}", "x-${{ github['event']['after'] }}", "x-${{ GitHub.SHA }}",
+                      "x-${{ github . sha }}", "x-${{ github.event.pull_request.head['sha'] }}",
+                      "x-${{ github[inputs.key] }}", "x-${{ github.event.commits[0].id }}",
+                      "x-${{ github.* }}", "x-${{ format('{0}', github.sha) }}",
+                      "x-${{ toJSON(github.event) }}", "x-${{ toJSON(github.ref) }}", "x-${{ fromJSON('1') }}",
+                      "x-${{ hashFiles('**') }}", "x-${{ runner.name }}", "x-${{ env.X }}", "x-${{ secrets.X }}",
+                      "x-${{ steps.a.outputs.b }}", "x-${{ needs.a.result }}", "x-${{ matrix.a }}",
+                      "x-${{ inputs }}", "x-${{ inputs.* }}", "x-${{ github.ref }}-${{ github.sha"):
+            self.assertFalse(self.group_ok(value), value)
 
     def test_group_that_repeats_passes(self):
-        old = "x-${{ github.event.pull_request.number || github.ref }}"
-        for value in ("x", "x-${{ github.ref }}", "x-${{ github.head_ref || github.sha }}",
-                      "x-${{ github.sha }}-${{ github.ref }}", "x-${{ inputs.pr-number }}"):
-            self.assertTrue(self.ok(WITH_BLOCK.replace(old, value)), value)
+        for value in ("x", "x-${{ github.ref }}", "x-${{ github.ref_name }}",
+                      "x-${{ github.head_ref || github.ref }}", "x-${{ github.event.pull_request.number }}",
+                      "x-${{ github.event.number || github.ref }}", "x-${{ github.workflow }}-${{ github.ref }}",
+                      "x-${{ github.event.pull_request.head.ref }}", "x-${{ inputs.pr-number }}-${{ inputs.mode }}",
+                      "x-${{ vars.NAME }}", "x-${{ github.event_name == 'push' && github.ref || 'other' }}",
+                      "x-${{ github['ref'] }}", "x-${{ format('{0}-{1}', github.workflow, github.ref) }}",
+                      "x-${{ github.repository }}-${{ github.base_ref }}"):
+            self.assertTrue(self.group_ok(value), value)
+
+    def test_names_inside_string_literals_do_not_count(self):
+        self.assertTrue(self.group_ok("x-${{ github.ref == 'github.sha' && github.ref || github.ref }}"))
+        self.assertTrue(self.group_ok("literal github.sha text ${{ github.ref }}"))
+
+    def test_merge_queue_runs_need_a_value_that_repeats_in_the_queue(self):
+        merge = "  merge_group:\n"
+        self.assertFalse(self.group_ok("x-${{ github.ref }}", merge))
+        self.assertFalse(self.group_ok("x-${{ github.ref_name }}", merge))
+        self.assertFalse(self.group_ok("x-${{ github.head_ref }}", merge))
+        self.assertFalse(self.group_ok("x-${{ github.event.merge_group.head_sha }}", merge))
+        self.assertTrue(self.group_ok("x-${{ github.event.merge_group.base_ref }}", merge))
+        self.assertTrue(self.group_ok("x", merge))
+
+    def test_every_code_trigger_needs_the_block(self):
+        for trigger in TRIGGERS:
+            text = "on:\n  %s:\njobs: {}\n" % trigger
+            self.assertEqual(triggers(load(text)), {trigger}, trigger)
+            self.assertFalse(cancels_old_runs(load(text)), trigger)
+            self.assertTrue(cancels_old_runs(load(text + "concurrency: {group: g, cancel-in-progress: true}\n")), trigger)
+
+    def test_triggers_that_are_not_per_commit_need_nothing(self):
+        for trigger in ("schedule", "workflow_dispatch", "issues", "issue_comment", "release", "repository_dispatch"):
+            self.assertEqual(triggers(load("on:\n  %s:\njobs: {}\n" % trigger)), set(), trigger)
+
+    def test_pull_request_target_and_merge_group_without_block_are_reported(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "t.yml").write_text("on: pull_request_target\njobs: {}\n")
+            (d / "m.yml").write_text("on:\n  merge_group:\njobs: {}\n")
+            (d / "r.yml").write_text("on:\n  workflow_run:\n    workflows: [a]\njobs: {}\n")
+            got = problems(d)
+        self.assertEqual(len(got), 3, got)
+        self.assertTrue(got[0].startswith("m.yml: runs on merge_group"))
+        self.assertTrue(got[1].startswith("r.yml: runs on workflow_run"))
+        self.assertTrue(got[2].startswith("t.yml: runs on pull_request_target"))
+
+    def test_report_names_the_per_commit_value(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "w.yml").write_text("on: push\nconcurrency:\n  group: x-${{ github.sha }}-${{ github.ref }}\n"
+                                     "  cancel-in-progress: true\njobs: {}\n")
+            got = problems(d)
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("github.sha", got[0])
 
     def test_job_level_block_does_not_count(self):
         text = WITHOUT_BLOCK + "    concurrency:\n      group: g\n      cancel-in-progress: true\n"
