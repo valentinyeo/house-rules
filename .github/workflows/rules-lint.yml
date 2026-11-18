@@ -1,9 +1,19 @@
 name: rules-lint
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: rules-lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
+  skill-lint:
+    uses: ./.github/workflows/skill-lint.yml
+    secrets: inherit
   rules-lint:
     runs-on: ubuntu-latest
     steps:

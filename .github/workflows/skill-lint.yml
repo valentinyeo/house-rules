@@ -1,0 +1,163 @@
+name: Shared skill lint
+on:
+  workflow_call:
+    inputs:
+      lint-ref:
+        type: string
+        default: ''
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  pstack-verifier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          path: change
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: valentinyeo/house-rules
+          ref: ${{ inputs.lint-ref || github.sha }}
+          path: lint-source
+          persist-credentials: false
+      - name: Read caller's pinned sources
+        id: pins
+        working-directory: change
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          pins = json.load(open('.skill-lint.json'))
+          for key in ('pstack-ref', 'catalog-ref'):
+              assert re.fullmatch('[0-9a-f]{40}', pins[key]), f'{key}: pin a full commit SHA'
+          assert re.fullmatch(r'\d+(\.\d+)+', pins['pstack-version'])
+          assert pins['catalog-repository'] in ('valentinyeo/house-rules', 'valentinyeo/vstack')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in pins.items():
+                  output.write(f'{key}={value}\n')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          repository: cursor/plugins
+          ref: ${{ steps.pins.outputs.pstack-ref }}
+          path: pstack-source
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pins.outputs.catalog-repository }}
+          ref: ${{ steps.pins.outputs.catalog-ref }}
+          path: catalog
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.2
+      - name: Verify pinned pstack version
+        env:
+          VERSION: ${{ steps.pins.outputs.pstack-version }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          actual = json.load(open('pstack-source/pstack/plugin.json'))['version']
+          assert actual == os.environ['VERSION'], f'pstack version {actual}: fix .skill-lint.json'
+          PY
+      - name: Focused regressions, including the real 2261-word mistake
+        run: python3 -m unittest discover -s lint-source/tests -p test_skill_lint.py -v
+      - name: Lint changed skills with the shared script
+        working-directory: change
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          test -n "$BASE"
+          test "$BASE" != 0000000000000000000000000000000000000000
+          if [ -f house-rules.md ]; then house=house-rules.md; else house=../catalog/house-rules.md; fi
+          printf '%s\n' "python3 ../lint-source/scripts/skill-lint --base $BASE --pstack ../pstack-source/pstack/skills --house-rules $house --catalog ../catalog/skills" > "$RUNNER_TEMP/skill-lint-command"
+          bash "$RUNNER_TEMP/skill-lint-command"
+      - uses: actions/setup-node@v4
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          node-version: '22'
+      - name: Prepare independent verifier
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        working-directory: change
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          npm install -g @earendil-works/pi-coding-agent@1.5.2
+          printf 'Read %s/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.\n' "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/skill-brief.md"
+          cat >> "$RUNNER_TEMP/skill-brief.md" <<'BRIEF'
+          Goal: stop custom skills growing or repeating pstack/house-rules through one shared check, not hand cleanups.
+          You are DeepSeek Flash, independent of the Codex author. Read ../lint-source/docs/worker-brief.md (shared worker rules). Report faults before workarounds. Without service credentials, include faults in your verdict for the runner to file.
+          Follow pstack poteto-mode/playbooks/authoring-a-skill.md, principle-encode-lessons-in-structure and correct/SKILL.md. Review new comments under pstack no-comments. Do not edit tracked files, merge, push or run a full suite.
+          Inspect the actual PR diff and docs/skill-lint.md in lint-source. Only regressions introduced by this change block; list unchanged skill findings as notes. The full audit intentionally does not pass legacy skills. CI checks changed skills, with no global size exceptions.
+          Run the two required commands below as separate bash calls exactly as written, from the change directory. Exercise the real CLI, not only syntax. Make three additional break attempts covering growth metadata, copied text and missing references/prior art. Reproduce the historical 2261-word failure and inspect the current snapshot's real findings. Both snapshots are in ../lint-source/tests/fixtures/skill-lint. Do not treat documented legacy findings as a new failure.
+          End with VERDICT: PASS, VERDICT: PASS+NOTES or VERDICT: FAIL on the first line of your final answer. Include commands, observed results, break attempts and limits. A real regression or failed required command means FAIL.
+          BRIEF
+          printf '\nInspect git diff %s..HEAD.\nRequired commands:\n' "$BASE" >> "$RUNNER_TEMP/skill-brief.md"
+          printf '%s\n' 'python3 -m unittest discover -s ../lint-source/tests -p test_skill_lint.py -v' >> "$RUNNER_TEMP/skill-brief.md"
+          cat "$RUNNER_TEMP/skill-lint-command" >> "$RUNNER_TEMP/skill-brief.md"
+      - name: DeepSeek verifies on GitHub
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        working-directory: change
+        env:
+          OPENCODE_API_KEY: ${{ secrets.PSTACK_OPENCODE_API_KEY || secrets.OPENCODE_API_KEY }}
+        run: |
+          test -n "$OPENCODE_API_KEY"
+          timeout 960 pi --provider opencode-go --model deepseek-v4.1-flash --thinking low \
+            --no-session --no-extensions --no-skills --no-context-files --no-prompt-templates --no-mcp \
+            --tools read,bash --mode json --print "$(cat "$RUNNER_TEMP/skill-brief.md")" > "$RUNNER_TEMP/skill-verifier.jsonl"
+      - name: Post current-head verdict with execution evidence
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        working-directory: change
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, shlex, subprocess
+          scratch = pathlib.Path(os.environ['RUNNER_TEMP'])
+          events = [json.loads(line) for line in (scratch / 'skill-verifier.jsonl').read_text().splitlines() if line.startswith('{')]
+          started, executed, answers = {}, [], []
+          for event in events:
+              if event.get('type') == 'tool_execution_start' and event.get('toolName') == 'bash':
+                  started[event['toolCallId']] = (event.get('args') or {}).get('command', '')
+              if event.get('type') == 'tool_execution_end' and event.get('toolName') == 'bash' and not event.get('isError'):
+                  result = event.get('result') or {}
+                  details = result.get('structuredContent') or {}
+                  if not result.get('isError') and details.get('exit_code') == 0 and details.get('output', '').strip():
+                      executed.append(started.get(event.get('toolCallId'), ''))
+              message = event.get('message') or {}
+              if event.get('type') == 'message_end' and message.get('role') == 'assistant':
+                  answers.append('\n'.join(c.get('text', '') for c in message.get('content', []) if c.get('type') == 'text'))
+          answer = answers[-1] if answers else 'No verdict returned.'
+          required = ['python3 -m unittest discover -s ../lint-source/tests -p test_skill_lint.py -v', (scratch / 'skill-lint-command').read_text().strip()]
+          def normalize(command):
+              parts = shlex.split(command)
+              if len(parts) >= 3 and parts[0] == 'cd' and parts[2] == '&&' and pathlib.Path(parts[1]).resolve() == pathlib.Path.cwd():
+                  parts = parts[3:]
+              return parts
+          missing = [command for command in required if not any(normalize(command) == normalize(actual) for actual in executed)]
+          match = re.match(r'^VERDICT: (PASS\+NOTES|PASS|FAIL)\b', answer)
+          clean = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0
+          verdict = match[1] if match and not missing and clean else 'FAIL'
+          body = f'pstack-verifier: {verdict} @ {os.environ["HEAD"]}\n\nDeepSeek Flash, GitHub-hosted.\n\n{answer}\n\nMissing required execution: {missing}\nTracked files unchanged: {clean}\n'
+          path = scratch / 'skill-verdict.md'
+          path.write_text(body)
+          subprocess.run(['gh', 'pr', 'comment', os.environ['PR'], '--repo', os.environ['GITHUB_REPOSITORY'], '--body-file', str(path)], check=True)
+          print(body)
+          raise SystemExit(0 if verdict in ('PASS', 'PASS+NOTES') else 1)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: skill-lint-verification
+          path: |
+            ${{ runner.temp }}/skill-verifier.jsonl
+            ${{ runner.temp }}/skill-verdict.md
+            ${{ runner.temp }}/skill-brief.md
