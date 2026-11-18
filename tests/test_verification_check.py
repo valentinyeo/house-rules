@@ -164,6 +164,94 @@ else:
         self.assertIn('recorded version matches installed', out)
         self.assertNotIn('PSTACK CHANGED', out)
 
+    def add_formal_setup(self, sync=None):
+        self.put('src/delivery.py', 'def retry(): return 1\n')
+        self.commit()
+        sync = sync or self.git('rev-parse', 'HEAD')
+        self.put('.agents/skills/prove-delivery/SKILL.md', '''# Delivery proof
+Run the Z3 solver with `python3 proofs/delivery.py`.
+The authoritative coverage is `proofs/coverage.json`.
+''')
+        self.put('proofs/delivery.py', '# symbolic delivery obligations\n')
+        self.put('proofs/coverage.json',
+                 '{"sync_commit": "' + sync + '", "functions": '
+                 '{"retry": {"file": "src/delivery.py", "sha256": "fixture"}}}\n')
+        self.commit()
+        return sync
+
+    def test_missing_formal_setup_and_risk_evidence(self):
+        self.put('src/delivery.py', 'def retry_outbox_queue(): return 1\n')
+        self.commit()
+        out = self.run_facts()
+        self.assertIn('## Formal verification', out)
+        self.assertIn('formal skills: none detected', out)
+        self.assertIn('src/delivery.py:1:', out)
+        self.assertIn('Retries or queues', out)
+
+    def test_formal_setup_detected_by_contents_not_name(self):
+        self.add_formal_setup()
+        out = self.run_facts()
+        self.assertIn('.agents/skills/prove-delivery/SKILL.md', out)
+        self.assertIn('coverage record: proofs/coverage.json', out)
+        self.assertIn('covered code changed since sync: 0 commits', out)
+        self.assertIn('recent formal setup commits', out)
+
+    def test_changed_covered_code_requires_formal_maintenance(self):
+        sync = self.add_formal_setup()
+        self.put('src/delivery.py', 'def retry(): return 2\n')
+        self.commit()
+        changed = self.git('rev-parse', 'HEAD')
+        out = self.run_facts()
+        self.assertIn('sync commit: ' + sync, out)
+        self.assertIn('covered code changed since sync: 1 commit', out)
+        self.assertIn(changed, out)
+        self.assertIn('src/delivery.py', out)
+
+    def test_unrelated_change_does_not_stale_formal_coverage(self):
+        self.add_formal_setup()
+        self.put('src/unrelated.py', '# unrelated feature\n')
+        self.commit()
+        out = self.run_facts()
+        self.assertIn('covered code changed since sync: 0 commits', out)
+
+    def test_missing_sync_history_is_unknown_not_current(self):
+        self.add_formal_setup(sync='f' * 40)
+        out = self.run_facts()
+        self.assertIn('sync history: UNKNOWN', out)
+        self.assertNotIn('covered code changed since sync: 0 commits', out)
+
+    def test_formal_skill_without_coverage_metadata_is_unknown(self):
+        self.put('.cursor/skills/prove-queue/SKILL.md', '# Proof\nRun TLC on `proofs/queue.tla`.\n')
+        self.put('proofs/queue.tla', '---- MODULE queue ----\n====\n')
+        self.commit()
+        out = self.run_facts()
+        self.assertIn('.cursor/skills/prove-queue/SKILL.md', out)
+        self.assertIn('proofs/queue.tla', out)
+        self.assertIn('sync history: UNKNOWN', out)
+
+    def test_markdown_coverage_and_sync_commit(self):
+        self.put('src/queue.py', 'def drain(): return 1\n')
+        self.commit()
+        sync = self.git('rev-parse', 'HEAD')
+        self.put('.claude/skills/prove-queue/SKILL.md',
+                 '# Formal verification\nRun `proofs/queue.tla`.\n'
+                 f'Last sync commit: `{sync}`.\nCovered code: `src/queue.py`.\n')
+        self.put('proofs/queue.tla', '---- MODULE queue ----\n====\n')
+        self.commit()
+        self.put('src/queue.py', 'def drain(): return 2\n')
+        self.commit()
+        out = self.run_facts()
+        self.assertIn('covered code changed since sync: 1 commit', out)
+        self.assertIn('src/queue.py', out)
+
+    def test_deleted_covered_file_cannot_look_current(self):
+        self.add_formal_setup()
+        (self.repo / 'src/delivery.py').unlink()
+        self.commit()
+        out = self.run_facts()
+        self.assertIn('covered path missing at snapshot: src/delivery.py', out)
+        self.assertIn('covered code changed since sync: 1 commit', out)
+
     def test_recorded_version_unavailable_is_explicit(self):
         self.put('.claude/skills/verify-app/SKILL.md', '# Verify\npstack: 0.14.0\n')
         self.commit()
