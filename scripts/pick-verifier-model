@@ -5,6 +5,8 @@
   pick-verifier-model --self-test
 
 The PR body declares each author on its own line: `Author model: <provider or family>/<model>`.
+A declaration counts only as a whole line, exactly `Author model: <one token without spaces>`, outside fenced
+code blocks (``` or ~~~). Transcripts, quotes, bullets and lines with trailing text are not declarations.
 The family comes from known model-name tokens anywhere on that line (`opencode-go/deepseek-v4.1-flash` is DeepSeek,
 `z.ai/glm-5` is GLM). A string naming two families counts as both. An unknown family exits 1.
 Order of verifiers: deepseek-v4.1-flash, glm-5.3-flash, kimi-k3. First one whose family no author uses wins.
@@ -34,7 +36,8 @@ FAMILY_NAMES = {
     "minimax": ("minimax",),
 }
 O_SERIES = re.compile(r"^o\d+$")  # o1, o3, o4 (o3-mini splits into o3 + mini)
-LINE = re.compile(r"^[ \t>*+-]*`?Author model\s*:\**[ \t]*([^\n]*\S)[ \t]*$", re.I | re.M)
+DECLARATION = re.compile(r"^Author model: (\S+)$")
+FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 def family_of(declared):
@@ -47,9 +50,29 @@ def family_of(declared):
     return found
 
 
+def declarations(body):
+    """Tokens of the whole-line `Author model: <token>` declarations that sit outside fenced code blocks."""
+    found = []
+    fence = None  # the opening fence string while inside a fenced block
+    for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if fence:
+            closing = line.strip()
+            if closing and set(closing) == {fence[0]} and len(closing) >= len(fence):
+                fence = None
+            continue
+        opening = FENCE_OPEN.match(line)
+        if opening:
+            fence = opening.group(1)
+            continue
+        match = DECLARATION.match(line)
+        if match:
+            found.append(match.group(1))
+    return found
+
+
 def families(body):
     found = set()
-    for declared in LINE.findall(body or ""):
+    for declared in declarations(body):
         known = family_of(declared)
         if not known:
             raise SystemExit(
@@ -89,7 +112,9 @@ def self_test():
         ("Author model: anthropic/claude-sonnet", "deepseek-v4.1-flash"),
         ("Author model: openai/gpt-6.1-sol\nAuthor model: anthropic/claude-sonnet", "deepseek-v4.1-flash"),
         ("Author model: deepseek/deepseek-v4.1-flash", "glm-5.3-flash"),
-        ("- Author model: DeepSeek/deepseek-v4.1-flash", "glm-5.3-flash"),
+        ("Author model: DeepSeek/deepseek-v4.1-flash", "glm-5.3-flash"),
+        ("Author model: deepseek/x\r\n", "glm-5.3-flash"),
+        ("```\nAuthor model: deepseek/x\n```\nAuthor model: anthropic/claude-sonnet", "deepseek-v4.1-flash"),
         ("Author model: deepseek-ai/DeepSeek-V3", "glm-5.3-flash"),
         ("Author model: opencode-go/deepseek-v4.1-flash", "glm-5.3-flash"),
         ("Author model: deepseek-v4.1-flash", "glm-5.3-flash"),
@@ -103,7 +128,7 @@ def self_test():
     for body, want in cases:
         got = pick(body)
         assert got == want, (body, got, want)
-    for body in (None, "", "no line here", "text Author model: deepseek/x"):
+    for body in (None, "", "no line here", "text Author model: deepseek/x", "Author model: deepseek/x trailing", "```\nAuthor model: deepseek/x\n```"):
         try:
             pick(body)
         except SystemExit as stop:

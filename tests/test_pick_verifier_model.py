@@ -37,7 +37,7 @@ class PickVerifierModelTests(unittest.TestCase):
         self.assertEqual(result.stdout, "kimi-k3\n")
 
     def test_missing_declaration_fails_with_message(self):
-        for body in ("", None, "Author: me", "Author model:", "text Author model: deepseek/x"):
+        for body in ("", None, "Author: me", "Author model:", "text Author model: deepseek/x", "Author model: deepseek/x trailing"):
             with self.subTest(body=body):
                 result = self.run_picker(body)
                 self.assertEqual(result.returncode, 1)
@@ -67,16 +67,58 @@ class PickVerifierModelTests(unittest.TestCase):
             "Author model: Deep-Seek-V4",
             "Author model: \uff24\uff45\uff45\uff50\uff33\uff45\uff45\uff4b/x",  # fullwidth
             "Author model: deep\u200bseek/x",  # zero-width space
-            "**Author model:** deepseek/x",
-            "Author model : deepseek/x",
-            "author MODEL: `deepseek/x`",
-            "Author model:deepseek/x",
-            "> - Author model: deepseek/x",
-            "Author model: anthropic/claude-sonnet, deepseek/x",
             "Author model: deepseek-ai/deepseek-r1-distill-qwen-32b",
         ):
             with self.subTest(body=body):
                 self.assertEqual(self.run_picker(body).stdout, "glm-5.3-flash\n")
+
+    def test_only_whole_line_declarations_count(self):
+        for body in (
+            "Author model: deepseek/x trailing text",
+            "Author model: z.ai/glm-5.3-flash   before: a   after: b",
+            "Author model: Claude Sonnet 5.5",
+            "Author model: anthropic/claude-sonnet, deepseek/x",
+            "- Author model: deepseek/x",
+            "> Author model: deepseek/x",
+            "**Author model:** deepseek/x",
+            "Author model : deepseek/x",
+            "Author model:deepseek/x",
+            "author model: deepseek/x",
+            " Author model: deepseek/x",
+            "Author model: deepseek/x ",
+        ):
+            with self.subTest(body=body):
+                result = self.run_picker(body)
+                self.assertEqual((result.returncode, result.stdout), (1, ""))
+                self.assertIn("Author model: <family>/<model>", result.stderr)
+        # an ignored line never hides a real declaration
+        result = self.run_picker("Author model: deepseek/x trailing\nAuthor model: anthropic/claude-sonnet")
+        self.assertEqual(result.stdout, "deepseek-v4.1-flash\n")
+
+    def test_fenced_lines_are_ignored(self):
+        transcript = "Author model: z.ai/glm-5.3-flash\nAuthor model: moonshotai/kimi-k2\nAuthor model: deepseek/x"
+        bodies = {
+            "backticks": "```\n%s\n```\nAuthor model: anthropic/claude-sonnet" % transcript,
+            "info string": "```text\n%s\n```\nAuthor model: anthropic/claude-sonnet" % transcript,
+            "longer fence": "````\n%s\n```\nstill code\n````\nAuthor model: anthropic/claude-sonnet" % transcript,
+            "tildes": "~~~\n%s\n~~~\nAuthor model: anthropic/claude-sonnet" % transcript,
+            "declaration first": "Author model: anthropic/claude-sonnet\n```\n%s\n```" % transcript,
+            "crlf": "```\r\n%s\r\n```\r\nAuthor model: anthropic/claude-sonnet\r\n" % transcript.replace("\n", "\r\n"),
+            "unclosed": "Author model: anthropic/claude-sonnet\n```\n%s" % transcript,
+        }
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                result = self.run_picker(body)
+                self.assertEqual((result.returncode, result.stdout), (0, "deepseek-v4.1-flash\n"), result.stderr)
+
+    def test_only_fenced_declarations_fail_as_missing(self):
+        result = self.run_picker("```\nAuthor model: deepseek/x\n```")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Author model: <family>/<model>", result.stderr)
+
+    def test_declaration_after_a_closed_fence_counts(self):
+        result = self.run_picker("```\nx\n```\nAuthor model: deepseek/x")
+        self.assertEqual(result.stdout, "glm-5.3-flash\n")
 
     def test_other_families_are_known(self):
         for body in (
@@ -87,7 +129,7 @@ class PickVerifierModelTests(unittest.TestCase):
             "Author model: qwen/qwen3-coder",
             "Author model: xiaomi/mimo-v2",
             "Author model: minimax/MiniMax-M2",
-            "Author model: Claude Sonnet 5.5",
+            "Author model: Claude-Sonnet-5.5",
             "Author model: codex",
         ):
             with self.subTest(body=body):
