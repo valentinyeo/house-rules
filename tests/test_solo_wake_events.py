@@ -81,3 +81,27 @@ class EventWakeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NamelessIdentityTests(EventWakeTests):
+    def run_nameless(self, name):
+        self.chats = {'live-test': {'transcript': 'current', 'name': name}}
+        (self.project / 'current.jsonl').write_text(json.dumps(self.event()) + '\n')
+        logs, sent = [], []
+        with (patch.multiple(wake, HOME=self.home, DRY_RUN=False, STATE=self.home / 'state.json',
+                            log=logs.append, identity_gap=lambda n: 'a token' if n else 'a Multibot name (the tab has none)',
+                            send=lambda session, text: (sent.append(text) is None, 'test')),
+                patch.object(wake.roster, 'rows', return_value=[self.row]), \
+                patch.object(wake, 'session_of', return_value=self.session)):
+            wake.loop_watch(self.chats, {}, {}, self.now)
+        return logs, sent
+
+    def test_nameless_chat_is_logged_but_never_asked_to_log_in_as_none(self):
+        logs, sent = self.run_nameless(None)
+        self.assertTrue(any('identity: gap' in line for line in logs), logs)
+        self.assertFalse(any('None' in text for text in sent), sent)
+        self.assertEqual(sent, [], sent)
+
+    def test_named_chat_with_gap_is_still_asked(self):
+        logs, sent = self.run_nameless('Test Lead')
+        self.assertTrue(any('Test Lead' in text for text in sent), sent)
