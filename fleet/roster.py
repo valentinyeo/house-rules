@@ -7,6 +7,8 @@ concurrent session starts never write the same file and the synced house-rules c
 Session discovery covers both shapes on this VPS: tmux panes that run an agent (claude, hax, codex, cursor-agent)
 and Multibot hosted chats (agent-host config whose tmux session is alive; the agent may be idle-stopped).
 """
+import calendar
+import html
 import importlib.util
 import json
 import os
@@ -21,6 +23,8 @@ ROSTER = HERE / "roster.json"
 ANNOUNCE = Path(os.environ.get("ROSTER_ANNOUNCE_DIR", HOME / ".local/state/roster/announce"))
 MP_SEND = HOME / ".local/share/multiprompt-talk/mp_send.py"
 AGENT = re.compile(r"(^|/)(claude|hax|codex|cursor-agent)( |$)")
+ANNOUNCE_TTL = 24 * 3600  # a dead session's announcement stops being a roster row after a day (SOFT-2716)
+OWNER = "Fleet Tools"  # who reads fleet alarms: Hypertask agent "Fleet Tools" on board 2060 (SOFT-2698)
 FIELDS = ("name", "multibot", "tmux", "sid", "cwd", "kind", "board", "view", "app", "client", "harness", "take")
 
 
@@ -52,14 +56,84 @@ def key_of(entry):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:80]
 
 
-def announced():
+def announce_files():
+    """[(path, entry)] for every readable announcement. announce/stale/ is a subdirectory, so it is never read."""
     out = []
     for f in sorted(ANNOUNCE.glob("*.json")) if ANNOUNCE.is_dir() else []:
         try:
-            out.append(json.loads(f.read_text()))
+            out.append((f, json.loads(f.read_text())))
         except (OSError, ValueError):
             continue
     return out
+
+
+def announced():
+    return [a for _, a in announce_files()]
+
+
+def seen_epoch(entry):
+    """Seconds since the epoch of an announcement's `seen` stamp (UTC, now_iso format); None when missing or unreadable."""
+    try:
+        return calendar.timegm(time.strptime(entry.get("seen"), "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return None
+
+
+def claude_registry_sids(sessions_dir=None):
+    """Session ids of interactive Claude sessions whose process lives (~/.claude/sessions/<pid>.json), as roster-live reads them."""
+    out = set()
+    for f in (sessions_dir or HOME / ".claude/sessions").glob("*.json"):
+        try:
+            d = json.loads(f.read_text())
+            os.kill(int(d.get("pid")), 0)
+        except (OSError, ValueError, TypeError):
+            continue
+        if d.get("kind") == "interactive" and d.get("sessionId"):
+            out.add(d["sessionId"])
+    return out
+
+
+def live_keys():
+    """(tmux names, session ids) alive now: the sessions roster-check and roster-live list (live_sessions, Claude's
+    own registry) plus any live tmux session, which roster-check also counts for an announced idle shell."""
+    live = live_sessions()
+    tmux = {s["tmux"] for s in live} | set(_mp_send().tmux_names() or ())
+    return tmux, {s["sid"] for s in live if s.get("sid")} | claude_registry_sids()
+
+
+def stale_announcements(now=None, live=None):
+    """[(path, entry)] of announcements to ignore: `seen` older than ANNOUNCE_TTL and session not live. An entry
+    with no readable `seen`, or one a roster.json row covers, is never stale. `live` is a (tmux, sids) pair, looked
+    up only when an old entry needs it; when liveness cannot be read nothing is stale."""
+    now = time.time() if now is None else now
+    static, out, live_now = static_rows(), [], live
+    for path, a in announce_files():
+        seen = seen_epoch(a)
+        if seen is None or now - seen <= ANNOUNCE_TTL or row_for(static, a.get("tmux"), a.get("multibot")):
+            continue
+        if live_now is None:
+            try:
+                live_now = live_keys()
+            except Exception:
+                return []
+        tmux, sids = live_now
+        if a.get("tmux") not in tmux and a.get("sid") not in sids:
+            out.append((path, a))
+    return out
+
+
+def archive_stale(now=None, live=None):
+    """Move stale announcements to announce/stale/ (kept, never deleted). Returns the paths moved."""
+    moved = []
+    for path, _ in stale_announcements(now, live):
+        dest = ANNOUNCE / "stale"
+        dest.mkdir(exist_ok=True)
+        try:
+            os.replace(path, dest / path.name)
+        except OSError:
+            continue
+        moved.append(path)
+    return moved
 
 
 def write_announce(entry):
@@ -81,10 +155,14 @@ def write_announce(entry):
 
 
 def rows():
-    """Static rows plus announced sessions that no static row covers, as rows of the same shape."""
+    """Static rows plus announced sessions that no static row covers, as rows of the same shape. A dead session
+    whose announcement is over a day old drops out; static rows never do."""
     static = static_rows()
     extra = []
-    for a in announced():
+    stale = {p for p, _ in stale_announcements()}
+    for path, a in announce_files():
+        if path in stale:
+            continue
         if row_for(static, a.get("tmux"), a.get("multibot")) is None:
             extra.append(dict({k: a.get(k) for k in FIELDS}, name=a.get("name") or a.get("tmux") or a.get("sid"),
                               status="announced", seen=a.get("seen")))
@@ -171,3 +249,18 @@ def live_sessions():
 
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def post_alarm(note, run=subprocess.run, env=os.environ):
+    """One Hypertask agent-log note (nobody notified) on the ticket FLEET_ALARM_TICKET, written by the agent login in
+    HT_TOKEN, passed through the CLI's own --token option. "off" when either variable is missing (log-only, as before),
+    else "posted" or "failed". Never raises and never prints the token."""
+    ticket, token = env.get("FLEET_ALARM_TICKET"), env.get("HT_TOKEN")
+    if not ticket or not token:
+        return "off"
+    try:
+        r = run(["hypertask", "--json", "--token", token, "activity", "add", ticket, "--text", html.escape(note)],
+                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return "failed"
+    return "posted" if r.returncode == 0 else "failed"

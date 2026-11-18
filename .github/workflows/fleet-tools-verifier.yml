@@ -1,0 +1,91 @@
+name: Fleet tools verifier
+on:
+  pull_request:
+    paths:
+      - fleet/**
+      - '!fleet/reconcile'
+      - '!fleet/lease'
+      - tests/**
+      - '!tests/test_fleet_reconcile.py'
+      - '!tests/fixtures/reconcile/**'
+      - .github/workflows/fleet-tools-verifier.yml
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: fleet-tools-verifier-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  fleet-tools-verifier:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: change
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: cursor/plugins
+          ref: e1cc03121a0e71129a4fb730d7c5528a0a3e43c8
+          path: pstack-source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install -g @earendil-works/pi-coding-agent@1.5.0
+      - name: Save the PR body for the verifier
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+      - name: Pick verifier model
+        working-directory: change
+        run: |
+          model=$(python3 scripts/pick-verifier-model)
+          echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
+      - name: Verifier challenges the fleet tool change
+        working-directory: change
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          set -o pipefail
+          test -n "$OPENCODE_API_KEY"
+          pi --provider opencode-go --model "$VERIFIER_MODEL" --thinking low \
+            --no-extensions --no-mcp --no-skills --no-context-files \
+            --no-prompt-templates --no-themes --tools read,bash \
+            --no-session --mode json -p \
+            'Read '"$GITHUB_WORKSPACE"'/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
+          Goal: every fleet tool change gets an independent second check. Challenge this PR head. You work in the checkout of the PR head. Fleet reconcile and fleet lease have their own verifier. Skip them.
+          Spec: the PR body is in '"$RUNNER_TEMP"'/pr-body.md. Read it first. Take its Why, its Done when, and its proof as the spec. It links a ticket. You cannot open the ticket. No board credentials exist here. If the body states no Done when, judge the change against its own title and Why, and say so.
+          Then read git diff origin/main...HEAD completely. Read every touched tool in full. Read docs/worker-brief.md if the change touches briefs.
+          Run the --self-test of every touched tool that has one. Run each tests/test_*.py that covers a touched tool, with python3 -m unittest. Find covering tests with the tool name. If a touched tool has no test and no self-test, say so.
+          Exercise the real CLI of each touched tool. Use fake hypertask, gh, and tmux binaries on a temp PATH when the tool calls them. Keep fakes and scratch files in a temp dir, never in the checkout. Test the changed behavior, then try to break it. Use empty input, bad flags, missing files, malformed JSON, stale state, and failing subprocesses.
+          Rules: never use live credentials. Never run a live apply or any write to a real board, repo, or session. Never edit tracked files. Never merge. Never push. No network except package reads. Scope checks to this change. Existing base failures are notes.
+          A requested behavior that fails means FAIL. A bug a user would hit means FAIL. A PR that changes a tool and shows no proof of the change means FAIL.
+          End with one verdict line. The line holds only the word PASS, PASS+NOTES, or FAIL. Below it put exact evidence: commands, logs, and any user-visible bugs. Keep prose sentences at most eight words. Commands and logs stay exact.' \
+            > verifier.jsonl
+      - run: git -C change diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deepseek-fleet-tools-trace
+          path: change/verifier.jsonl
+      - name: Post the independent verdict
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const events = fs.readFileSync('change/verifier.jsonl', 'utf8').split('\n').filter(Boolean).map(x => JSON.parse(x));
+            const messages = events.filter(x => x.type === 'message_end' && x.message?.role === 'assistant');
+            const last = messages.at(-1)?.message?.content || [];
+            const verdict = last.filter(x => x.type === 'text').map(x => x.text).join('\n');
+            const match = verdict.match(/^(PASS\+NOTES|PASS|FAIL)\s*$/m);
+            if (!match) throw new Error('Verifier returned no verdict');
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${verdict}\n\nVerifier model: ${process.env.VERIFIER_MODEL}. Head ${context.payload.pull_request.head.sha}.\nTrace: ${run}`;
+            await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});
+            if (match[1] === 'FAIL') core.setFailed('Verifier verdict FAIL');
