@@ -272,7 +272,7 @@ def loop_watch(chats, panes, state, now, woken=frozenset()):
         live = session is not None and session["via"] == "live"
         name = chats.get(session["key"], {}).get("name") if live else None
         gap = identity_gap(name) if live else None
-        ask_identity = bool(gap) and session["state"] in ("idle", "stopped") and now - state.get(ikey, 0) >= COOLDOWN
+        ask_identity = bool(gap) and bool(name) and session["state"] in ("idle", "stopped") and now - state.get(ikey, 0) >= COOLDOWN
         log(f"{row['name']} loop: {'would arm' if verdict == 'arm' else verdict}, {why}")
         if gap:
             log(f"{row['name']} identity: gap, missing {gap}")
