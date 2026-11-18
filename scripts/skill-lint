@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Check skill budgets, copied rules, references, and prior art. See docs/skill-lint.md."""
+import argparse
+from collections import Counter, defaultdict
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from urllib.parse import unquote, urlsplit
+
+import yaml
+
+
+DEFAULT_BUDGET = 800
+MIN_TOKENS = 8
+OVERLAP = 0.82
+
+
+def git(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+
+
+def newest_pstack(home):
+    versions = []
+    for path in home.glob(".claude/plugins/cache/*/pstack/*/skills"):
+        if re.fullmatch(r"\d+(?:\.\d+)*", path.parent.name):
+            versions.append((tuple(map(int, path.parent.name.split("."))), str(path), path))
+    if not versions:
+        raise ValueError("pstack skills not found; install pstack or pass --pstack <skills directory>")
+    return max(versions)[2]
+
+
+def frontmatter(text):
+    match = re.match(r"\A---\s*\n(.*?)\n---(?:\s*\n|$)", text, re.S)
+    if not match:
+        raise ValueError("add YAML frontmatter with name and description")
+    data = yaml.safe_load(match[1])
+    if not isinstance(data, dict):
+        raise ValueError("use a YAML mapping with name and description")
+    return data, text[match.end():], text[:match.end()].count("\n")
+
+
+def prose(text, offset=0):
+    """Join wrapped paragraphs, keeping the first line for actionable diagnostics."""
+    block, start, fence = [], 0, None
+    for number, line in enumerate(text.splitlines() + [""], offset + 1):
+        stripped = line.strip()
+        marker = re.match(r"^(`{3,}|~{3,})", stripped)
+        if marker:
+            if fence is None:
+                fence = marker[1][0]
+            elif marker[1][0] == fence:
+                fence = None
+            stripped = ""
+        elif fence:
+            continue
+        boundary = not stripped or stripped.startswith(("#", "|", "<!--"))
+        bullet = re.match(r"^(?:[-*+] |\d+[.)] )", stripped)
+        if boundary or bullet:
+            if block:
+                for sentence in re.split(r"(?<=[.!?])\s+", " ".join(block)):
+                    yield start, sentence
+                block = []
+            if boundary:
+                continue
+        if not block:
+            start = number
+        block.append(stripped)
+
+
+def tokens(text):
+    text = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", text)
+    return frozenset(re.findall(r"[\w]+", text.casefold()))
+
+
+class Sources:
+    def __init__(self, pstack, house_rules):
+        self.rows = []
+        self.index = defaultdict(list)
+        for path in sorted(pstack.rglob("*.md")) + [house_rules]:
+            text, offset = path.read_text(), 0
+            if text.startswith("---\n"):
+                try:
+                    _, text, offset = frontmatter(text)
+                except (ValueError, yaml.YAMLError):
+                    pass
+            for line, sentence in prose(text, offset):
+                words = tokens(sentence)
+                if len(words) < MIN_TOKENS:
+                    continue
+                index = len(self.rows)
+                self.rows.append((words, path, line))
+                for word in words:
+                    self.index[word].append(index)
+
+    def match(self, sentence):
+        words = tokens(sentence)
+        if len(words) < MIN_TOKENS:
+            return None
+        counts = Counter(i for word in words for i in self.index.get(word, []))
+        best, result = OVERLAP, None
+        for index, shared in counts.items():
+            other, path, line = self.rows[index]
+            score = shared / len(words | other)
+            if score >= best:
+                best, result = score, (path, line)
+        return result
+
+
+def references(text):
+    for number, line in enumerate(text.splitlines(), 1):
+        for angled, plain in re.findall(r"\[[^]]*\]\((?:<([^>]+)>|([^\s)]+))(?:\s+[\"'][^\n]*[\"'])?\)", line):
+            yield number, angled or plain
+        definition = re.match(r"^\s*\[[^]]+\]:\s*<?([^\s>]+)>?", line)
+        if definition:
+            yield number, definition[1]
+        for name in re.findall(r"\bpstack\s+`([\w-]+)`", line):
+            yield number, "/pstack:" + name
+        for target in re.findall(r"`([^`\n]+)`", line):
+            if re.fullmatch(r"/?(?:pstack:)?[\w-]+", target) and target.startswith("/"):
+                yield number, target
+            elif re.fullmatch(r"[\w./~@#-]+", target) and ("/" in target or re.search(r"\.[A-Za-z][\w-]*(?:#.*)?$", target)):
+                yield number, target
+
+
+def reference_exists(target, file, root, pstack, catalogs):
+    if target.startswith(("http://", "https://", "mailto:", "#")):
+        return True
+    if any(char in target for char in "<>{}$*"):
+        return True
+    if target.startswith("/pstack:"):
+        return (pstack / target.removeprefix("/pstack:") / "SKILL.md").is_file()
+    if target in {"/clear", "/rename", "/compact", "/loop"}:
+        return True
+    if re.fullmatch(r"/[\w-]+", target):
+        return any((directory / target[1:] / "SKILL.md").is_file() for directory in [root / "skills", pstack, *catalogs])
+    target = unquote(urlsplit(target).path)
+    cached = re.search(r"(?:\.claude/plugins/cache/[^/]+/pstack/[^/]+/)(.*)", target)
+    if cached:
+        return (pstack.parent / cached[1]).exists()
+    if target.startswith("pstack/"):
+        return (pstack.parent / target[len("pstack/"):]).exists()
+    expanded = Path(target).expanduser()
+    if expanded.is_absolute():
+        return expanded.exists()
+    directories = [file.parent, root, root / "skills", pstack, pstack.parent, pstack / "poteto-mode", *catalogs, *[path.parent for path in catalogs]]
+    return any((directory / target).exists() for directory in directories)
+
+
+def lint(file, root, pstack, house_rules, sources, catalogs, previous=None, new=False, pr_body=""):
+    text = file.read_text()
+    label = str(file.relative_to(root))
+    problems = []
+
+    def fail(line, fix):
+        problems.append(f"{label}:{line}: {fix}")
+
+    try:
+        data, body, offset = frontmatter(text)
+    except (ValueError, yaml.YAMLError) as error:
+        fail(1, f"fix frontmatter: {error}")
+        data, body, offset = {}, text, 0
+    for field in ("name", "description"):
+        if not isinstance(data.get(field), str) or not data[field].strip():
+            fail(1, f"add a nonempty {field} in YAML frontmatter")
+    budget = data.get("skill-word-budget", DEFAULT_BUDGET)
+    if type(budget) is not int or budget < DEFAULT_BUDGET:
+        fail(1, "set skill-word-budget to an integer of at least 800, or remove it")
+        budget = DEFAULT_BUDGET
+    reason = data.get("skill-word-budget-reason")
+    if budget > DEFAULT_BUDGET and (not isinstance(reason, str) or not reason.strip()):
+        fail(1, "add skill-word-budget-reason in frontmatter explaining the higher budget")
+    count = len(text.split())
+    if count > budget:
+        fail(1, f"{count} words exceed budget {budget}; delete repetition or move detail to a linked file; a higher skill-word-budget needs skill-word-budget-reason in frontmatter")
+    if previous is not None and len(previous.split()) and count > len(previous.split()) * 1.2:
+        growth = re.compile(r"^Skill growth:\s*" + re.escape(label) + r"\s+\S.*$", re.M | re.I)
+        if not growth.search(pr_body):
+            fail(1, f"grew from {len(previous.split())} to {count} words (>20%); add a PR body line 'Skill growth: {label} <reason>'")
+    if new:
+        prior = re.search(r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Prior art:(?:\*\*)?\s*([^\n]+)", body)
+        names = set(re.findall(r"[\w-]+", prior[1])) if prior else set()
+        checked = any((pstack / name / "SKILL.md").is_file() for name in names)
+        if not prior or "pstack" not in names or not checked:
+            fail(1, "add 'Prior art: pstack <existing skill name or path> — <what was checked>'")
+    for line, sentence in prose(body, offset):
+        match = sources.match(sentence)
+        if match:
+            source, source_line = match
+            fail(line, f"link to {source}:{source_line} instead of restating")
+    fence = None
+    for number, line in enumerate(body.splitlines(), offset + 1):
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            fence = None if fence == marker[1][0] else marker[1][0]
+        elif fence is None:
+            for _, target in references(line):
+                if not reference_exists(target, file, root, pstack, catalogs):
+                    fail(number, f"missing reference {target}; fix the link or add the referenced skill/file")
+    return problems
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("files", nargs="*", help="SKILL.md paths; default: skills/**/SKILL.md")
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--base", help="git revision; check changed skills since its merge base with HEAD")
+    parser.add_argument("--pstack", type=Path, help="pstack skills directory (default: newest installed)")
+    parser.add_argument("--house-rules", type=Path)
+    parser.add_argument("--catalog", type=Path, action="append", default=[], help="additional skills directory for references")
+    parser.add_argument("--pr-body-file", type=Path)
+    args = parser.parse_args()
+    root = args.root.resolve()
+    try:
+        pstack = args.pstack.resolve() if args.pstack else newest_pstack(Path.home())
+        house = args.house_rules or (root / "house-rules.md" if (root / "house-rules.md").is_file() else Path.home() / ".local/share/house-rules/house-rules.md")
+        if not pstack.is_dir() or not house.is_file():
+            raise ValueError("source missing; pass existing --pstack <skills directory> and --house-rules <house-rules.md>")
+        catalogs = [path.resolve() for path in args.catalog]
+        sources = Sources(pstack, house.resolve())
+        base = git(root, "merge-base", args.base, "HEAD") if args.base else None
+        previous_paths = {}
+        if base:
+            changes = git(root, "diff", "--name-status", "-M", "--diff-filter=ACMR", base, "--", "skills").splitlines()
+            for change in changes:
+                fields = change.split("\t")
+                previous_paths[fields[-1]] = fields[1] if fields[0].startswith("R") else fields[-1]
+        files = [root / path for path in args.files] if args.files else ([root / path for path in previous_paths if path.endswith("/SKILL.md")] if base else sorted((root / "skills").rglob("SKILL.md")))
+        pr_body = args.pr_body_file.read_text() if args.pr_body_file else ""
+        if not args.pr_body_file and os.environ.get("GITHUB_EVENT_PATH"):
+            event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+            pr_body = (event.get("pull_request") or {}).get("body") or ""
+        errors = []
+        for file in files:
+            label = str(file.relative_to(root))
+            previous = None
+            if base:
+                result = subprocess.run(["git", "-C", str(root), "show", f"{base}:{previous_paths.get(label, label)}"], text=True, capture_output=True)
+                if result.returncode == 0:
+                    previous = result.stdout
+            errors += lint(file, root, pstack, house, sources, catalogs, previous, bool(base and previous is None), pr_body)
+        for error in errors:
+            print(error)
+        print(f"skill-lint: {'FAIL' if errors else 'PASS'} ({len(files)} skills, {len(errors)} findings)")
+        return bool(errors)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f"skill-lint: {root}: {error}; fix the inputs and rerun", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
