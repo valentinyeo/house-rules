@@ -1,5 +1,5 @@
 {
- "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name and loads role_skill. No row: it reports 'not in roster' to Chief Of Staff and takes no work. kind: chief, lead, view-lead, solo-dev, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371. Sessions announce themselves at start with fleet/roster-announce (HYCI-214); announcements live in ~/.local/state/roster/announce/, never in this file. Solo-dev rows may carry board without view (client board, whole board), view as a scopes.json key or a raw view id, client, harness and take (section: 0 in flight, 1 queue).",
+ "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name and loads role_skill. No row: it reports 'not in roster' to Fleet Tools and takes no work. kind: chief, lead, view-lead, solo-dev, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371. Sessions announce themselves at start with fleet/roster-announce (HYCI-214); announcements live in ~/.local/state/roster/announce/, never in this file. Solo-dev rows may carry board without view (client board, whole board), view as a scopes.json key or a raw view id, client, harness and take (section: 0 in flight, 1 queue).",
  "_updated": "2026-11-09 HYCI-214",
  "runners": 17,
  "rows": [
@@ -38,51 +38,14 @@
    "cwd": "~/projects/hypertask"
   },
   {
-   "name": "Infra Lead",
-   "multibot": "Infra Lead",
-   "kind": "lead",
-   "role_skill": "/lead",
-   "login": "Infra Lead",
-   "board": "",
-   "status": "unknown",
-   "notes": "Tools expert. Owns no board: Fleet CI & Infra is archived. Fleet incidents go to Chief Of Staff on board 2060."
-  },
-  {
-   "name": "CI Boss",
-   "multibot": null,
-   "kind": "lead",
-   "role_skill": "/lead",
-   "login": "CI Boss",
-   "board": "",
-   "status": "unknown",
-   "notes": "No board note for 22h on blocking CI tickets (Big Boss Man, 2026-11-07). Check it is running. Fleet CI & Infra archived 2026-11-17; incidents go to Chief Of Staff on board 2060"
-  },
-  {
-   "name": "projects",
-   "multibot": "Mini Boss",
-   "kind": "lead",
-   "role_skill": "/lead",
-   "login": "Mini Boss CEO",
-   "board": "2060",
-   "status": "live",
-   "notes": "Contact for smaller Software Factory apps. Owns no runners and no board health. One notes file per app; reads only the one it needs. Session name inferred from cwd ~/projects/software-factory. Confirmed by claude agents: Mini Boss CEO in tmux projects.",
-   "cwd": "~/projects/software-factory"
-  },
-  {
    "name": "ht-support-lead",
    "kind": "lead",
    "role_skill": "support-manager",
    "login": "HT Support Lead",
    "board": "10450",
-   "status": "live"
-  },
-  {
-   "name": "ht-marketing",
-   "kind": "lead",
-   "role_skill": "marketing-lead",
-   "login": "HT Growth Lead",
-   "board": "2108,2128",
-   "status": "live"
+   "status": "live",
+   "multibot": "HT Support Lead LC",
+   "tmux": "live-375bd54"
   },
   {
    "name": "HT Design Lead",
@@ -92,25 +55,23 @@
    "board": "15",
    "status": "unknown",
    "repo": "hypertask-ai/hypertask",
-   "cwd": "~/projects/hypertask"
+   "cwd": "~/projects/hypertask",
+   "multibot": "HT Design Lead",
+   "tmux": "live-304b163",
+   "roles": [
+    "lead",
+    "solo-dev"
+   ]
   },
   {
    "name": "SF Design Lead",
-   "multibot": "SF Design Lead",
+   "multibot": "SF Design Lead LC",
    "kind": "lead",
    "role_skill": "design-lead",
    "login": "SF Design Lead",
    "board": "2060",
    "status": "live",
-   "tmux": "term-18e5fecc"
-  },
-  {
-   "name": "HT Finance Lead",
-   "kind": "lead",
-   "role_skill": "finance-lead",
-   "login": "HT Finance Lead",
-   "board": null,
-   "status": "unknown"
+   "tmux": "live-3e3cec2"
   },
   {
    "name": "Multi Bot Opus Runner",
@@ -165,23 +126,6 @@
    "workers": 3,
    "workers_by": "Valentin 2026-11-17",
    "repo": "valentinyeo/postbox"
-  },
-  {
-   "name": "Pecunia",
-   "multibot": "Pecunia Ratstack Transitioner",
-   "kind": "solo-dev",
-   "role_skill": "/solo-dev",
-   "login": "Ratstack Transitioner",
-   "board": "2060",
-   "view": "82886927-74e7-419d-a4f5-313742424b41",
-   "tmux": "live-10707105",
-   "app": "pecunia",
-   "status": "live",
-   "notes": "Pecunia Ratstack Transitioner owns the Pecunia view, not Software Factory Lead (Valentin, 2026-11-16).",
-   "workers": 3,
-   "workers_by": "Valentin 2026-11-17",
-   "repo": "valentinyeo/pecunia-oss",
-   "cwd": "~/projects/pecunia"
   },
   {
    "name": "chromescribe",

@@ -7,6 +7,7 @@ concurrent session starts never write the same file and the synced house-rules c
 Session discovery covers both shapes on this VPS: tmux panes that run an agent (claude, hax, codex, cursor-agent)
 and Multibot hosted chats (agent-host config whose tmux session is alive; the agent may be idle-stopped).
 """
+import html
 import importlib.util
 import json
 import os
@@ -21,6 +22,7 @@ ROSTER = HERE / "roster.json"
 ANNOUNCE = Path(os.environ.get("ROSTER_ANNOUNCE_DIR", HOME / ".local/state/roster/announce"))
 MP_SEND = HOME / ".local/share/multiprompt-talk/mp_send.py"
 AGENT = re.compile(r"(^|/)(claude|hax|codex|cursor-agent)( |$)")
+OWNER = "Fleet Tools"  # who reads fleet alarms: Hypertask agent "Fleet Tools" on board 2060 (SOFT-2698)
 FIELDS = ("name", "multibot", "tmux", "sid", "cwd", "kind", "board", "view", "app", "client", "harness", "take")
 
 
@@ -171,3 +173,18 @@ def live_sessions():
 
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def post_alarm(note, run=subprocess.run, env=os.environ):
+    """One Hypertask agent-log note (nobody notified) on the ticket FLEET_ALARM_TICKET, written by the agent login in
+    HT_TOKEN, passed through the CLI's own --token option. "off" when either variable is missing (log-only, as before),
+    else "posted" or "failed". Never raises and never prints the token."""
+    ticket, token = env.get("FLEET_ALARM_TICKET"), env.get("HT_TOKEN")
+    if not ticket or not token:
+        return "off"
+    try:
+        r = run(["hypertask", "--json", "--token", token, "activity", "add", ticket, "--text", html.escape(note)],
+                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return "failed"
+    return "posted" if r.returncode == 0 else "failed"

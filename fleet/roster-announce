@@ -5,11 +5,12 @@
     roster-announce --kind solo-dev --board 12322 --client Matt --harness claude [--view ID] [--app APP] [--name N]
                     [--take "In Progress,Backlog"] [--dry-run]
     roster-announce --self-test
+    roster-announce --help | -h                  print this usage, write nothing
 
 Writes one file per session under ~/.local/state/roster/announce/ (fleet/roster.py). Idempotent: the same session
 always rewrites the same file, newest fields win. A session that matches a row in fleet/roster.json is recorded under
 that row. Any other session is kind "unknown" until it announces its kind and board; fleet/roster-check flags it for
-Chief Of Staff. The hook tells an unknown Claude session how to announce itself.
+Fleet Tools. The hook tells an unknown Claude session how to announce itself.
 """
 import json
 import os
@@ -66,8 +67,8 @@ def entry_for(ident, given, static, prev):
 def hint(e):
     if e.get("kind") != "unknown":
         return None
-    return (f"Roster: this session ({e.get('tmux') or e.get('sid')}) has no row in fleet/roster.json, so Chief Of "
-            f"Staff cannot account for it. Announce yourself once: {ME} --kind solo-dev|lead|outside "
+    return (f"Roster: this session ({e.get('tmux') or e.get('sid')}) has no row in fleet/roster.json, so "
+            f"{roster.OWNER} cannot account for it. Announce yourself once: {ME} --kind solo-dev|lead|outside "
             f"--board <board id> [--view <view id>] [--app <app> | --client <client>] --harness claude. "
             f"House rule 2026-11-09.")
 
@@ -167,6 +168,7 @@ def self_test():
     u = entry_for({"tmux": "live-new", "sid": "s2"}, {}, static, {})
     assert u["kind"] == "unknown" and u["name"] == "live-new" and "row" not in u, "unmatched session is unknown"
     assert hint(u) and "--board" in hint(u), "unknown session must be told how to announce"
+    assert "Fleet Tools cannot account" in hint(u) and "Chief Of" not in hint(u), "hint names the live owner"
     d = entry_for({"tmux": "live-new"}, {"kind": "solo-dev", "board": "999", "client": "Acme", "take": None}, static, {})
     assert d["kind"] == "solo-dev" and d["board"] == "999" and d["client"] == "Acme" and hint(d) is None
     assert entry_for({"tmux": "live-new"}, {}, static, d)["kind"] == "solo-dev", "a later hook must keep the declared kind"
@@ -204,11 +206,21 @@ def self_test():
             expected = "\n".join(part for part in (roster_hint, result if isinstance(result, str) else "") if part)
             assert got == ({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": expected}}
                            if expected else {}), got
+    import tempfile as tf
+
+    for flag in ("--help", "-h"):
+        with tf.TemporaryDirectory() as empty:
+            r = subprocess.run([sys.executable, ME, flag], capture_output=True, text=True, timeout=30,
+                               env=dict(os.environ, ROSTER_ANNOUNCE_DIR=empty, MULTIPROMPT_TAB="help-test"))
+            assert r.returncode == 0 and "roster-announce --kind" in r.stdout and "--help" in r.stdout, (flag, r)
+            assert not list(Path(empty).iterdir()), f"{flag} must write no announce record"
     print("roster-announce self-test ok")
 
 
 if __name__ == "__main__":
-    if "--self-test" in sys.argv:
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__.strip())
+    elif "--self-test" in sys.argv:
         self_test()
     elif "--hook" in sys.argv:
         hook()

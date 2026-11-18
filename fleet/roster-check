@@ -9,11 +9,13 @@ its own announcement (fleet/roster-announce). Prints one line per session that i
   NOT-IN-ROSTER <tmux> ...  no row and never announced
   UNKNOWN <tmux> ...        announced, but never said its kind and board
 --record writes an unknown announcement for each NOT-IN-ROSTER session, so the hook-less harnesses (Codex, hax) are
-recorded too, never silently dropped. --log appends to ~/.local/state/fleet-switch/log.txt for Chief Of Staff when the
-flagged set changes. Exit 1 when any session is flagged. Read only on boards.
+recorded too, never silently dropped. --log appends to ~/.local/state/fleet-switch/log.txt for Fleet Tools when the
+flagged set changes, and posts the same note once on the Hypertask ticket FLEET_ALARM_TICKET (agent login HT_TOKEN,
+agent-log note, nobody notified); with either variable missing it only logs. Exit 1 when any session is flagged. Read only on boards.
 """
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -53,6 +55,43 @@ def worker_errors(rows):
             if "workers" in row and not str(row.get("workers_by", "")).startswith("Valentin")]
 
 
+def read_names(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+
+
+def note_for(names):
+    if not names:
+        return "roster-check: every live session is in the roster"
+    return (f"roster-check: {len(names)} live sessions not in the roster, {roster.OWNER}: add a row or have them run "
+            f"fleet/roster-announce: " + ", ".join(names))
+
+
+def log_flagged(names, watch=None, run=subprocess.run, env=os.environ):
+    """Log the flagged set when it changed since the last run, and post it once as an agent-log note on
+    FLEET_ALARM_TICKET. The post has its own marker (roster-check-posted.json): it moves only after a successful
+    post, so a failed post is retried next run and a post never repeats for an unchanged set. A set that was never
+    flagged is not posted. Returns the post status: "posted", "failed", "off" (a variable is missing) or "same"."""
+    watch = watch or WATCH
+    last, posted = watch / "roster-check.json", watch / "roster-check-posted.json"
+    note = note_for(names)
+    if names != read_names(last):
+        watch.mkdir(parents=True, exist_ok=True)
+        with open(watch / "log.txt", "a") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + " " + note + "\n")
+        last.write_text(json.dumps(names))
+    if names == read_names(posted):
+        return "same"
+    status = roster.post_alarm(note, run=run, env=env)
+    if status == "posted":
+        posted.write_text(json.dumps(names))
+    elif status == "failed":
+        print("roster-check: alarm post failed, will retry next run", file=sys.stderr)
+    return status
+
+
 def main():
     static, announced = roster.static_rows(), roster.announced()
     errors = worker_errors(static)
@@ -74,19 +113,7 @@ def main():
         print(f"{tag} {s['tmux']} {note}".rstrip())
     print(f"ROSTER-CHECK: {len(flagged)} of {len(sessions)} live agent sessions not accounted for.")
     if "--log" in sys.argv:
-        names = sorted(s["tmux"] + (f" ({s['name']})" if s.get("name") else "") for _, s, _ in flagged)
-        try:
-            last = json.loads(LAST.read_text())
-        except (OSError, ValueError):
-            last = []
-        if names != last:
-            WATCH.mkdir(parents=True, exist_ok=True)
-            line = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + " roster-check: "
-            line += (f"{len(names)} live sessions not in the roster, Chief Of Staff: add a row or have them run "
-                     f"fleet/roster-announce: " + ", ".join(names)) if names else "every live session is in the roster"
-            with open(WATCH / "log.txt", "a") as f:
-                f.write(line + "\n")
-            LAST.write_text(json.dumps(names))
+        log_flagged(sorted(s["tmux"] + (f" ({s['name']})" if s.get("name") else "") for _, s, _ in flagged))
     sys.exit(1 if flagged else 0)
 
 
@@ -100,7 +127,7 @@ def self_test():
     assert not worker_errors(actual)
     assert {r["name"]: r["workers"] for r in actual if "workers" in r} == {
         "HT Product Lead": 7, "Multi Bot Opus Runner": 7, "multiprompt-android": 3,
-        "Pecunia": 3, "postbox": 3, "poteto-2-advisor": 3}
+        "postbox": 3, "poteto-2-advisor": 3}
     assert all(r["workers_by"] == "Valentin 2026-11-17" for r in actual if "workers" in r)
     static = [{"name": "postbox"}, {"name": "ht-or-runner-{n}"},
               {"name": "Matt Live Stream", "multibot": "Matt Live Stream", "tmux": "live-1d21840"}]
@@ -114,6 +141,36 @@ def self_test():
     alive = {"live-a", "live-z"}
     extra = announced_sessions(ann + [{"tmux": "live-gone", "kind": "unknown"}], alive)
     assert [x["tmux"] for x in extra] == ["live-a"], "only announced unknowns with a live tmux are flagged"
+    import tempfile
+    from unittest.mock import Mock
+
+    assert roster.OWNER == "Fleet Tools" and "Fleet Tools" in note_for(["a"]) and "Chief Of" not in note_for(["a"])
+    ok, bad = Mock(return_value=subprocess.CompletedProcess([], 0, "{}", "")), Mock(return_value=subprocess.CompletedProcess([], 1, "", "x"))
+    on = {"FLEET_ALARM_TICKET": "SOFT-1", "HT_TOKEN": "tok"}
+    with tempfile.TemporaryDirectory() as d:
+        w = Path(d)
+        assert log_flagged([], w, ok, on) == "same" and not ok.called, "a set never flagged posts nothing"
+        assert log_flagged(["live-a"], w, ok, on) == "posted" and ok.call_count == 1, "a change posts once"
+        argv = ok.call_args[0][0]
+        assert argv[:6] == ["hypertask", "--json", "--token", "tok", "activity", "add"] and argv[6] == "SOFT-1", argv
+        assert "--kind" not in argv and "Fleet Tools" in argv[-1], "agent-log note naming the new owner"
+        assert "Fleet Tools" in (w / "log.txt").read_text() and "Chief Of" not in (w / "log.txt").read_text()
+        for _ in range(3):
+            assert log_flagged(["live-a"], w, ok, on) == "same"
+        assert ok.call_count == 1 and (w / "log.txt").read_text().count("\n") == 1, "unchanged set: no new post, no new log"
+        assert log_flagged(["live-a", "live-b"], w, ok, on) == "posted" and ok.call_count == 2, "a changed set posts again"
+        assert log_flagged([], w, ok, on) == "posted" and "every live session" in ok.call_args[0][0][-1], "recovery posts"
+    for env in ({}, {"FLEET_ALARM_TICKET": "SOFT-1"}, {"HT_TOKEN": "tok"}):
+        with tempfile.TemporaryDirectory() as d:
+            off = Mock()
+            assert log_flagged(["live-a"], Path(d), off, env) == "off" and not off.called, "env missing: log only"
+            assert "live-a" in (Path(d) / "log.txt").read_text(), "env missing: today's log line stays"
+            assert log_flagged(["live-a"], Path(d), ok, on) == "posted", "set later: the pending change posts once"
+    with tempfile.TemporaryDirectory() as d:
+        assert log_flagged(["live-a"], Path(d), bad, on) == "failed" and not (Path(d) / "roster-check-posted.json").exists()
+        assert log_flagged(["live-a"], Path(d), ok, on) == "posted", "a failed post is retried"
+        boom = Mock(side_effect=subprocess.TimeoutExpired("hypertask", 60))
+        assert log_flagged(["live-b"], Path(d), boom, on) == "failed", "a hung CLI must not raise"
     print("roster-check self-test ok")
 
 
