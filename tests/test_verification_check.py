@@ -252,6 +252,21 @@ The authoritative coverage is `proofs/coverage.json`.
         self.assertIn('covered path missing at snapshot: src/delivery.py', out)
         self.assertIn('covered code changed since sync: 1 commit', out)
 
+    def test_async_and_concurrency_are_not_financial_or_sync_evidence(self):
+        self.put('src/worker.js', 'const concurrency = 1;\nasync function devices() {}\n')
+        self.commit()
+        out = self.run_facts()
+        self.assertNotIn('src/worker.js:1:', out)
+        self.assertNotIn('src/worker.js:2:', out)
+
+    def test_model_artifacts_without_a_skill_leave_coverage_unknown(self):
+        self.put('proofs/queue.tla', '---- MODULE queue ----\n====\n')
+        self.commit()
+        out = self.run_facts()
+        self.assertIn('formal model artifacts: proofs/queue.tla', out)
+        self.assertIn('coverage and sync are UNKNOWN', out)
+        self.assertIn('recent model artifact commits', out)
+
     def test_recorded_version_unavailable_is_explicit(self):
         self.put('.claude/skills/verify-app/SKILL.md', '# Verify\npstack: 0.14.0\n')
         self.commit()
