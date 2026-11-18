@@ -128,6 +128,22 @@
    "repo": "valentinyeo/postbox"
   },
   {
+   "name": "Pecunia",
+   "multibot": "Pecunia Ratstack Transitioner",
+   "kind": "closed",
+   "login": "Ratstack Transitioner",
+   "board": "2060",
+   "view": "82886927-74e7-419d-a4f5-313742424b41",
+   "app": "pecunia",
+   "status": "closed",
+   "notes": "Session gone 2026-11-18 (live-10707105 no longer exists). Row kept for its workers grant. Restart: set kind solo-dev, status live, role_skill /solo-dev, tmux to the new live-* id. Pecunia Ratstack Transitioner owns the Pecunia view, not Software Factory Lead (Valentin, 2026-11-16).",
+   "workers": 3,
+   "workers_by": "Valentin 2026-11-17",
+   "repo": "valentinyeo/pecunia-oss",
+   "cwd": "~/projects/pecunia",
+   "role_skill": null
+  },
+  {
    "name": "chromescribe",
    "kind": "view-lead",
    "role_skill": "/view-lead",
