@@ -1,10 +1,14 @@
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/skill-lint"
 loader = importlib.machinery.SourceFileLoader("skill_lint", str(SCRIPT))
@@ -189,6 +193,60 @@ class SkillLintTests(unittest.TestCase):
         event.write_text('{"pull_request":{"body":"Skill growth: skills/sample/SKILL.md Added release steps."}}')
         result = self.cli("--base", base, env={**os.environ, "GITHUB_EVENT_PATH": str(event)})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_push_keeps_other_gates_without_requiring_a_pr_body(self):
+        self.check("word " * 50)
+        self.git("init", "-q")
+        base = self.commit()
+        self.check("word " * 100)
+        self.commit()
+        event = self.root / "push.json"
+        event.write_text(json.dumps({"before": base, "after": self.git("rev-parse", "HEAD")}))
+        environment = {**os.environ, "GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": str(event)}
+        result = self.cli("--base", base, env=environment)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        environment["GITHUB_EVENT_NAME"] = "pull_request"
+        self.assertIn("Skill growth:", self.cli("--base", base, env=environment).stdout)
+        environment["GITHUB_EVENT_NAME"] = "push"
+        self.check("word " * 1000)
+        result = self.cli("--base", base, env=environment)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exceed budget 800", result.stdout)
+        self.check("Read [required](missing.md).")
+        self.assertIn("missing reference missing.md", self.cli("--base", base, env=environment).stdout)
+
+    def test_verifier_accepts_correct_cd_prefix_but_not_fabricated_evidence(self):
+        workflow = lint.yaml.safe_load((SCRIPT.parent.parent / ".github/workflows/skill-lint.yml").read_text())
+        step = next(step for step in workflow["jobs"]["pstack-verifier"]["steps"] if step.get("name") == "Post current-head verdict with execution evidence")
+        program = step["run"].split("\n", 1)[1].rsplit("\nPY", 1)[0]
+        commands = ["python3 -m unittest discover -s ../lint-source/tests -p test_skill_lint.py -v", "python3 ../lint-source/scripts/skill-lint --base baseline"]
+        (self.root / "skill-lint-command").write_text(commands[1])
+        cases = [
+            ("", 0, "observed output", False, 0),
+            (f"cd {Path.cwd()} && ", 0, "observed output", False, 0),
+            ("cd /wrong-directory && ", 0, "observed output", False, 1),
+            ("echo fabricated && ", 0, "observed output", False, 1),
+            ("", 1, "failed command", False, 1),
+            ("", 0, "", False, 1),
+            ("", 0, "observed output", True, 1),
+        ]
+        for prefix, code, output, is_error, expected in cases:
+            with self.subTest(prefix=prefix, code=code, output=output, is_error=is_error):
+                events = []
+                for index, command in enumerate(commands):
+                    events += [
+                        {"type": "tool_execution_start", "toolName": "bash", "toolCallId": str(index), "args": {"command": prefix + command}},
+                        {"type": "tool_execution_end", "toolName": "bash", "toolCallId": str(index), "isError": is_error, "result": {"structuredContent": {"exit_code": code, "output": output}}},
+                    ]
+                events.append({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "VERDICT: PASS"}]}})
+                (self.root / "skill-verifier.jsonl").write_text("\n".join(map(json.dumps, events)))
+                environment = {"RUNNER_TEMP": str(self.root), "HEAD": "head-sha", "PR": "604", "GITHUB_REPOSITORY": "valentinyeo/house-rules"}
+                with mock.patch.dict(os.environ, environment), mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as result:
+                        exec(compile(program, "workflow-verdict", "exec"), {})
+                self.assertEqual(result.exception.code, expected)
+                verdict = (self.root / "skill-verdict.md").read_text().splitlines()[0]
+                self.assertEqual(verdict, f"pstack-verifier: {'PASS' if expected == 0 else 'FAIL'} @ head-sha")
 
     def test_renamed_skill_is_not_new(self):
         self.check()

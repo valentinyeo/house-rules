@@ -175,7 +175,7 @@ def lint(file, root, pstack, house_rules, sources, catalogs, previous=None, new=
     count = len(text.split())
     if count > budget:
         fail(1, f"{count} words exceed budget {budget}; delete repetition or move detail to a linked file; a higher skill-word-budget needs skill-word-budget-reason in frontmatter")
-    if previous is not None and len(previous.split()) and count > len(previous.split()) * 1.2:
+    if pr_body is not None and previous is not None and len(previous.split()) and count > len(previous.split()) * 1.2:
         growth = re.compile(r"^Skill growth:\s*" + re.escape(label) + r"\s+\S.*$", re.M | re.I)
         if not growth.search(pr_body):
             fail(1, f"grew from {len(previous.split())} to {count} words (>20%); add a PR body line 'Skill growth: {label} <reason>'")
@@ -231,7 +231,10 @@ def main():
         pr_body = args.pr_body_file.read_text() if args.pr_body_file else ""
         if not args.pr_body_file and os.environ.get("GITHUB_EVENT_PATH"):
             event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-            pr_body = (event.get("pull_request") or {}).get("body") or ""
+            if os.environ.get("GITHUB_EVENT_NAME") == "push":
+                pr_body = None
+            else:
+                pr_body = (event.get("pull_request") or {}).get("body") or ""
         errors = []
         for file in files:
             label = str(file.relative_to(root))

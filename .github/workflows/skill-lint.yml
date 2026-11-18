@@ -137,7 +137,11 @@ jobs:
                   answers.append('\n'.join(c.get('text', '') for c in message.get('content', []) if c.get('type') == 'text'))
           answer = answers[-1] if answers else 'No verdict returned.'
           required = ['python3 -m unittest discover -s ../lint-source/tests -p test_skill_lint.py -v', (scratch / 'skill-lint-command').read_text().strip()]
-          normalize = lambda command: ' '.join(shlex.split(command))
+          def normalize(command):
+              parts = shlex.split(command)
+              if len(parts) >= 3 and parts[0] == 'cd' and parts[2] == '&&' and pathlib.Path(parts[1]).resolve() == pathlib.Path.cwd():
+                  parts = parts[3:]
+              return parts
           missing = [command for command in required if not any(normalize(command) == normalize(actual) for actual in executed)]
           match = re.match(r'^VERDICT: (PASS\+NOTES|PASS|FAIL)\b', answer)
           clean = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0

@@ -23,7 +23,7 @@ CI fetches pstack and the other skill collection at full commit pins in `.skill-
 ## What fails
 
 - **Budget:** whitespace-separated words across the entire `SKILL.md`, including frontmatter and examples. Default 800.
-- **Growth:** more than 20% versus the baseline needs a file-specific PR-body line. New skills use the budget and prior-art checks instead.
+- **Growth:** more than 20% versus the baseline needs a file-specific PR-body line. New skills use the budget and prior-art checks instead. Push events have no PR body, so this requirement runs on PRs and local comparisons, not again after merge. Every other check still runs on pushes.
 - **Restating:** prose sentences or bullets with at least eight distinct normalized tokens and Jaccard token overlap of at least 0.82 against pstack's skill/playbook Markdown or `house-rules.md`. Case, punctuation and Markdown formatting do not hide a copy. Wrapped paragraphs are joined. Headings, tables and fenced examples are excluded. This is a near-copy detector, not a semantic paraphrase detector; short generic sentences are intentionally excluded.
 - **References:** local Markdown links, reference-link definitions, backticked file/directory paths, `/skill` calls, `/pstack:skill` calls and `pstack` followed by a backticked skill name must resolve. Search the current skill, repo, pstack (including poteto-mode's relative playbook paths) and supplied skill catalogs. Explicit pstack references resolve only in pstack. Native `/clear`, `/rename`, `/compact` and `/loop` commands are not skills. HTTP/mail links are not fetched. Anchors are not validated. Placeholder paths and fenced examples are not literal file references. Ordinary prose and shell commands are not guessed to be paths.
 - **Frontmatter:** valid YAML with nonempty string `name` and `description`.
@@ -68,4 +68,4 @@ Run the focused regression file with:
 python3 -m unittest discover -s tests -p test_skill_lint.py -v
 ```
 
-The shared workflow runs these regressions, the real diff lint, and a DeepSeek Flash verifier on GitHub-hosted runners. The verifier must return a current-head verdict and successful execution evidence for both required commands. It also makes three independent break attempts. Fork PRs run deterministic checks without secrets.
+The shared workflow runs these regressions, the real diff lint, and a DeepSeek Flash verifier on GitHub-hosted runners. The verifier must return a current-head verdict and successful execution evidence for both required commands. A command may have only an exact `cd <change checkout> &&` prefix. Wrong directories, other wrappers, failed commands and empty output do not count. The verifier also makes three independent break attempts. Fork PRs run deterministic checks without secrets.

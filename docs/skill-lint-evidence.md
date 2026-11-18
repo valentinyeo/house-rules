@@ -47,3 +47,23 @@ RULES-LINT bad=0
 ```
 
 The historical regression runs the CLI and requires exit 1 plus the exact budget finding. The reference/copy, budget override, growth-body, prior-art, YAML, rename and cache-selection tests exercise their separate gates. No global budget exception or skill cleanup was added.
+
+## Verifier failures reproduced and fixed
+
+House-rules run `44297064255` found that accepted PR growth failed again on push, which has no PR body. The new regression fails against producer commit `c277103`:
+
+```text
+AssertionError: 1 != 0 : skills/sample/SKILL.md:1: grew from 61 to 111 words (>20%); add a PR body line 'Skill growth: skills/sample/SKILL.md <reason>'
+skill-lint: FAIL (1 skills, 1 findings)
+FAILED (failures=1)
+```
+
+The fix limits this PR-metadata requirement to PR events and local comparisons. The same regression requires push-time budget and missing-reference checks to keep failing.
+
+Vstack run `44297236605` returned PASS+NOTES, but the execution recorder rejected actual successful calls prefixed with `cd <change checkout> &&`. A regression reproduced that false FAIL before the parser change. The recorder now accepts only that prefix, while rejecting wrong directories, fabricated wrappers, nonzero exits, empty output and tool errors.
+
+```text
+python3 -m unittest tests.test_skill_lint -v
+Ran 26 tests
+OK
+```
