@@ -9,7 +9,8 @@ its own announcement (fleet/roster-announce). Prints one line per session that i
   NOT-IN-ROSTER <tmux> ...  no row and never announced
   UNKNOWN <tmux> ...        announced, but never said its kind and board
 --record writes an unknown announcement for each NOT-IN-ROSTER session, so the hook-less harnesses (Codex, hax) are
-recorded too, never silently dropped. --log appends to ~/.local/state/fleet-switch/log.txt for Fleet Tools when the
+recorded too, never silently dropped. --record also moves announcements of dead sessions that are over a day old to
+announce/stale/ (SOFT-2716; roster.rows() already ignores them). --log appends to ~/.local/state/fleet-switch/log.txt for Fleet Tools when the
 flagged set changes, and posts the same note once on the Hypertask ticket FLEET_ALARM_TICKET (agent login HT_TOKEN,
 agent-log note, nobody notified); with either variable missing it only logs. Exit 1 when any session is flagged. Read only on boards.
 """
@@ -104,6 +105,8 @@ def main():
     sessions += [s for s in announced_sessions(announced, alive) if s["tmux"] not in seen]
     flagged = verdicts(sessions, static, announced)
     if "--record" in sys.argv:
+        for path in roster.archive_stale():
+            print(f"STALE-ARCHIVED {path.name} -> announce/stale/")
         for tag, s, _ in flagged:
             if tag == "NOT-IN-ROSTER":
                 roster.write_announce(dict(tmux=s["tmux"], multibot=s.get("name"), sid=s.get("sid"),
