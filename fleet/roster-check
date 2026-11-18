@@ -141,6 +141,10 @@ def self_test():
     got = {(tag, x["tmux"]) for tag, x, _ in verdicts(live, static, ann)}
     assert got == {("NOT-IN-ROSTER", "live-9"), ("UNKNOWN", "live-a"), ("NOT-IN-ROSTER", "codex-x")}, got
     assert verdicts([s("live-x", "matt live stream")], static, []) == [], "a Multibot name must match its row"
+    wild = [{"name": "live-chromescribe-{*}"}]
+    assert roster.row_for(wild, "live-chromescribe-mwmmhm4f"), "{*} matches a hosted chat's own id"
+    assert roster.row_for(wild, "live-chromescribex-mwmmhm4f") is None, "{*} sits where the id is, no wider"
+    assert roster.row_for(roster.static_rows(), "live-chromescribe-abc123"), "the roster covers the next Chromescribe chat"
     alive = {"live-a", "live-z"}
     extra = announced_sessions(ann + [{"tmux": "live-gone", "kind": "unknown"}], alive)
     assert [x["tmux"] for x in extra] == ["live-a"], "only announced unknowns with a live tmux are flagged"

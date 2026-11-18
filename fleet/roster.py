@@ -33,7 +33,10 @@ def static_rows():
 
 
 def pattern(name):
-    return re.compile("^" + re.escape(name).replace(r"\{n\}", r"\d+").replace(r"\{x\}", "[a-z]") + "$")
+    """A row name as a tmux pattern: {n} a number, {x} one letter, {*} any suffix. Multibot gives every hosted chat
+    a fresh id (live-chromescribe-mwmmhm4f), so an app with several chats needs the {*} wildcard."""
+    return re.compile("^" + re.escape(name).replace(r"\{n\}", r"\d+").replace(r"\{x\}", "[a-z]")
+                      .replace(r"\{\*\}", ".+") + "$")
 
 
 def row_for(rows, tmux=None, name=None):

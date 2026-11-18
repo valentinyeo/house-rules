@@ -43,5 +43,21 @@ class HostedChats(unittest.TestCase):
         self.assertEqual(chats["live-tmux"]["state"], "stopped")
 
 
+class NamePatterns(unittest.TestCase):
+    def test_wildcard_covers_a_new_hosted_chat_id(self):
+        rows = [{"name": "live-chromescribe-{*}"}]
+        self.assertEqual(roster.row_for(rows, "live-chromescribe-mwmmhm4f")["name"], "live-chromescribe-{*}")
+        self.assertEqual(roster.row_for(rows, "live-chromescribe-9f2a1c")["name"], "live-chromescribe-{*}")
+        self.assertIsNone(roster.row_for(rows, "live-screencast2-mwmmhm4f"))
+        self.assertIsNone(roster.row_for(rows, "live-chromescribex-mwmmhm4f"))
+
+    def test_number_and_letter_placeholders_still_apply(self):
+        self.assertEqual(roster.row_for([{"name": "ht-or-runner-{n}"}], "ht-or-runner-7")["name"],
+                         "ht-or-runner-{n}")
+        self.assertIsNone(roster.row_for([{"name": "ht-or-runner-{n}"}], "ht-or-runner-x"))
+        self.assertEqual(roster.row_for([{"name": "multibot-runner-{x}"}], "multibot-runner-a")["name"],
+                         "multibot-runner-{x}")
+
+
 if __name__ == "__main__":
     unittest.main()
