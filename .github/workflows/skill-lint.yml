@@ -28,6 +28,13 @@ jobs:
           ref: ${{ inputs.lint-ref || github.sha }}
           path: lint-source
           persist-credentials: false
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          repository: valentinyeo/house-rules
+          ref: ${{ github.repository == 'valentinyeo/house-rules' && github.event.pull_request.base.sha || inputs.lint-ref || github.sha }}
+          path: picker-base
+          persist-credentials: false
       - name: Read caller's pinned sources
         id: pins
         working-directory: change
@@ -107,7 +114,7 @@ jobs:
       - name: Pick verifier model
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         run: |
-          model=$(python3 lint-source/scripts/pick-verifier-model)
+          model=$(python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/pick-verifier-model")
           echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
       - name: Verifier verifies on GitHub
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository

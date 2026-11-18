@@ -30,6 +30,11 @@ jobs:
           ref: e1cc03121a0e71129a4fb730d7c5528a0a3e43c8
           path: pstack-source
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: picker-base
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -37,7 +42,7 @@ jobs:
       - name: Pick verifier model
         working-directory: change
         run: |
-          model=$(python3 scripts/pick-verifier-model)
+          model=$(python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/pick-verifier-model")
           echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
       - name: Verifier runs the audit independently
         working-directory: change
