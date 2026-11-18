@@ -3,6 +3,7 @@ set -uo pipefail
 
 [ $# -ge 1 ] || { echo "usage: facts.sh <repo-path | session-name>"; exit 2; }
 target="$1"
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 if [ -d "$target" ]; then
   repo="$target"
@@ -52,6 +53,22 @@ for s in $skills; do
   echo "  feature files: $(echo "$files" | grep -F "$d/features/" | grep -c -E '\.md$')"
   echo "  helper scripts: $(echo "$files" | grep -F "$d/" | grep -c -E '/[^/]+\.(sh|ps1|mjs|js|py|ts)$')"
 done
+
+echo
+echo "## Formal verification"
+python3 "$script_dir/formal_facts.py" "$repo" "$base" || echo "formal facts UNKNOWN (collector failed)"
+echo
+echo "Risk source hints (first 5 matches per area; inspect actual behavior and formal coverage):"
+while IFS='|' read -r label pattern; do
+  echo "### $label"
+  matches=$(git grep -n -i -E "$pattern" "$base" -- '*.zig' '*.kt' '*.kts' '*.swift' '*.rs' '*.py' '*.ts' '*.tsx' '*.js' '*.mjs' '*.c' '*.cpp' '*.h' '*.go' '*.java' '*.sql' \
+    ':!**/tests/**' ':!**/test/**' ':!**/androidTest/**' ':!**/node_modules/**' ':!**/vendor/**' ':!third_party/**' ':!**/build/**' 2>/dev/null | head -5 | cut -c1-220)
+  echo "${matches:-no matching source hint (not proof that this risk is absent)}"
+done <<'RISKS'
+Money|\b(payment|billing|currency|invoice|ledger|money)\b
+Cross-device sync|\bcross.device\b|\bmulti.device\b|\bdevice\b.{0,30}\bsync\b|\bsync\b.{0,30}\bdevice\b|\breplica\b
+Retries or queues|retry|retries|backoff|queue|outbox
+RISKS
 
 echo
 echo "## Pstack version and drift"
