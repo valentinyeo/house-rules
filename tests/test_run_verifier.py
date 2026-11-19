@@ -140,8 +140,16 @@ class RunVerifierTests(unittest.TestCase):
         self.assertEqual(self.attempts(), ["opencode-go deepseek-v4.1-flash"])
         self.assertEqual(self.env_file.read_text(), "VERIFIER_MODEL=opencode-go/deepseek-v4.1-flash\n")
 
-    def test_the_verdict_prefix_the_skill_lint_brief_asks_for_is_a_verdict(self):
-        result = self.run_verifier({"glm-5.3-flash": "verdict"})
+    def test_a_prefixed_verdict_falls_through_under_the_bare_line_default(self):
+        result = self.run_verifier({"deepseek-v4.1-flash": "verdict", "glm-5.3-flash": "pass"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.env_file.read_text(), "VERIFIER_MODEL=opencode-go/glm-5.3-flash\n")
+        self.assertIn("deepseek-v4.1-flash gave no verdict (no verdict line)", result.stderr)
+
+    def test_the_skill_lint_pattern_takes_the_prefixed_verdict(self):
+        pattern = r"\AVERDICT: (PASS\+NOTES|PASS|FAIL)\b"
+        result = self.run_verifier({"deepseek-v4.1-flash": "pass", "glm-5.3-flash": "verdict"},
+                                   args=["--verdict-pattern", pattern, "--", "--thinking", "low"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.env_file.read_text(), "VERIFIER_MODEL=opencode-go/glm-5.3-flash\n")
         self.assertIn("VERDICT: PASS", self.out.read_text())

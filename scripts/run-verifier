@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """run-verifier: take the first verdict any verifier lane and model gives.
 
-  run-verifier --out verifier.jsonl --prompt-file PROMPT [--event PATH] [--attempt-timeout SECONDS] -- <extra pi args>
+  run-verifier --out verifier.jsonl --prompt-file PROMPT [--event PATH] [--attempt-timeout SECONDS]
+               [--verdict-pattern REGEX] -- <extra pi args>
   run-verifier --self-test
 
 Models come from `pick-verifier-model --all`, so every attempt is from a family no author declares.
@@ -34,8 +35,7 @@ LANES = (
         "kimi-k3": "moonshotai/kimi-k3",
     }),
 )
-# The verdict steps also accept the `VERDICT: PASS` line the skill-lint brief asks for.
-VERDICT = re.compile(r"^(?:VERDICT:[ \t]*)?(PASS\+NOTES|PASS|FAIL)\s*$", re.M)
+VERDICT = r"(?m)^(PASS\+NOTES|PASS|FAIL)\s*$"
 QUOTA = re.compile(r"\b429\b|\bquota\b|rate.?limit|credit balance", re.I)
 FAILURE = "run-verifier: %s/%s gave no verdict (%s), trying next\n"
 
@@ -56,8 +56,8 @@ def models(event):
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def verdict(trace):
-    """True when the last assistant message of the trace holds a verdict line."""
+def verdict(trace, pattern=VERDICT):
+    """True when the last assistant message of the trace matches the post step's verdict pattern."""
     answer = []
     for line in trace.splitlines():
         try:
@@ -70,10 +70,10 @@ def verdict(trace):
         if message.get("role") != "assistant":
             continue
         answer = [part.get("text", "") for part in message.get("content") or [] if part.get("type") == "text"]
-    return VERDICT.search("\n".join(answer)) is not None
+    return re.search(pattern, "\n".join(answer)) is not None
 
 
-def attempt(pi, lane, model, extra, prompt, path, env, limit=None):
+def attempt(pi, lane, model, extra, prompt, path, env, limit=None, pattern=VERDICT):
     """One pi run. Returns the reason it gave no verdict, or None on success."""
     try:
         with open(path, "w", encoding="utf-8") as out, open(path + ".err", "w", encoding="utf-8") as err:
@@ -84,7 +84,7 @@ def attempt(pi, lane, model, extra, prompt, path, env, limit=None):
     except subprocess.TimeoutExpired:
         return "timed out after %ds" % limit
     trace, noise = read(path), read(path + ".err")
-    if result.returncode == 0 and verdict(trace):
+    if result.returncode == 0 and verdict(trace, pattern):
         return None
     reasons = []
     if result.returncode:
@@ -93,12 +93,12 @@ def attempt(pi, lane, model, extra, prompt, path, env, limit=None):
         reasons.append("429 or quota")
     if not trace.strip():
         reasons.append("empty output")
-    elif not verdict(trace):
+    elif not verdict(trace, pattern):
         reasons.append("no verdict line")
     return ", ".join(reasons) or None
 
 
-def run(out, prompt_file, event, extra, env, limit=None):
+def run(out, prompt_file, event, extra, env, limit=None, pattern=VERDICT):
     prompt = read(prompt_file)
     pi = shlex.split(env.get("PI_BIN") or "pi")
     wanted = models(event)
@@ -108,7 +108,7 @@ def run(out, prompt_file, event, extra, env, limit=None):
         for index, (lane, model) in enumerate(planned):
             path = os.path.join(scratch, "attempt-%d.jsonl" % index)
             last = path
-            reason = attempt(pi, lane, model, extra, prompt, path, env, limit)
+            reason = attempt(pi, lane, model, extra, prompt, path, env, limit, pattern)
             if reason is None:
                 shutil.move(path, out)
                 if env.get("GITHUB_ENV"):
@@ -187,6 +187,12 @@ def self_test():
                 assert "verdict from %s\n" % model in text, (name, text)
             else:
                 assert "no lane gave a verdict\n" in text, (name, text)
+    trace = json.dumps({"type": "message_end", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "Notes first\n**VERDICT: PASS+NOTES**"}]}})
+    assert not verdict(trace), "bold verdict is not a bare verdict line"
+    assert not verdict(trace, r"\AVERDICT: (PASS\+NOTES|PASS|FAIL)\b"), "skill-lint needs VERDICT first"
+    lead = trace.replace("Notes first\\n**VERDICT: PASS+NOTES**", "VERDICT: PASS\\nnotes")
+    assert verdict(lead, r"\AVERDICT: (PASS\+NOTES|PASS|FAIL)\b"), lead
     print("run-verifier self-test ok")
 
 
@@ -220,6 +226,8 @@ def main():
     parser.add_argument("--prompt-file")
     parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_PATH"))
     parser.add_argument("--attempt-timeout", type=int, default=960)
+    parser.add_argument("--verdict-pattern", default=VERDICT,
+                        help="Python regex the post step uses on the last answer; an attempt that misses it falls through")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("extra", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -228,7 +236,8 @@ def main():
     if not args.out or not args.prompt_file:
         parser.error("--out and --prompt-file are required")
     extra = args.extra[1:] if args.extra[:1] == ["--"] else args.extra
-    return run(args.out, args.prompt_file, args.event, extra, os.environ, args.attempt_timeout)
+    re.compile(args.verdict_pattern)
+    return run(args.out, args.prompt_file, args.event, extra, os.environ, args.attempt_timeout, args.verdict_pattern)
 
 
 if __name__ == "__main__":
