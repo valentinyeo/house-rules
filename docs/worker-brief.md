@@ -3,6 +3,8 @@
 Faults: Hypertask bug -> hypertask feedback; repo rules or scripts -> the worker repo's board and view; only shared house rules or pstack setup -> board 2060, label Poteto.
 
 Report faults before working around them.
+No board login of your own? Never write on a board, and never borrow a personal login.
+Put the fault and its route in your final message; the orchestrator files it.
 For Hypertask faults, run this command:
 
 ```sh
