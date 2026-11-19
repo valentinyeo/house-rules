@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """run-verifier: take the first verdict any verifier lane and model gives.
 
-  run-verifier --out verifier.jsonl --prompt-file PROMPT [--event PATH] -- <extra pi args>
+  run-verifier --out verifier.jsonl --prompt-file PROMPT [--event PATH] [--attempt-timeout SECONDS] -- <extra pi args>
   run-verifier --self-test
 
 Models come from `pick-verifier-model --all`, so every attempt is from a family no author declares.
@@ -73,14 +73,16 @@ def verdict(trace):
     return VERDICT.search("\n".join(answer)) is not None
 
 
-def attempt(pi, lane, model, extra, prompt, path, env):
+def attempt(pi, lane, model, extra, prompt, path, env, limit=None):
     """One pi run. Returns the reason it gave no verdict, or None on success."""
     try:
         with open(path, "w", encoding="utf-8") as out, open(path + ".err", "w", encoding="utf-8") as err:
             result = subprocess.run([*pi, "--provider", lane, "--model", model, *extra, "--mode", "json", "-p", prompt],
-                                    stdout=out, stderr=err, env=env)
+                                    stdout=out, stderr=err, env=env, timeout=limit)
     except OSError as problem:
         return "cannot run %s: %s" % (pi[0], problem.strerror)
+    except subprocess.TimeoutExpired:
+        return "timed out after %ds" % limit
     trace, noise = read(path), read(path + ".err")
     if result.returncode == 0 and verdict(trace):
         return None
@@ -96,7 +98,7 @@ def attempt(pi, lane, model, extra, prompt, path, env):
     return ", ".join(reasons) or None
 
 
-def run(out, prompt_file, event, extra, env):
+def run(out, prompt_file, event, extra, env, limit=None):
     prompt = read(prompt_file)
     pi = shlex.split(env.get("PI_BIN") or "pi")
     wanted = models(event)
@@ -106,7 +108,7 @@ def run(out, prompt_file, event, extra, env):
         for index, (lane, model) in enumerate(planned):
             path = os.path.join(scratch, "attempt-%d.jsonl" % index)
             last = path
-            reason = attempt(pi, lane, model, extra, prompt, path, env)
+            reason = attempt(pi, lane, model, extra, prompt, path, env, limit)
             if reason is None:
                 shutil.move(path, out)
                 if env.get("GITHUB_ENV"):
@@ -155,6 +157,10 @@ def self_test():
              {}, {"OPENCODE_API_KEY": "x"},
              "Author model: deepseek/deepseek-v4.1-flash", 1, None,
              ["opencode-go glm-5.3-flash", "opencode-go kimi-k3"]),
+            ("a hung model times out and the next answers",
+             {"deepseek-v4.1-flash": "hang", "glm-5.3-flash": "pass"}, {"OPENCODE_API_KEY": "x"},
+             "Author model: anthropic/claude-sonnet", 0, "opencode-go/glm-5.3-flash",
+             ["opencode-go deepseek-v4.1-flash", "opencode-go glm-5.3-flash"]),
         ]
         for name, plan, keys, body, code, model, attempts in cases:
             with open(event, "w", encoding="utf-8") as handle:
@@ -167,7 +173,7 @@ def self_test():
             env.update(keys)
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):
-                got = run(out, prompt, event, ["--thinking", "low"], env)
+                got = run(out, prompt, event, ["--thinking", "low"], env, 2)
             text = stderr.getvalue()
             assert got == code, (name, got, code, text)
             assert read(log).splitlines() == attempts, (name, read(log), attempts)
@@ -199,6 +205,9 @@ text = {"pass": "PASS", "fail": "FAIL\\nReason: broken"}.get(mode)
 if text:
     print(json.dumps({"type": "message_end", "message": {"role": "assistant",
                                                          "content": [{"type": "text", "text": text}]}}))
+elif mode == "hang":
+    import time
+    time.sleep(30)
 elif mode == "429":
     sys.stderr.write("429 Too Many Requests: quota used up\\n")
     sys.exit(1)
@@ -210,6 +219,7 @@ def main():
     parser.add_argument("--out")
     parser.add_argument("--prompt-file")
     parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_PATH"))
+    parser.add_argument("--attempt-timeout", type=int, default=960)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("extra", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -218,7 +228,7 @@ def main():
     if not args.out or not args.prompt_file:
         parser.error("--out and --prompt-file are required")
     extra = args.extra[1:] if args.extra[:1] == ["--"] else args.extra
-    return run(args.out, args.prompt_file, args.event, extra, os.environ)
+    return run(args.out, args.prompt_file, args.event, extra, os.environ, args.attempt_timeout)
 
 
 if __name__ == "__main__":
