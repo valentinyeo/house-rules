@@ -47,9 +47,9 @@ TAKE = {"Doing": 0, "AI Review": 0, "Todo": 1}  # own work in flight first, then
 DRY_RUN = "--dry-run" in sys.argv
 LOOP_GAP = 45 * 60  # a 30-minute heartbeat plus the scheduler's jitter
 LOOP_KINDS = ("chief", "lead", "solo-dev")
-LOOP_MESSAGE = ("Your drain loop is not running: this chat shows no scheduled or watcher-result turn in 45 minutes. Arm it now per the "
-                "valentin-mode Drain rule (watch worker, CI and verdict events; /loop or CronCreate as a slow fallback; exit condition: no ticket you can move), run the Drain "
-                "check, fix what it finds, and reply with its one line.")
+LOOP_MESSAGE = ("Your drain loop is not running: this chat shows no scheduled or watcher-result turn in 45 minutes. Arm it now per "
+                "pstack poteto-mode playbooks/autonomous-run.md (state the exit condition as a checkable predicate; watch worker, CI and "
+                "verdict events; /loop or CronCreate as a slow fallback), run one round, fix what it finds, and reply with one line.")
 
 sys.path.insert(0, str(HERE.parent / "skills/hypertask-triage/scripts"))
 sys.path.insert(0, str(HERE))
@@ -433,7 +433,7 @@ def self_test():
     assert loop_verdict(None, None, [], now)[0] == "skip"
     assert "Fleet Tools" in loop_verdict(live, None, [now - 90 * 60, now - 40 * 60], now)[1], "escalation names the live owner"
     assert "Fleet Tools" in loop_verdict(None, None, [], now)[1] and FROM == "Fleet Tools", "alarm and sender name the live owner"
-    assert "Drain check" in LOOP_MESSAGE and "/loop" in LOOP_MESSAGE
+    assert "autonomous-run" in LOOP_MESSAGE and "valentin-mode" not in LOOP_MESSAGE and "/loop" in LOOP_MESSAGE
     have = {SESSIONS / "ht-product-lead-agent-token"}
     assert identity_gap("HT Product Lead", exists=lambda t: t in have) is None, "a login named after the Multibot name is in sync"
     assert identity_gap("Matt Live Stream", exists=lambda t: t in have), "a chat without its own login must be told (16 Nov audit)"
