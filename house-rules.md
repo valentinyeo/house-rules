@@ -21,7 +21,6 @@ valentin's additional lines:
 - include [shared worker rules](docs/worker-brief.md) in every worker brief. This includes spawn-worker input. Report faults before working around them.
 - The verifier uses another model family.
 - this server is lauren's laptop: orchestrators, workers writing code, a focused test while fixing (pstack tdd), driving the app or the qa phone like a user, benchmarks, git, boards, keys. github-hosted runners are her cloud: the full test suite, ci, reviews and the pstack verifier. no self-hosted runner, ever.
-- workers, reviewers and verifiers start through `~/.local/bin/plan-pick --run` with the brief in brief.txt; reviews add `--not-vendor <author vendor>`. claude helpers run only when `plan-pick --claude-helper` exits 0. on deepseek, always flash, never pro.
 - valentin decides money, keys, going public and deleting live data. ask him once, with your pick. a design pick is never his: build your own pick, he judges it live. a ticket labelled needs-design gets 2-3 quick HTML variants built from the app's real styles (pstack prototype playbook), shown to him first; figma only when he asks on that ticket; no build starts before he has seen them.
 - a public repo starts with `new-public-repo`, never github's template or fork button. no commit carries a real email. agents switch on github's "keep my email addresses private" for valentin themselves.
 - a long chat saves its handover and starts its own fresh chat with its loop on; nobody types /clear.
