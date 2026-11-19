@@ -177,7 +177,8 @@ jobs:
                   head = head[:-3]  # 2>&1
               return head
           missing = [command for command in required if not any(normalize(command) == normalize(actual) for actual in executed)]
-          match = re.match(r'^VERDICT: (PASS\+NOTES|PASS|FAIL)\b', answer)
+          found = re.findall(r'^[ \t]*VERDICT:[ \t]*(PASS\+NOTES|PASS|FAIL)(?![\w+-])', answer, re.M)  # last VERDICT line wins (SOFT-2802)
+          match = [None, found[-1]] if found else None
           clean = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0
           verdict = match[1] if match and not missing and clean else 'FAIL'
           body = f'pstack-verifier: {verdict} @ {os.environ["HEAD"]}\n\nVerifier model: {os.environ.get("VERIFIER_MODEL", "unknown")}, GitHub-hosted.\n\n{answer}\n\nMissing required execution: {missing}\nTracked files unchanged: {clean}\n'

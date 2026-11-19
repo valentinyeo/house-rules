@@ -27,6 +27,27 @@ def load_normalize():
     return scope["normalize"]
 
 
+def load_verdict_regex():
+    match = re.search(r"found = re\.findall\(r'(.+?)', answer, re\.M\)", WORKFLOW)
+    assert match, "VERDICT regex not found in skill-lint.yml"
+    return re.compile(match[1], re.M)
+
+
+class VerdictLine(unittest.TestCase):
+    def last(self, answer):
+        found = load_verdict_regex().findall(answer)
+        return found[-1] if found else None
+
+    def test_house_rules_620_answer_with_a_status_line_first(self):
+        # house-rules#620 head 366433c: the answer opened with a status line, its VERDICT line came later.
+        self.assertEqual(self.last("pstack-verifier: PASS @ head\n\nVERDICT: PASS+NOTES\n\nnotes"), "PASS+NOTES")
+
+    def test_first_line_verdict_and_none(self):
+        self.assertEqual(self.last("VERDICT: FAIL\nwhy"), "FAIL")
+        self.assertIsNone(self.last("Looks good. PASS"))
+        self.assertIsNone(self.last("VERDICT: PASSING"))
+
+
 class Matcher(unittest.TestCase):
     def setUp(self):
         self.normalize = load_normalize()
