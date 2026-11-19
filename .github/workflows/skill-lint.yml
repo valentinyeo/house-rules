@@ -111,21 +111,30 @@ jobs:
           printf '\nInspect git diff %s..HEAD.\nRequired commands:\n' "$BASE" >> "$RUNNER_TEMP/skill-brief.md"
           printf '%s\n' 'python3 -m unittest discover -s ../lint-source/tests -p test_skill_lint.py -v' >> "$RUNNER_TEMP/skill-brief.md"
           cat "$RUNNER_TEMP/skill-lint-command" >> "$RUNNER_TEMP/skill-brief.md"
-      - name: Pick verifier model
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          model=$(python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/pick-verifier-model")
-          echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
       - name: Verifier verifies on GitHub
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         working-directory: change
         env:
           OPENCODE_API_KEY: ${{ secrets.PSTACK_OPENCODE_API_KEY || secrets.OPENCODE_API_KEY }}
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
         run: |
-          test -n "$OPENCODE_API_KEY"
-          timeout 960 pi --provider opencode-go --model "$VERIFIER_MODEL" --thinking low \
-            --no-session --no-extensions --no-skills --no-context-files --no-prompt-templates --no-mcp \
-            --tools read,bash --mode json --print "$(cat "$RUNNER_TEMP/skill-brief.md")" > "$RUNNER_TEMP/skill-verifier.jsonl"
+          if [ -z "$OPENCODE_API_KEY" ] && [ -z "$AI_GATEWAY_API_KEY" ]; then
+            echo "verifier: set OPENCODE_API_KEY or AI_GATEWAY_API_KEY" >&2
+            exit 1
+          fi
+          if [ ! -f "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" ]; then
+            echo "verifier: the base checkout has no run-verifier, running one attempt" >&2
+            model=$(python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/pick-verifier-model")
+            echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
+            timeout 960 pi --provider opencode-go --model "$model" --thinking low \
+              --no-session --no-extensions --no-skills --no-context-files --no-prompt-templates --no-mcp \
+              --tools read,bash --mode json --print "$(cat "$RUNNER_TEMP/skill-brief.md")" > "$RUNNER_TEMP/skill-verifier.jsonl"
+            exit 0
+          fi
+          python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" \
+            --out "$RUNNER_TEMP/skill-verifier.jsonl" --prompt-file "$RUNNER_TEMP/skill-brief.md" \
+            --verdict-pattern '\AVERDICT: (PASS\+NOTES|PASS|FAIL)\b' \
+            -- --thinking low --no-session --no-extensions --no-skills --no-context-files --no-prompt-templates --no-mcp --tools read,bash
       - name: Post current-head verdict with execution evidence
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         working-directory: change

@@ -51,21 +51,34 @@ jobs:
         working-directory: change
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
         run: |
-          set -o pipefail
-          test -n "$OPENCODE_API_KEY"
-          model=$(python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/pick-verifier-model") && echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV" && pi --provider opencode-go --model "$model" --thinking low \
-            --no-extensions --no-mcp --no-skills --no-context-files \
-            --no-prompt-templates --no-themes --tools read,bash \
-            --no-session --mode json -p \
-            'Read '"$GITHUB_WORKSPACE"'/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
+          if [ -z "$OPENCODE_API_KEY" ] && [ -z "$AI_GATEWAY_API_KEY" ]; then
+            echo "verifier: set OPENCODE_API_KEY or AI_GATEWAY_API_KEY" >&2
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/verifier-prompt.txt" <<PROMPT
+          Read $GITHUB_WORKSPACE/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
           Goal: the board sync script and its tests move to the hypertask-work skill in valentinyeo/vstack. House-rules keeps only a three-line shim for fleet/reconcile and fleet/lease, plus one pointer in house-rules.md and docs/fleet-reconcile.md. Independently challenge this PR head.
-          The vstack copy is installed at $HOME/.local/share/vstack. Run python3 -m unittest tests.test_hypertask_work -v there. Run fleet/reconcile --self-test through the shim. Exercise the shim with --board 2060 as a dry run if credentials allow; never run --apply.
+          The vstack copy is installed at \$HOME/.local/share/vstack. Run python3 -m unittest tests.test_hypertask_work -v there. Run fleet/reconcile --self-test through the shim. Exercise the shim with --board 2060 as a dry run if credentials allow; never run --apply.
           Prove a running process with a lease reads live, and a dead pid reads not live. Prove the shim forwards arguments and exit codes. Prove no second copy of the board columns, lease rules, board 15 rules or timer remains in house-rules.
           Board 2060 behavior must remain unchanged. Board 15 uses HTPR keys and only hypertask-ai/hypertask PRs. Live workers take priority. Never move into Valentin Review or Done. Keep the two-hour grace and five-move cap. Board15 writes require vcc or HT Product Lead, never personal credentials.
           Read the complete changed files and git diff origin/main. Do not edit tracked files or merge. No live board credentials exist on this runner. Inspect new comments under pstack no-comments.
-          End with one verdict line PASS, PASS+NOTES, or FAIL, followed by exact evidence and any user-visible bugs. Keep prose sentences at most eight words. Commands and logs stay exact. Delete any lease file your checks create.' \
-            > verifier.jsonl
+          End with one verdict line PASS, PASS+NOTES, or FAIL, followed by exact evidence and any user-visible bugs. Keep prose sentences at most eight words. Commands and logs stay exact. Delete any lease file your checks create.
+          PROMPT
+          if [ ! -f "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" ]; then
+            echo "verifier: the base checkout has no run-verifier, running one attempt" >&2
+            model=$(python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/pick-verifier-model")
+            echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
+            pi --provider opencode-go --model "$model" --thinking low \
+              --no-extensions --no-mcp --no-skills --no-context-files \
+              --no-prompt-templates --no-themes --tools read,bash \
+              --no-session --mode json -p "$(cat "$RUNNER_TEMP/verifier-prompt.txt")" > verifier.jsonl
+            exit 0
+          fi
+          python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" \
+            --out verifier.jsonl --prompt-file "$RUNNER_TEMP/verifier-prompt.txt" \
+            -- --thinking low --no-extensions --no-mcp --no-skills --no-context-files --no-prompt-templates --no-themes --tools read,bash --no-session
       - run: git -C change diff --exit-code
       - uses: actions/upload-artifact@v4
         if: always()
