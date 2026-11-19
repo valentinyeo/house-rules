@@ -1,9 +1,0 @@
-[Unit]
-Description=Ticket readiness: judge every pickable ticket, wake one Sonnet fixer only for what a script cannot repair (HYCI-396)
-
-[Service]
-Type=oneshot
-Nice=10
-TimeoutStartSec=300
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 %h/.local/share/house-rules/fleet/ticket-ready-tick

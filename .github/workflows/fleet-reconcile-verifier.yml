@@ -6,7 +6,6 @@ on:
       - fleet/lease
       - docs/fleet-reconcile.md
       - house-rules.md
-      - systemd/fleet-reconcile-board15.service
       - .github/workflows/fleet-reconcile-verifier.yml
 permissions:
   contents: read

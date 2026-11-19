@@ -1,6 +1,0 @@
-[Unit]
-Description=Nightly factory drill (YPER4-1383)
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/share/house-rules/fleet/drill --all --file
