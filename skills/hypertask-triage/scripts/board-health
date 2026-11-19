@@ -493,7 +493,9 @@ def roster_owners():
     except (OSError, ValueError):
         return set()
     rows = d["rows"] if isinstance(d, dict) else d
-    return {r["login"].lower() for r in rows if r.get("login") and r.get("kind") in OWNER_KINDS}
+    # kind or role: an "outside" row (solo-wake leaves it alone) can still be a lead that owns its tickets (SOFT-2785).
+    return {r["login"].lower() for r in rows
+            if r.get("login") and (r.get("kind") in OWNER_KINDS or OWNER_KINDS & set(r.get("roles") or []))}
 
 
 QUEUE_EXEMPT = {"postbox dev", "multiprompt android dev", "ht design builder"} | roster_owners()

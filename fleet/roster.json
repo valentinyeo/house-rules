@@ -20,16 +20,15 @@
   {
    "name": "HT Product Lead",
    "multibot": "HT Product Lead",
-   "kind": "lead",
+   "kind": "outside",
    "role_skill": "/lead",
    "login": "HT Product Lead",
    "board": "15",
    "status": "unknown",
-   "notes": "Product decisions for board 15. Owns no runners after the switch. 2026-11-10 Valentin: also a solo dev; builds its own tickets like a runner and assigns itself.",
+   "notes": "Product decisions for board 15. Owns no runners after the switch. 2026-11-10 Valentin: also a solo dev; builds its own tickets like a runner and assigns itself. 2026-11-19 SOFT-2785: kind outside at its own request; it owns its loop, wakes and alarms inside the hypertask repo (pstack autonomous-run), so solo-wake sends it nothing.",
    "roles": [
     "lead",
-    "expert",
-    "solo-dev"
+    "expert"
    ],
    "priority": 1,
    "workers": 7,
