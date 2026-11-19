@@ -133,7 +133,7 @@ jobs:
           fi
           python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" \
             --out "$RUNNER_TEMP/skill-verifier.jsonl" --prompt-file "$RUNNER_TEMP/skill-brief.md" \
-            --verdict-pattern '\AVERDICT: (PASS\+NOTES|PASS|FAIL)\b' \
+            --verdict-pattern '\A\s*VERDICT: (PASS\+NOTES|PASS|FAIL)\b' \
             -- --thinking low --no-session --no-extensions --no-skills --no-context-files --no-prompt-templates --no-mcp --tools read,bash
       - name: Post current-head verdict with execution evidence
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
@@ -154,7 +154,7 @@ jobs:
                   answers.append('\n'.join(c.get('text', '') for c in message.get('content', []) if c.get('type') == 'text'))
           answer = answers[-1] if answers else 'No verdict returned.'
           # The brief asks for the verdict on the first line; anything else fails closed (SOFT-2802).
-          match = re.match(r'^VERDICT: (PASS\+NOTES|PASS|FAIL)\b', answer.lstrip())
+          match = re.search(r'\A\s*VERDICT: (PASS\+NOTES|PASS|FAIL)\b', answer)  # same pattern as --verdict-pattern above
           clean = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0
           verdict = match[1] if match and clean else 'FAIL'  # the required commands already ran as CI steps above
           body = f'pstack-verifier: {verdict} @ {os.environ["HEAD"]}\n\nVerifier model: {os.environ.get("VERIFIER_MODEL", "unknown")}, GitHub-hosted.\n\n{answer}\n\nTracked files unchanged: {clean}\n'

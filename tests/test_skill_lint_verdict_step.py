@@ -16,7 +16,7 @@ REQUIRED_LINT = ("python3 ../lint-source/scripts/skill-lint --base 4b50954e945c7
 
 
 def load_verdict_regex():
-    match = re.search(r"match = re\.match\(r'(.+?)', answer\.lstrip\(\)\)", WORKFLOW)
+    match = re.search(r"match = re\.search\(r'(.+?)', answer\)", WORKFLOW)
     assert match, "VERDICT regex not found in skill-lint.yml"
     return re.compile(match[1])
 
@@ -26,7 +26,7 @@ class VerdictLine(unittest.TestCase):
     verdict lines further down never count, so they can neither flip a FAIL nor fake a PASS."""
 
     def first(self, answer):
-        found = load_verdict_regex().match(answer.lstrip())
+        found = load_verdict_regex().search(answer)
         return found[1] if found else None
 
     def test_first_line_only(self):
@@ -38,7 +38,10 @@ class VerdictLine(unittest.TestCase):
         self.assertIsNone(self.first("VERDICT: PASSING"))
 
     def test_run_verifier_uses_the_same_rule(self):
-        self.assertIn("--verdict-pattern '\\AVERDICT: (PASS\\+NOTES|PASS|FAIL)\\b'", WORKFLOW)
+        flag = re.search(r"--verdict-pattern '(.+?)'", WORKFLOW)[1]
+        self.assertEqual(flag, load_verdict_regex().pattern)
+        for answer in ("VERDICT: PASS", "\nVERDICT: PASS", "  VERDICT: PASS", "status\nVERDICT: PASS", "```\nVERDICT: PASS\n```"):
+            self.assertEqual(bool(re.search(flag, answer)), self.first(answer) is not None, answer)
 
 
 class RequiredCommands(unittest.TestCase):
