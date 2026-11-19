@@ -133,7 +133,7 @@ jobs:
           fi
           python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" \
             --out "$RUNNER_TEMP/skill-verifier.jsonl" --prompt-file "$RUNNER_TEMP/skill-brief.md" \
-            --verdict-pattern '\AVERDICT: (PASS\+NOTES|PASS|FAIL)\b' \
+            --verdict-pattern '(?m)^[ \t]*VERDICT:[ \t]*(PASS\+NOTES|PASS|FAIL)(?![\w+-])' \
             -- --thinking low --no-session --no-extensions --no-skills --no-context-files --no-prompt-templates --no-mcp --tools read,bash
       - name: Post current-head verdict with execution evidence
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
