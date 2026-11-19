@@ -1,9 +1,0 @@
-[Unit]
-Description=Reconcile board 2060 columns from worker and PR facts
-
-[Service]
-Type=oneshot
-Environment=SHIP_SESSION_NAME=Poteto
-EnvironmentFile=%h/.config/fleet/reconcile.env
-ExecStart=%h/.local/share/house-rules/fleet/reconcile --apply
-TimeoutStartSec=14min

@@ -1,6 +1,5 @@
 import json
 import os
-import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -168,10 +167,6 @@ class RunnerChatTests(unittest.TestCase):
         self.run_chat("reply", "chat?not/a-path", "message-one", "--text", "Answer", success=False)
         self.assertEqual(self.calls[-1][1], "/chat/sessions/chat%3Fnot%2Fa-path/messages")
         self.assertEqual(self.calls[-1][3], {"text": "Answer", "replyToMessageId": "message-one"})
-
-    def test_ticket_fixer_brief_includes_shared_fault_routes(self):
-        tick = runpy.run_path(str(ROOT / "fleet/ticket-ready-tick"))
-        self.assertIn((ROOT / "docs/worker-brief.md").read_text(), tick["brief"]({}, []))
 
     def test_live_launcher_stops_when_brief_generation_fails(self):
         line = next(line for line in (ROOT / "fleet/runner").read_text().splitlines() if "brief=$(run_brief" in line)

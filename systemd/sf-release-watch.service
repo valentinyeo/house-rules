@@ -1,9 +1,0 @@
-[Unit]
-Description=Software Factory release watch: PR checks, merge, release, changelog, Done, no model (HYCI-352)
-
-[Service]
-Type=oneshot
-Nice=10
-TimeoutStartSec=600
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 %h/.local/share/house-rules/fleet/sf-release-watch

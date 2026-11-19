@@ -1,9 +1,0 @@
-[Unit]
-Description=Write the shared open pull request copy every 10 minutes (HYCI-278)
-
-[Service]
-Type=oneshot
-Nice=10
-TimeoutStartSec=300
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 %h/.local/share/house-rules/fleet/pr-snapshot write

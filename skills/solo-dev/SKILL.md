@@ -1,6 +1,8 @@
 ---
 name: solo-dev
 description: Be the only developer on one of Valentin's personal apps (Multiprompt, Multiprompt Android, Postbox and similar). Commit straight to the default branch, release every green push, drain the PR queue then the app's board view. Use when a mission prompt says "use solo-dev" or names you the only developer on an app. Replaces ship-app for that repo.
+skill-word-budget: 2100
+skill-word-budget-reason: Legacy solo-dev rules from before pstack; SOFT-2819 decides whether house-rules and this skill retire, so it is not rewritten here.
 ---
 
 # Solo dev
@@ -91,14 +93,14 @@ Do this once per repo, as its own commit, before the first ticket.
 Behave on the board exactly like a fleet runner, just alone. Follow the `tickets` skill.
 Run `~/.local/share/house-rules/skills/tickets/scripts/ticket-lint <file>` before every description or people comment; raw `hypertask --token` writes skip no check. (2026-10-30, why: IGSH-1169 passed jargon to Valentin)
 
-- Same columns as the fleet: Doing while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; `blocker-sweep.py` flags it. (2026-11-02, why: IGSH-1353 sat there with "Decision: None")
+- Same columns as the fleet: Doing while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; `skills/tickets/scripts/blocker-sweep.py` flags it.
 - No ticket sits in Doing overnight.
 - AI Review is not a waiting room. Run `scripts/parked-review --board <id>` at every board check; it must print 0 parked. (2026-11-02, why: "fix the origin of tickets not being moved")
 - Every ticket runs through pstack `poteto-mode`: its Bug fix or Feature playbook, `how` before nontrivial changes, `architect` across function boundaries. Name the playbook in your first ticket comment. (2026-10-30, why: Valentin asked "are the agents using pstack?")
 - Prove every change with the repo's own verify skill (`.claude/skills/verify-<app>/`) and link its output on the ticket. No verify skill yet? Make one with pstack `create-verification-skill` first. (2026-11-03, why: "We have never set it up properly")
 - A question from Valentin is not a stop. Answer it, then go back to the queue in the same turn. Never end a turn while the view has open tickets. (2026-10-30, why: answering his question left the session idle)
-- Enforcer: `fleet/solo-wake` (timer `solo-wake`, every 10 minutes). Idle 15 minutes with an open view ticket? It sends you "Continue draining your view per /solo-dev: next <ticket link>". Take that ticket. (2026-11-09, why: HYCI-211, Multi Bot Opus Runner sat idle overnight)
-- Client solo dev (own board, no view; Matt Live Stream on board 12322): your roster row has `board` and no `view`, so solo-wake drains your whole board in the row's `take` columns. Not in the roster? Run `~/.local/share/house-rules/fleet/roster-announce --kind solo-dev --board ID --client NAME --harness claude` once. (2026-11-09, why: HYCI-214)
+- No timer wakes you: the central `solo-wake` timer is gone. Run the pstack autonomous-run playbook, read your view yourself before a turn ends, take the next ticket in that turn. Idle on an open view ticket is a bug you fix.
+- Client solo dev (own board, no view; Matt Live Stream on board 12322): your roster row has `board` and no `view`, so you drain your whole board in the row's `take` columns. Not in the roster? Run `~/.local/share/house-rules/fleet/roster-announce --kind solo-dev --board ID --client NAME --harness claude` once.
 - Every commit message starts with its ticket ID, like `IGSH-1154: ...`. No ticket? Create one first.
 - After each release that touches a ticket, post one people comment on it: what Valentin notices now, in plain words, plus the release tag. Caveman, max 3 bullets.
 - Work with no user-visible change still gets an agent-log line on its ticket.
@@ -128,7 +130,6 @@ Chat and handoff notes cannot replace board maintenance.
 - Comments for Valentin: caveman, short bullets, full https:// links.
 - Quote Valentin with `> `, never plain quote marks.
 - Product decision needed: one marked yes/no Question, ticket to Valentin Review, take the next ticket.
-- Before any Question, read `skills/unblock/learned.md`. Listed class? Decide it yourself. (2026-10-30, why: IGSH-1229 asked him to confirm an update)
 - Now line, Decision section and open Question say the same thing. Never "GO" and "awaits your yes" at once. (2026-10-30, why: IGSH-1121)
 - Robot status goes in the agent lane, not in people comments.
 - Prove it: release tag, run link, before and after screenshot for UI. Never "should work".
