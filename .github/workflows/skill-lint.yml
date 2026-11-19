@@ -168,6 +168,8 @@ jobs:
               head = []
               for i, part in enumerate(parts):
                   if part in SEPARATORS:
+                      if part in ('||', '&'):
+                          return [command]  # a fallback or background job hides the required command's failure
                       tail = parts[i + 1:]
                       if part == '|' and not (tail and tail[0] in VIEWERS):
                           return [command]  # piped into a real program: its output is not the required command's

@@ -69,6 +69,12 @@ class Matcher(unittest.TestCase):
         with tempfile.TemporaryDirectory() as other:
             self.assertFalse(self.same(REQUIRED_TESTS, f"cd {other} && {REQUIRED_TESTS}"))
 
+    def test_a_hidden_failure_does_not_count(self):
+        # house-rules#620 verifier: `|| true` turned a failed required command into a PASS.
+        self.assertFalse(self.same(REQUIRED_TESTS, REQUIRED_TESTS + " || true"))
+        self.assertFalse(self.same(REQUIRED_LINT, REQUIRED_LINT + " 2>&1 || true"))
+        self.assertFalse(self.same(REQUIRED_LINT, REQUIRED_LINT + " &"))
+
     def test_unbalanced_quote_does_not_crash(self):
         for text in ("cat <<EOF\n# it's fine\nEOF", "echo it's"):
             self.assertIsInstance(self.normalize(text), list)
