@@ -152,14 +152,30 @@ jobs:
                   answers.append('\n'.join(c.get('text', '') for c in message.get('content', []) if c.get('type') == 'text'))
           answer = answers[-1] if answers else 'No verdict returned.'
           required = ['python3 -m unittest discover -s ../lint-source/tests -p test_skill_lint.py -v', (scratch / 'skill-lint-command').read_text().strip()]
+          SEPARATORS = {';', '|', '||', '&&', '&'}
+          VIEWERS = {'tail', 'head', 'cat', 'tee'}
           def normalize(command):
+              """The command an agent ran, minus a leading `cd <this dir> &&`, output plumbing (`2>&1`, `| tail`)
+              and anything chained after it (`; echo "exit=$?"`). SOFT-2821: an unbalanced quote is one opaque string."""
               try:
-                  parts = shlex.split(command)
-              except ValueError:  # SOFT-2821: an unbalanced quote in an agent command is not a required command
+                  lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+                  lexer.whitespace_split = True
+                  parts = list(lexer)
+              except ValueError:
                   return [command]
               if len(parts) >= 3 and parts[0] == 'cd' and parts[2] == '&&' and pathlib.Path(parts[1]).resolve() == pathlib.Path.cwd():
                   parts = parts[3:]
-              return parts
+              head = []
+              for i, part in enumerate(parts):
+                  if part in SEPARATORS:
+                      tail = parts[i + 1:]
+                      if part == '|' and not (tail and tail[0] in VIEWERS):
+                          return [command]  # piped into a real program: its output is not the required command's
+                      break
+                  head.append(part)
+              while len(head) >= 3 and head[-2] in ('>&', '>') and head[-3] == '2':
+                  head = head[:-3]  # 2>&1
+              return head
           missing = [command for command in required if not any(normalize(command) == normalize(actual) for actual in executed)]
           match = re.match(r'^VERDICT: (PASS\+NOTES|PASS|FAIL)\b', answer)
           clean = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0
