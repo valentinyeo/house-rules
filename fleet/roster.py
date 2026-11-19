@@ -267,3 +267,25 @@ def post_alarm(note, run=subprocess.run, env=os.environ):
     except (OSError, subprocess.SubprocessError):
         return "failed"
     return "posted" if r.returncode == 0 else "failed"
+
+
+def read_names(path):
+    """The names a marker file holds, or [] when it is missing or unreadable."""
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return []
+
+
+def post_on_change(note, names, marker, run=subprocess.run, env=os.environ):
+    """Post `note` once per change of the flagged set `names`, remembered in `marker`: a standing alarm never repeats,
+    a changed set posts again, and recovery to an empty set posts once. A set never flagged posts nothing. The marker
+    moves only after a successful post, so a failed post retries next run. Returns post_alarm's status or "same"."""
+    if names == read_names(marker):
+        return "same"
+    status = post_alarm(note, run=run, env=env)
+    if status == "posted":
+        marker = Path(marker)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(names))
+    return status

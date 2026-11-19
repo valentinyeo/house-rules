@@ -1,6 +1,6 @@
 {
- "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name (a tmux pattern: {n} a number, {x} one letter, {*} any suffix, as in live-chromescribe-{*}) and loads role_skill. No row: it reports 'not in roster' to Fleet Tools and takes no work. kind: chief, lead, view-lead, solo-dev, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371. Sessions announce themselves at start with fleet/roster-announce (HYCI-214); announcements live in ~/.local/state/roster/announce/, never in this file. Solo-dev rows may carry board without view (client board, whole board), view as a scopes.json key or a raw view id, client, harness and take (section: 0 in flight, 1 queue).",
- "_updated": "2026-11-18 SOFT-2710",
+ "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name (a tmux pattern: {n} a number, {x} one letter, {*} any suffix, as in live-chromescribe-{*}) and loads role_skill. No row: it reports 'not in roster' to Fleet Tools and takes no work. kind: chief, lead, view-lead, solo-dev, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371. Sessions announce themselves at start with fleet/roster-announce (HYCI-214); announcements live in ~/.local/state/roster/announce/, never in this file. Solo-dev rows may carry board without view (client board, whole board), view as a scopes.json key or a raw view id, client, harness and take (section: 0 in flight, 1 queue). A row may carry self_wakes {\"checkpoint\": path, \"stale_after_min\": n}: that chat owns its exit condition and how it wakes (pstack autonomous-run), so solo-wake sends it no ticket wake and no loop, arm or identity message, and only alarms on the board when the checkpoint file is untouched longer than stale_after_min (SOFT-2785).",
+ "_updated": "2026-11-19 SOFT-2785",
  "runners": 17,
  "rows": [
   {
@@ -25,7 +25,11 @@
    "login": "HT Product Lead",
    "board": "15",
    "status": "unknown",
-   "notes": "Product decisions for board 15. Owns no runners after the switch. 2026-11-10 Valentin: also a solo dev; builds its own tickets like a runner and assigns itself.",
+   "notes": "Product decisions for board 15. Owns no runners after the switch. 2026-11-10 Valentin: also a solo dev; builds its own tickets like a runner and assigns itself. SOFT-2785: it wakes itself, so solo-wake sends it no ticket wake, no arm and no identity message; a stale checkpoint file goes to the board alarm only.",
+   "self_wakes": {
+    "checkpoint": "~/.local/state/ht-pstack-boss/checkpoints.md",
+    "stale_after_min": 120
+   },
    "roles": [
     "lead",
     "expert",

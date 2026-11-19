@@ -56,13 +56,6 @@ def worker_errors(rows):
             if "workers" in row and not str(row.get("workers_by", "")).startswith("Valentin")]
 
 
-def read_names(path):
-    try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
-        return []
-
-
 def note_for(names):
     if not names:
         return "roster-check: every live session is in the roster"
@@ -78,17 +71,13 @@ def log_flagged(names, watch=None, run=subprocess.run, env=os.environ):
     watch = watch or WATCH
     last, posted = watch / "roster-check.json", watch / "roster-check-posted.json"
     note = note_for(names)
-    if names != read_names(last):
+    if names != roster.read_names(last):
         watch.mkdir(parents=True, exist_ok=True)
         with open(watch / "log.txt", "a") as f:
             f.write(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + " " + note + "\n")
         last.write_text(json.dumps(names))
-    if names == read_names(posted):
-        return "same"
-    status = roster.post_alarm(note, run=run, env=env)
-    if status == "posted":
-        posted.write_text(json.dumps(names))
-    elif status == "failed":
+    status = roster.post_on_change(note, names, posted, run=run, env=env)
+    if status == "failed":
         print("roster-check: alarm post failed, will retry next run", file=sys.stderr)
     return status
 
