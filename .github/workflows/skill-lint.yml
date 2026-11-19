@@ -133,7 +133,7 @@ jobs:
           fi
           python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" \
             --out "$RUNNER_TEMP/skill-verifier.jsonl" --prompt-file "$RUNNER_TEMP/skill-brief.md" \
-            --verdict-pattern '(?m)^[ \t]*VERDICT:[ \t]*(PASS\+NOTES|PASS|FAIL)(?![\w+-])' \
+            --verdict-pattern '\AVERDICT: (PASS\+NOTES|PASS|FAIL)\b' \
             -- --thinking low --no-session --no-extensions --no-skills --no-context-files --no-prompt-templates --no-mcp --tools read,bash
       - name: Post current-head verdict with execution evidence
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
@@ -153,11 +153,10 @@ jobs:
               if event.get('type') == 'message_end' and message.get('role') == 'assistant':
                   answers.append('\n'.join(c.get('text', '') for c in message.get('content', []) if c.get('type') == 'text'))
           answer = answers[-1] if answers else 'No verdict returned.'
-          found = re.findall(r'^[ \t]*VERDICT:[ \t]*(PASS\+NOTES|PASS|FAIL)(?![\w+-])', answer, re.M)
-          # Fail closed (SOFT-2802): any FAIL line wins, so a quoted PASS can never flip a real FAIL.
-          verdict_line = 'FAIL' if not found or 'FAIL' in found else ('PASS+NOTES' if 'PASS+NOTES' in found else 'PASS')
+          # The brief asks for the verdict on the first line; anything else fails closed (SOFT-2802).
+          match = re.match(r'^VERDICT: (PASS\+NOTES|PASS|FAIL)\b', answer.lstrip())
           clean = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0
-          verdict = verdict_line if clean else 'FAIL'  # the required commands already ran as CI steps above
+          verdict = match[1] if match and clean else 'FAIL'  # the required commands already ran as CI steps above
           body = f'pstack-verifier: {verdict} @ {os.environ["HEAD"]}\n\nVerifier model: {os.environ.get("VERIFIER_MODEL", "unknown")}, GitHub-hosted.\n\n{answer}\n\nTracked files unchanged: {clean}\n'
           path = scratch / 'skill-verdict.md'
           path.write_text(body)

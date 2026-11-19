@@ -16,24 +16,29 @@ REQUIRED_LINT = ("python3 ../lint-source/scripts/skill-lint --base 4b50954e945c7
 
 
 def load_verdict_regex():
-    match = re.search(r"found = re\.findall\(r'(.+?)', answer, re\.M\)", WORKFLOW)
+    match = re.search(r"match = re\.match\(r'(.+?)', answer\.lstrip\(\)\)", WORKFLOW)
     assert match, "VERDICT regex not found in skill-lint.yml"
-    return re.compile(match[1], re.M)
+    return re.compile(match[1])
 
 
 class VerdictLine(unittest.TestCase):
-    def last(self, answer):
-        found = load_verdict_regex().findall(answer)
-        return found[-1] if found else None
+    """SOFT-2802: the verdict is the first line of the answer, as the brief asks. Quoted or fenced
+    verdict lines further down never count, so they can neither flip a FAIL nor fake a PASS."""
 
-    def test_house_rules_620_answer_with_a_status_line_first(self):
-        # house-rules#620 head 366433c: the answer opened with a status line, its VERDICT line came later.
-        self.assertEqual(self.last("pstack-verifier: PASS @ head\n\nVERDICT: PASS+NOTES\n\nnotes"), "PASS+NOTES")
+    def first(self, answer):
+        found = load_verdict_regex().match(answer.lstrip())
+        return found[1] if found else None
 
-    def test_first_line_verdict_and_none(self):
-        self.assertEqual(self.last("VERDICT: FAIL\nwhy"), "FAIL")
-        self.assertIsNone(self.last("Looks good. PASS"))
-        self.assertIsNone(self.last("VERDICT: PASSING"))
+    def test_first_line_only(self):
+        self.assertEqual(self.first("VERDICT: PASS+NOTES\n\nnotes"), "PASS+NOTES")
+        self.assertEqual(self.first("VERDICT: FAIL\nquoted:\nVERDICT: PASS"), "FAIL")
+        self.assertEqual(self.first("VERDICT: PASS\nquoted:\nVERDICT: FAIL"), "PASS")
+        self.assertIsNone(self.first("status line\nVERDICT: PASS"))
+        self.assertIsNone(self.first("format:\n```\nVERDICT: PASS\n```"))
+        self.assertIsNone(self.first("VERDICT: PASSING"))
+
+    def test_run_verifier_uses_the_same_rule(self):
+        self.assertIn("--verdict-pattern '\\AVERDICT: (PASS\\+NOTES|PASS|FAIL)\\b'", WORKFLOW)
 
 
 class RequiredCommands(unittest.TestCase):

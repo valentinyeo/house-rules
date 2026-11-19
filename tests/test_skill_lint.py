@@ -228,13 +228,15 @@ class SkillLintTests(unittest.TestCase):
         cases = [
             ("VERDICT: PASS", "PASS"),
             ("VERDICT: PASS+NOTES\nnotes", "PASS+NOTES"),
-            ("status line\nVERDICT: PASS", "PASS"),
+            ("\n  VERDICT: PASS", "PASS"),
+            ("status line\nVERDICT: PASS", "FAIL"),
             ("VERDICT: FAIL", "FAIL"),
             ("no verdict here", "FAIL"),
             ("", "FAIL"),
             ("VERDICT: FAIL\n\nprior run:\nVERDICT: PASS", "FAIL"),
-            ("VERDICT: PASS+NOTES\n\nprior:\nVERDICT: FAIL", "FAIL"),
-            ("VERDICT: PASS\nquoted:\nVERDICT: PASS+NOTES", "PASS+NOTES"),
+            ("VERDICT: PASS\n\nprevious run printed:\nVERDICT: FAIL", "PASS"),
+            ("I could not finish.\n```\nVERDICT: PASS\n```", "FAIL"),
+            ("VERDICT: PASSING", "FAIL"),
         ]
         for text, want in cases:
             expected = 0 if want != "FAIL" else 1
