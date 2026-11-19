@@ -133,7 +133,7 @@ jobs:
           fi
           python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" \
             --out "$RUNNER_TEMP/skill-verifier.jsonl" --prompt-file "$RUNNER_TEMP/skill-brief.md" \
-            --verdict-pattern '\AVERDICT: (PASS\+NOTES|PASS|FAIL)\b' \
+            --verdict-pattern '\A\s*VERDICT: (PASS\+NOTES|PASS|FAIL)\b' \
             -- --thinking low --no-session --no-extensions --no-skills --no-context-files --no-prompt-templates --no-mcp --tools read,bash
       - name: Post current-head verdict with execution evidence
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
@@ -144,36 +144,20 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, re, shlex, subprocess
+          import json, os, pathlib, re, subprocess
           scratch = pathlib.Path(os.environ['RUNNER_TEMP'])
           events = [json.loads(line) for line in (scratch / 'skill-verifier.jsonl').read_text().splitlines() if line.startswith('{')]
-          started, executed, answers = {}, [], []
+          answers = []
           for event in events:
-              if event.get('type') == 'tool_execution_start' and event.get('toolName') == 'bash':
-                  started[event['toolCallId']] = (event.get('args') or {}).get('command', '')
-              if event.get('type') == 'tool_execution_end' and event.get('toolName') == 'bash' and not event.get('isError'):
-                  result = event.get('result') or {}
-                  details = result.get('structuredContent') or {}
-                  if not result.get('isError') and details.get('exit_code') == 0 and details.get('output', '').strip():
-                      executed.append(started.get(event.get('toolCallId'), ''))
               message = event.get('message') or {}
               if event.get('type') == 'message_end' and message.get('role') == 'assistant':
                   answers.append('\n'.join(c.get('text', '') for c in message.get('content', []) if c.get('type') == 'text'))
           answer = answers[-1] if answers else 'No verdict returned.'
-          required = ['python3 -m unittest discover -s ../lint-source/tests -p test_skill_lint.py -v', (scratch / 'skill-lint-command').read_text().strip()]
-          def normalize(command):
-              try:
-                  parts = shlex.split(command)
-              except ValueError:  # SOFT-2821: an unbalanced quote in an agent command is not a required command
-                  return [command]
-              if len(parts) >= 3 and parts[0] == 'cd' and parts[2] == '&&' and pathlib.Path(parts[1]).resolve() == pathlib.Path.cwd():
-                  parts = parts[3:]
-              return parts
-          missing = [command for command in required if not any(normalize(command) == normalize(actual) for actual in executed)]
-          match = re.match(r'^VERDICT: (PASS\+NOTES|PASS|FAIL)\b', answer)
+          # The brief asks for the verdict on the first line; anything else fails closed (SOFT-2802).
+          match = re.search(r'\A\s*VERDICT: (PASS\+NOTES|PASS|FAIL)\b', answer)  # same pattern as --verdict-pattern above
           clean = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0
-          verdict = match[1] if match and not missing and clean else 'FAIL'
-          body = f'pstack-verifier: {verdict} @ {os.environ["HEAD"]}\n\nVerifier model: {os.environ.get("VERIFIER_MODEL", "unknown")}, GitHub-hosted.\n\n{answer}\n\nMissing required execution: {missing}\nTracked files unchanged: {clean}\n'
+          verdict = match[1] if match and clean else 'FAIL'  # the required commands already ran as CI steps above
+          body = f'pstack-verifier: {verdict} @ {os.environ["HEAD"]}\n\nVerifier model: {os.environ.get("VERIFIER_MODEL", "unknown")}, GitHub-hosted.\n\n{answer}\n\nTracked files unchanged: {clean}\n'
           path = scratch / 'skill-verdict.md'
           path.write_text(body)
           subprocess.run(['gh', 'pr', 'comment', os.environ['PR'], '--repo', os.environ['GITHUB_REPOSITORY'], '--body-file', str(path)], check=True)

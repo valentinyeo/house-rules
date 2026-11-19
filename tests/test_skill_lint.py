@@ -215,30 +215,33 @@ class SkillLintTests(unittest.TestCase):
         self.check("Read [required](missing.md).")
         self.assertIn("missing reference missing.md", self.cli("--base", base, env=environment).stdout)
 
-    def test_verifier_accepts_correct_cd_prefix_but_not_fabricated_evidence(self):
+    def test_verifier_verdict_comes_from_its_verdict_line(self):
+        # SOFT-2802: CI runs both required commands as its own steps, so the verdict no longer
+        # depends on matching the reviewer's shell strings, which failed in both directions.
         workflow = lint.yaml.safe_load((SCRIPT.parent.parent / ".github/workflows/skill-lint.yml").read_text())
-        step = next(step for step in workflow["jobs"]["pstack-verifier"]["steps"] if step.get("name") == "Post current-head verdict with execution evidence")
+        steps = workflow["jobs"]["pstack-verifier"]["steps"]
+        runs = "\n".join(step.get("run", "") for step in steps)
+        self.assertIn("python3 -m unittest discover -s lint-source/tests -p test_skill_lint.py -v", runs)
+        self.assertIn('bash "$RUNNER_TEMP/skill-lint-command"', runs)
+        step = next(step for step in steps if step.get("name") == "Post current-head verdict with execution evidence")
         program = step["run"].split("\n", 1)[1].rsplit("\nPY", 1)[0]
-        commands = ["python3 -m unittest discover -s ../lint-source/tests -p test_skill_lint.py -v", "python3 ../lint-source/scripts/skill-lint --base baseline"]
-        (self.root / "skill-lint-command").write_text(commands[1])
         cases = [
-            ("", 0, "observed output", False, 0),
-            (f"cd {Path.cwd()} && ", 0, "observed output", False, 0),
-            ("cd /wrong-directory && ", 0, "observed output", False, 1),
-            ("echo fabricated && ", 0, "observed output", False, 1),
-            ("", 1, "failed command", False, 1),
-            ("", 0, "", False, 1),
-            ("", 0, "observed output", True, 1),
+            ("VERDICT: PASS", "PASS"),
+            ("VERDICT: PASS+NOTES\nnotes", "PASS+NOTES"),
+            ("\n  VERDICT: PASS", "PASS"),
+            ("status line\nVERDICT: PASS", "FAIL"),
+            ("VERDICT: FAIL", "FAIL"),
+            ("no verdict here", "FAIL"),
+            ("", "FAIL"),
+            ("VERDICT: FAIL\n\nprior run:\nVERDICT: PASS", "FAIL"),
+            ("VERDICT: PASS\n\nprevious run printed:\nVERDICT: FAIL", "PASS"),
+            ("I could not finish.\n```\nVERDICT: PASS\n```", "FAIL"),
+            ("VERDICT: PASSING", "FAIL"),
         ]
-        for prefix, code, output, is_error, expected in cases:
-            with self.subTest(prefix=prefix, code=code, output=output, is_error=is_error):
-                events = []
-                for index, command in enumerate(commands):
-                    events += [
-                        {"type": "tool_execution_start", "toolName": "bash", "toolCallId": str(index), "args": {"command": prefix + command}},
-                        {"type": "tool_execution_end", "toolName": "bash", "toolCallId": str(index), "isError": is_error, "result": {"structuredContent": {"exit_code": code, "output": output}}},
-                    ]
-                events.append({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "VERDICT: PASS"}]}})
+        for text, want in cases:
+            expected = 0 if want != "FAIL" else 1
+            with self.subTest(text=text):
+                events = [{"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}]
                 (self.root / "skill-verifier.jsonl").write_text("\n".join(map(json.dumps, events)))
                 environment = {"RUNNER_TEMP": str(self.root), "HEAD": "head-sha", "PR": "604", "GITHUB_REPOSITORY": "valentinyeo/house-rules"}
                 with mock.patch.dict(os.environ, environment), mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)), contextlib.redirect_stdout(io.StringIO()):
@@ -246,7 +249,7 @@ class SkillLintTests(unittest.TestCase):
                         exec(compile(program, "workflow-verdict", "exec"), {})
                 self.assertEqual(result.exception.code, expected)
                 verdict = (self.root / "skill-verdict.md").read_text().splitlines()[0]
-                self.assertEqual(verdict, f"pstack-verifier: {'PASS' if expected == 0 else 'FAIL'} @ head-sha")
+                self.assertEqual(verdict, f"pstack-verifier: {want} @ head-sha")
 
     def test_renamed_skill_is_not_new(self):
         self.check()
