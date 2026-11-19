@@ -251,6 +251,37 @@ class SkillLintTests(unittest.TestCase):
                 verdict = (self.root / "skill-verdict.md").read_text().splitlines()[0]
                 self.assertEqual(verdict, f"pstack-verifier: {want} @ head-sha")
 
+    def test_project_skills_are_linted_in_audit_and_diff(self):
+        # SOFT-2858: a project skill must not escape the rules the shared skills folder gets.
+        project = self.root / "projects/demo/.claude/skills/copycat/SKILL.md"
+        project.parent.mkdir(parents=True)
+        self.git("init", "-q")
+        (self.root / "notes.md").write_text("base")
+        base = self.commit()
+        project.write_text(HEADER + COPIED + "\n")
+        self.commit()
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("projects/demo/.claude/skills/copycat/SKILL.md:", result.stdout)
+        self.assertIn("instead of restating", result.stdout)
+        self.assertIn("skill-lint: FAIL", result.stdout)
+        result = self.cli("--base", base)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("projects/demo/.claude/skills/copycat/SKILL.md:", result.stdout)
+        self.assertIn("instead of restating", result.stdout)
+
+    def test_project_skills_in_a_plain_skills_folder_and_skipped_directories(self):
+        plain = self.root / "packages/api/skills/copycat/SKILL.md"
+        plain.parent.mkdir(parents=True)
+        plain.write_text(HEADER + COPIED + "\n")
+        vendored = self.root / "node_modules/pkg/skills/copycat/SKILL.md"
+        vendored.parent.mkdir(parents=True)
+        vendored.write_text(HEADER + COPIED + "\n")
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("packages/api/skills/copycat/SKILL.md:", result.stdout)
+        self.assertNotIn("node_modules", result.stdout)
+
     def test_renamed_skill_is_not_new(self):
         self.check()
         self.git("init", "-q")

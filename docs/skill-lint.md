@@ -16,6 +16,8 @@ python3 /path/to/house-rules/scripts/skill-lint --base origin/main \
 
 The script picks the highest numeric pstack version across `~/.claude/plugins/cache/*/pstack/*/skills`. Override with `--pstack /path/to/pstack/skills`. The default root is the current directory; `--root` changes it.
 
+Every `SKILL.md` under any folder named `skills`, including a project's `.claude/skills`, faces the same rules, so a skill kept inside a project cannot skip the lint. `.git` and `node_modules` are skipped. The diff and the full audit use the same set.
+
 Omit `--base` for a full audit, or supply specific `skills/<name>/SKILL.md` files. Full audits report legacy debt rather than silently exempting it. CI checks complete changed skills since the merge base, not unrelated legacy skills. Renames retain their previous baseline. New means a skill absent at that baseline.
 
 CI fetches pstack and the other skill collection at full commit pins in `.skill-lint.json`. It verifies pstack's `plugin.json` version. No runner-local cache is trusted. PR-body edits rerun the gate.
