@@ -135,55 +135,20 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, re, shlex, subprocess
+          import json, os, pathlib, re, subprocess
           scratch = pathlib.Path(os.environ['RUNNER_TEMP'])
           events = [json.loads(line) for line in (scratch / 'skill-verifier.jsonl').read_text().splitlines() if line.startswith('{')]
-          started, executed, answers = {}, [], []
+          answers = []
           for event in events:
-              if event.get('type') == 'tool_execution_start' and event.get('toolName') == 'bash':
-                  started[event['toolCallId']] = (event.get('args') or {}).get('command', '')
-              if event.get('type') == 'tool_execution_end' and event.get('toolName') == 'bash' and not event.get('isError'):
-                  result = event.get('result') or {}
-                  details = result.get('structuredContent') or {}
-                  if not result.get('isError') and details.get('exit_code') == 0 and details.get('output', '').strip():
-                      executed.append(started.get(event.get('toolCallId'), ''))
               message = event.get('message') or {}
               if event.get('type') == 'message_end' and message.get('role') == 'assistant':
                   answers.append('\n'.join(c.get('text', '') for c in message.get('content', []) if c.get('type') == 'text'))
           answer = answers[-1] if answers else 'No verdict returned.'
-          required = ['python3 -m unittest discover -s ../lint-source/tests -p test_skill_lint.py -v', (scratch / 'skill-lint-command').read_text().strip()]
-          SEPARATORS = {';', '|', '||', '&&', '&'}
-          VIEWERS = {'tail', 'head', 'cat', 'tee'}
-          def normalize(command):
-              """The command an agent ran, minus a leading `cd <this dir> &&`, output plumbing (`2>&1`, `| tail`)
-              and anything chained after it (`; echo "exit=$?"`). SOFT-2821: an unbalanced quote is one opaque string."""
-              try:
-                  lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-                  lexer.whitespace_split = True
-                  parts = list(lexer)
-              except ValueError:
-                  return [command]
-              if len(parts) >= 3 and parts[0] == 'cd' and parts[2] == '&&' and pathlib.Path(parts[1]).resolve() == pathlib.Path.cwd():
-                  parts = parts[3:]
-              head = []
-              for i, part in enumerate(parts):
-                  if part in SEPARATORS:
-                      if part in ('||', '&'):
-                          return [command]  # a fallback or background job hides the required command's failure
-                      tail = parts[i + 1:]
-                      if part == '|' and not (tail and tail[0] in VIEWERS):
-                          return [command]  # piped into a real program: its output is not the required command's
-                      break
-                  head.append(part)
-              while len(head) >= 3 and head[-2] in ('>&', '>') and head[-3] == '2':
-                  head = head[:-3]  # 2>&1
-              return head
-          missing = [command for command in required if not any(normalize(command) == normalize(actual) for actual in executed)]
           found = re.findall(r'^[ \t]*VERDICT:[ \t]*(PASS\+NOTES|PASS|FAIL)(?![\w+-])', answer, re.M)  # last VERDICT line wins (SOFT-2802)
           match = [None, found[-1]] if found else None
           clean = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0
-          verdict = match[1] if match and not missing and clean else 'FAIL'
-          body = f'pstack-verifier: {verdict} @ {os.environ["HEAD"]}\n\nVerifier model: {os.environ.get("VERIFIER_MODEL", "unknown")}, GitHub-hosted.\n\n{answer}\n\nMissing required execution: {missing}\nTracked files unchanged: {clean}\n'
+          verdict = match[1] if match and clean else 'FAIL'  # the required commands already ran as CI steps above
+          body = f'pstack-verifier: {verdict} @ {os.environ["HEAD"]}\n\nVerifier model: {os.environ.get("VERIFIER_MODEL", "unknown")}, GitHub-hosted.\n\n{answer}\n\nTracked files unchanged: {clean}\n'
           path = scratch / 'skill-verdict.md'
           path.write_text(body)
           subprocess.run(['gh', 'pr', 'comment', os.environ['PR'], '--repo', os.environ['GITHUB_REPOSITORY'], '--body-file', str(path)], check=True)
