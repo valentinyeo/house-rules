@@ -31,10 +31,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 TRIGGERS = ("pull_request", "pull_request_target", "push", "merge_group", "workflow_call", "workflow_run")
 
 # Workflows exempt for now, each with the reason and the ticket that removes it.
-ALLOWED_MISSING = {
-    # SOFT-2691 / PR #603 rewrites this file; add the block there, then delete this entry.
-    "fleet-reconcile-verifier.yml",
-}
+ALLOWED_MISSING: set[str] = set()
 
 
 def load(text):
