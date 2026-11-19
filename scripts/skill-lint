@@ -16,10 +16,28 @@ import yaml
 DEFAULT_BUDGET = 800
 MIN_TOKENS = 8
 OVERLAP = 0.82
+SKIP_DIRECTORIES = {".git", "node_modules"}
 
 
 def git(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+
+
+def is_skill_path(path):
+    """Any SKILL.md under a skills folder, including a project's .claude/skills."""
+    parts = path.parts[:-1]
+    return path.name == "SKILL.md" and "skills" in parts and not SKIP_DIRECTORIES & set(parts)
+
+
+def skill_files(root):
+    found = []
+    for directory, subdirectories, filenames in os.walk(root):
+        subdirectories[:] = sorted(name for name in subdirectories if name not in SKIP_DIRECTORIES)
+        for name in filenames:
+            path = Path(directory) / name
+            if is_skill_path(path.relative_to(root)):
+                found.append(path)
+    return sorted(found)
 
 
 def newest_pstack(home):
@@ -223,11 +241,13 @@ def main():
         base = git(root, "merge-base", args.base, "HEAD") if args.base else None
         previous_paths = {}
         if base:
-            changes = git(root, "diff", "--name-status", "-M", "--diff-filter=ACMR", base, "--", "skills").splitlines()
+            changes = git(root, "diff", "--name-status", "-M", "--diff-filter=ACMR", base).splitlines()
             for change in changes:
                 fields = change.split("\t")
-                previous_paths[fields[-1]] = fields[1] if fields[0].startswith("R") else fields[-1]
-        files = [root / path for path in args.files] if args.files else ([root / path for path in previous_paths if path.endswith("/SKILL.md")] if base else sorted((root / "skills").rglob("SKILL.md")))
+                path = fields[-1]
+                if is_skill_path(Path(path)):
+                    previous_paths[path] = fields[1] if fields[0].startswith("R") else path
+        files = [root / path for path in args.files] if args.files else ([root / path for path in previous_paths] if base else skill_files(root))
         pr_body = args.pr_body_file.read_text() if args.pr_body_file else ""
         if not args.pr_body_file and os.environ.get("GITHUB_EVENT_PATH"):
             event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
