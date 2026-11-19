@@ -38,28 +38,36 @@ jobs:
         with:
           node-version: '22'
       - run: npm install -g @earendil-works/pi-coding-agent@1.5.0
-      - name: Pick verifier model
-        working-directory: change
-        run: |
-          model=$(python3 -I "$GITHUB_WORKSPACE/base/scripts/pick-verifier-model")
-          echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
       - name: Independent verification
         working-directory: change
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
         run: |
-          set -o pipefail
-          test -n "$OPENCODE_API_KEY"
-          pi --provider opencode-go --model "$VERIFIER_MODEL" --thinking low \
-            --no-extensions --no-mcp --no-skills --no-context-files \
-            --no-prompt-templates --no-themes --tools read,bash \
-            --no-session --mode json -p \
-            'Read '"$GITHUB_WORKSPACE"'/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
+          if [ -z "$OPENCODE_API_KEY" ] && [ -z "$AI_GATEWAY_API_KEY" ]; then
+            echo "verifier: set OPENCODE_API_KEY or AI_GATEWAY_API_KEY" >&2
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/verifier-prompt.txt" <<PROMPT
+          Read $GITHUB_WORKSPACE/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
           Goal: every gap /verification-check reports names the pstack skill that fixes it, with formal coverage and covered-code history detected read only. Verify this PR independently against the base checkout at ../base. You are from a different model family than the author.
           Shared worker rules: read docs/worker-brief.md. Hypertask faults go through hypertask feedback; shared house-rules or script faults go to board 2060 with label Poteto. Report faults before workarounds. This isolated verifier has no board credentials: record any reporting blocker in the verdict, never borrow a personal login.
           Read skills/verification-check/SKILL.md, facts.sh, formal_facts.py, and tests/test_verification_check.py. The 24-item audit must preserve the original 22 CI/drift items. Every non-green item and the final gap names a /pstack: fix command. Missing verify skill goes to create-verification-skill; stale maps, coverage gaps and missing scheduled passes to maintain-verification-skill; money, cross-device sync, retries or queues without relevant formal checks to create-formal-verification-skill; existing formal checks whose covered code changed since sync to maintain-formal-verification-skill. Formal skills have no fixed name: inspect their contents, referenced coverage metadata, covered paths, sync commits and recent history. Missing metadata/history stays UNKNOWN, unrelated changes do not make covered code stale, and one formal area does not prove another. No audited repo writes, fetching, or executing its checks.
-          Run only this feature. Run python3 -m unittest tests.test_verification_check -v against head, then FACTS_SCRIPT="$GITHUB_WORKSPACE/base/skills/verification-check/facts.sh" python3 -m unittest tests.test_verification_check -v against base. Base failures reproduce missing functionality; distinguish them from new regressions. Challenge unknown API results, version ordering, missing version files, queued jobs, and no-skill behavior. All fixtures must use temporary repos, never live repos. Apply the reply instructions to a missing-skill fixture and a stale-formal-coverage fixture. Include sample gap lines to prove each recommends the right /pstack: command and never executes it. Check unchanged and deleted covered files, unavailable sync history, and a formal skill with a nonstandard name. Run bash -n skills/verification-check/facts.sh. Do not run the full suite. Do not edit tracked files, install runners, use real services, or change branch protection. Finish with one standalone verdict line PASS, PASS+NOTES, or FAIL, followed by commands, observed results, and concrete findings. A FAIL needs an executable reproduction.' \
-            > verifier.jsonl
+          Run only this feature. Run python3 -m unittest tests.test_verification_check -v against head, then FACTS_SCRIPT="\$GITHUB_WORKSPACE/base/skills/verification-check/facts.sh" python3 -m unittest tests.test_verification_check -v against base. Base failures reproduce missing functionality; distinguish them from new regressions. Challenge unknown API results, version ordering, missing version files, queued jobs, and no-skill behavior. All fixtures must use temporary repos, never live repos. Apply the reply instructions to a missing-skill fixture and a stale-formal-coverage fixture. Include sample gap lines to prove each recommends the right /pstack: command and never executes it. Check unchanged and deleted covered files, unavailable sync history, and a formal skill with a nonstandard name. Run bash -n skills/verification-check/facts.sh. Do not run the full suite. Do not edit tracked files, install runners, use real services, or change branch protection. Finish with one standalone verdict line PASS, PASS+NOTES, or FAIL, followed by commands, observed results, and concrete findings. A FAIL needs an executable reproduction.
+          PROMPT
+          if [ ! -f "$GITHUB_WORKSPACE/base/scripts/run-verifier" ]; then
+            echo "verifier: the base checkout has no run-verifier, running one attempt" >&2
+            model=$(python3 -I "$GITHUB_WORKSPACE/base/scripts/pick-verifier-model")
+            echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
+            pi --provider opencode-go --model "$model" --thinking low \
+              --no-extensions --no-mcp --no-skills --no-context-files \
+              --no-prompt-templates --no-themes --tools read,bash \
+              --no-session --mode json -p "$(cat "$RUNNER_TEMP/verifier-prompt.txt")" > verifier.jsonl
+            exit 0
+          fi
+          python3 -I "$GITHUB_WORKSPACE/base/scripts/run-verifier" \
+            --out verifier.jsonl --prompt-file "$RUNNER_TEMP/verifier-prompt.txt" \
+            -- --thinking low --no-extensions --no-mcp --no-skills --no-context-files --no-prompt-templates --no-themes --tools read,bash --no-session
       - run: git -C change diff --exit-code
       - uses: actions/upload-artifact@v4
         if: always()

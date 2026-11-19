@@ -39,25 +39,33 @@ jobs:
         with:
           node-version: '22'
       - run: npm install -g @earendil-works/pi-coding-agent@1.5.0
-      - name: Pick verifier model
-        working-directory: change
-        run: |
-          model=$(python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/pick-verifier-model")
-          echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
       - name: Verifier runs the audit independently
         working-directory: change
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
         run: |
-          set -o pipefail
-          test -n "$OPENCODE_API_KEY"
-          pi --provider opencode-go --model "$VERIFIER_MODEL" --thinking low \
-            --no-extensions --no-mcp --no-skills --no-context-files \
-            --no-prompt-templates --no-themes --tools read,bash \
-            --no-session --mode json -p \
-            'Read '"$GITHUB_WORKSPACE"'/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
-          Goal: house-rules.md keeps only rules absent from pstack 0.15.43. A previous verifier run gave 40133c7 PASS+NOTES, confirming every retained and delegated clause. It found an audit link broken after syncing and two missing duplicate patterns. This follow-up fixes those notes. Verify the fixes and the current complete artifact. Do not repeat full-repository lint, already proven to fail identically on base. The requested diff lint is the relevant check. Verify this PR independently. Do not merge or edit tracked files. Read ../pstack-source/pstack/skills/poteto-mode/SKILL.md. Read the diff against origin/main, the complete original and new house-rules.md, and inventory/pstack-0.15.43-audit.md. Compare every removed clause to the actual pinned pstack sources. Challenge retained clauses too. Run python3 -m unittest tests.test_pstack_delegation -v and python3 scripts/rules-lint --diff origin/main. Prove the regression rejects the original house-rules.md using a temporary checkout or restoring the file afterward. Check every local difference survives. End with exactly one verdict line PASS, PASS+NOTES, or FAIL, followed by concrete evidence and any bugs. Keep prose sentences at most eight words. Commands and logs stay exact.' \
-            > verifier.jsonl
+          if [ -z "$OPENCODE_API_KEY" ] && [ -z "$AI_GATEWAY_API_KEY" ]; then
+            echo "verifier: set OPENCODE_API_KEY or AI_GATEWAY_API_KEY" >&2
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/verifier-prompt.txt" <<PROMPT
+          Read $GITHUB_WORKSPACE/pstack-source/pstack/skills/poteto-mode/worker.md before anything else.
+          Goal: house-rules.md keeps only rules absent from pstack 0.15.43. A previous verifier run gave 40133c7 PASS+NOTES, confirming every retained and delegated clause. It found an audit link broken after syncing and two missing duplicate patterns. This follow-up fixes those notes. Verify the fixes and the current complete artifact. Do not repeat full-repository lint, already proven to fail identically on base. The requested diff lint is the relevant check. Verify this PR independently. Do not merge or edit tracked files. Read ../pstack-source/pstack/skills/poteto-mode/SKILL.md. Read the diff against origin/main, the complete original and new house-rules.md, and inventory/pstack-0.15.43-audit.md. Compare every removed clause to the actual pinned pstack sources. Challenge retained clauses too. Run python3 -m unittest tests.test_pstack_delegation -v and python3 scripts/rules-lint --diff origin/main. Prove the regression rejects the original house-rules.md using a temporary checkout or restoring the file afterward. Check every local difference survives. End with exactly one verdict line PASS, PASS+NOTES, or FAIL, followed by concrete evidence and any bugs. Keep prose sentences at most eight words. Commands and logs stay exact.
+          PROMPT
+          if [ ! -f "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" ]; then
+            echo "verifier: the base checkout has no run-verifier, running one attempt" >&2
+            model=$(python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/pick-verifier-model")
+            echo "VERIFIER_MODEL=$model" >> "$GITHUB_ENV"
+            pi --provider opencode-go --model "$model" --thinking low \
+              --no-extensions --no-mcp --no-skills --no-context-files \
+              --no-prompt-templates --no-themes --tools read,bash \
+              --no-session --mode json -p "$(cat "$RUNNER_TEMP/verifier-prompt.txt")" > verifier.jsonl
+            exit 0
+          fi
+          python3 -I "$GITHUB_WORKSPACE/picker-base/scripts/run-verifier" \
+            --out verifier.jsonl --prompt-file "$RUNNER_TEMP/verifier-prompt.txt" \
+            -- --thinking low --no-extensions --no-mcp --no-skills --no-context-files --no-prompt-templates --no-themes --tools read,bash --no-session
       - uses: actions/upload-artifact@v4
         if: always()
         with:
