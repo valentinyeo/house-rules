@@ -60,6 +60,7 @@ git -C "$dir" config user.email "$id+$login@users.noreply.github.com"
 git -C "$dir" rev-parse -q --verify HEAD >/dev/null || { echo "No commit in $dir yet. Commit first; the identity is now set to the no-reply address." >&2; exit 1; }
 check_range "$dir" || { echo "Refused: fix the commits above before anything is pushed." >&2; exit 1; }
 gh repo create "$repo" --public --disable-wiki >/dev/null
+gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null
 git -C "$dir" remote remove origin 2>/dev/null || true
 git -C "$dir" remote add origin "https://github.com/$repo.git"
 git -C "$dir" push -u origin HEAD
