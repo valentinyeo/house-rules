@@ -1,6 +1,8 @@
 ---
 name: solo-dev
 description: Be the only developer on one of Valentin's personal apps (Multiprompt, Multiprompt Android, Postbox and similar). Commit straight to the default branch, release every green push, drain the PR queue then the app's board view. Use when a mission prompt says "use solo-dev" or names you the only developer on an app. Replaces ship-app for that repo.
+skill-word-budget: 2000
+skill-word-budget-reason: One role skill; the full solo-dev protocol must stay together.
 ---
 
 # Solo dev
@@ -34,7 +36,7 @@ Valentin, 2026-11-07: "this project has runners AND a solo dev, they must be abl
 
 Do it yourself, before any ticket. Never ask Valentin. Never print a token.
 
-- Follow `board-identity` steps 1 to 7 with your app's row instead of its board map:
+- Follow the `hypertask` skill's identity steps (references/identity.md) with your app's row instead of its board map:
   `NAME="<App> Dev"; SLUG=<app>-dev; BOARDS="2060"` (example: `NAME="Postbox Dev"; SLUG=postbox-dev`).
 - Reuse an existing agent for your app (Multiprompt already has "Multiprompt Dev"). Create one only if none exists.
 - Pass: `context` shows your name and board 2060, and the draft write check works.
@@ -88,10 +90,10 @@ Do this once per repo, as its own commit, before the first ticket.
 
 ## Talking on the board
 
-Behave on the board exactly like a fleet runner, just alone. Follow the `tickets` skill.
-Run `~/.local/share/house-rules/skills/tickets/scripts/ticket-lint <file>` before every description or people comment; raw `hypertask --token` writes skip no check. (2026-10-30, why: IGSH-1169 passed jargon to Valentin)
+Behave on the board exactly like a fleet runner, just alone. Follow the `hypertask` skill, references/tickets.md.
+Run the hypertask skill's scripts/ticket-lint before every description or people comment; raw `hypertask --token` writes skip no check.
 
-- Same columns as the fleet: Doing while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; `blocker-sweep.py` flags it. (2026-11-02, why: IGSH-1353 sat there with "Decision: None")
+- Same columns as the fleet: Doing while you work, Done with proof, Valentin Review only for his calls (money, keys, going public, data deletion, needs his PC). Moving there without a marked Question is a bug; the hypertask skill's scripts/blocker-sweep.py flags it.
 - No ticket sits in Doing overnight.
 - AI Review is not a waiting room. Run `scripts/parked-review --board <id>` at every board check; it must print 0 parked. (2026-11-02, why: "fix the origin of tickets not being moved")
 - Every ticket runs through pstack `poteto-mode`: its Bug fix or Feature playbook, `how` before nontrivial changes, `architect` across function boundaries. Name the playbook in your first ticket comment. (2026-10-30, why: Valentin asked "are the agents using pstack?")
@@ -119,7 +121,7 @@ Repeat after releases, before replies and before stopping.
 - Record release tag, link and elapsed minutes. A partial release never completes unfinished acceptance.
 - Reconcile old Doing tickets before taking more work. Resume them or return inactive work to Todo. Record the reason; preserve another active owner's work.
 - Keep umbrellas linked to their current child ticket. Preserve cross-app ownership and outstanding release requirements.
-- Clear answered blockers through the tickets skill. Ask only for decisions Valentin must make.
+- Clear answered blockers through the `hypertask` skill (references/tickets.md). Ask only for decisions Valentin must make.
 - Re-read changed tickets after writing. Verify column, ownership, labels and current Now text.
 
 The board holds current state between session resumes.
@@ -128,7 +130,7 @@ Chat and handoff notes cannot replace board maintenance.
 - Comments for Valentin: caveman, short bullets, full https:// links.
 - Quote Valentin with `> `, never plain quote marks.
 - Product decision needed: one marked yes/no Question, ticket to Valentin Review, take the next ticket.
-- Before any Question, read `skills/unblock/learned.md`. Listed class? Decide it yourself. (2026-10-30, why: IGSH-1229 asked him to confirm an update)
+- Before any Question, read skills/unblock/learned.md. Listed class? Decide it yourself.
 - Now line, Decision section and open Question say the same thing. Never "GO" and "awaits your yes" at once. (2026-10-30, why: IGSH-1121)
 - Robot status goes in the agent lane, not in people comments.
 - Prove it: release tag, run link, before and after screenshot for UI. Never "should work".

@@ -5,7 +5,7 @@ The Grok Bot "Design Lead" is hibernating (2026-10-26). Its routine "Design impr
 ## Checklist
 
 1. Load this skill. `git pull` in `~/projects/vstack` and `~/projects/hypertask`. Read the vstack design-lead-setup skill.
-2. Board identity: HT Design Lead (was Design Lead, same id), board 15. Self-setup: [board-identity](../board-identity/SKILL.md). Never post as Valentin.
+2. Board identity: HT Design Lead (was Design Lead, same id), board 15. Self-setup: the `hypertask` skill, references/identity.md. Never post as Valentin.
 3. Check Figma access once. If it fails, tell Valentin once.
 4. Ask Valentin once, save the answers:
    - Run the loop on a timer (weekdays 10:00), or only on request?

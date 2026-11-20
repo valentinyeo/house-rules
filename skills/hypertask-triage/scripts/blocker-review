@@ -6,7 +6,7 @@ Valentin Review on the boards given (they block him without showing up there).
 
 Per ticket: is it his call (house rules: money, keys, going public, prod data
 deletion, needs him at his PC or phone, product decision), and is it written
-per skills/tickets (shape, one marked Question, plain words).
+per the hypertask skill, references/tickets.md (shape, one marked Question, plain words).
 
 Dry run prints the table. --apply posts one agent-lane note per flagged ticket
 asking its agent and lead to rewrite it, and to find and fix what made it bad.
@@ -51,7 +51,7 @@ HOME = {15: {"bug": 4389, "feature": 9190, "other": 19734}, 11514: {"other": 329
 CEO_HT = Path.home() / "projects/ceo/bin/ceo-ht"
 ASKS_OFF = re.compile(r"\bswitch\s+[a-z0-9]+(?:-[a-z0-9]+)+\s+to\s+off\b|\bflag\b[^.?]{0,60}\boff\b|\boff\b[^.?]{0,40}\bflag\b", re.I)
 
-LINT_PATH = Path(__file__).resolve().parents[2] / "tickets/scripts/ticket-lint"
+LINT_PATH = Path.home() / ".local/share/vstack/skills/hypertask/scripts/ticket-lint"
 lint = importlib.machinery.SourceFileLoader("ticket_lint", str(LINT_PATH)).load_module()
 scopes = importlib.machinery.SourceFileLoader("scopes", str(Path(__file__).resolve().with_name("scopes.py"))).load_module()
 # The lead of a whole board, from scopes.json (view scopes like 2060/postbox are not boards).
@@ -328,7 +328,7 @@ def note(t, calls, defects, who, lead, tag):
                 f"decide it yourself or block on {lead}.")
     lines = [f"{MARK} {tag} for {who}, lead {lead}.",
              f"This ticket waits on Valentin. Verdict: {verdict}",
-             "Broken against the house ticket rules (skills/tickets):"]
+             "Broken against the house ticket rules (the hypertask skill, references/tickets.md):"]
     lines += [f"- {d}" for d in defects]
     lines += ["Do:",
               "1. Rewrite the description in the shape Now, Problem, Fix, Done when, Risk, Decision. Plain words he sees in the app.",

@@ -2,7 +2,7 @@
 """Count human-lane rule breaks on a board and name where each one comes from.
 
 Agent chatter belongs in the agent lane. Tickets and people comments
-(kind qa, question, done) follow skills/tickets. This reads every ticket
+(kind qa, question, done) follow the hypertask skill, references/tickets.md. This reads every ticket
 touched in the window, lints new descriptions and people comments with
 ticket-lint, and splits each break by origin:
   code      a job or app code writes it (review job, feedback reporter,
@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.realpath(__file__))
-_ld = importlib.machinery.SourceFileLoader("tl", os.path.join(HERE, "..", "..", "tickets", "scripts", "ticket-lint"))
+_ld = importlib.machinery.SourceFileLoader("tl", os.path.expanduser("~/.local/share/vstack/skills/hypertask/scripts/ticket-lint"))
 _sp = importlib.util.spec_from_loader("tl", _ld)
 tl = importlib.util.module_from_spec(_sp)
 _ld.exec_module(tl)

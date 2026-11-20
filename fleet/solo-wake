@@ -231,7 +231,7 @@ def loop_verdict(session, last_fire, nudges, now):
 
 SESSIONS = HOME / ".config/hypertask-agents/credentials/sessions"
 IDENTITY_MESSAGE = ("Your Hypertask board login does not match your Multibot name \"{name}\": no agent token {token}. "
-                    "Run /board-identity now for a login named exactly \"{name}\", then use it for every board write.")
+                    "Run the hypertask skill now for a login named exactly \"{name}\", then use it for every board write.")
 
 
 def identity_gap(name, sessions=SESSIONS, exists=Path.is_file):

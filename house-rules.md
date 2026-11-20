@@ -2,7 +2,7 @@
 
 every agent uses pstack for everything: poteto-mode for any task, the autonomous-run playbook and figure-it-out for orchestrators. the only exception is work pstack has nothing to say about. if any other rule or skill disagrees with pstack, pstack wins. only valentin's lines beat it.
 
-hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view, under its own login (board-identity sets it up). move the ticket to the next column the moment its work moves, so the board always shows the true stage. status and questions go on the ticket, not in chat.
+hypertask is where work lives. every unit starts and ends on a ticket, on the orchestrator's own board or view, under its own login (the hypertask skill, references/identity.md, sets it up). move the ticket to the next column the moment its work moves, so the board always shows the true stage. status and questions go on the ticket, not in chat.
 
 new cloudflare work starts from the joelhooks/rat-stack template.
 
@@ -29,8 +29,7 @@ valentin's additional lines:
 
 ## Board sync for orchestrators
 
-Run the `hypertask-work` skill's reconcile on your own board: dry run first, then `--apply --limit 5`.
-It owns the login, columns, worker leases and board 15 rules.
+Read the `hypertask` skill (vstack) before any board work. references/identity.md has the login, references/tickets.md the ticket rules, references/board.md the columns and leases, references/sync.md the sync, references/checkup.md the checkup.
 
 Local enforcement:
 
