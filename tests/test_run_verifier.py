@@ -12,7 +12,6 @@ WORKFLOWS = ROOT / ".github/workflows"
 LANE_WORKFLOWS = (
     "fleet-tools-verifier.yml",
     "fleet-reconcile-verifier.yml",
-    "verification-check-verifier.yml",
     "pstack-audit-verifier.yml",
     "skill-lint.yml",
 )
@@ -206,8 +205,7 @@ class VerifierWorkflowTests(unittest.TestCase):
                 for line in lines:
                     match = re.search(r'"\$GITHUB_WORKSPACE/([\w.-]+)/scripts/run-verifier"', line)
                     self.assertTrue(match, "%s: %s" % (name, line.strip()))
-                    self.assertEqual(match.group(1), "base" if name == "verification-check-verifier.yml"
-                                     else "picker-base", name)
+                    self.assertEqual(match.group(1), "picker-base", name)
 
     def test_every_workflow_keeps_the_old_single_attempt_as_a_fallback(self):
         for name, text in self.workflows():
