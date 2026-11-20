@@ -1,6 +1,6 @@
 ---
 name: tickets
-description: Rules for writing Hypertask tickets and comments. Use before any ticket create, description edit or comment, for every lead, runner and script, any fleet, any brain.
+description: Rules for writing Hypertask tickets and comments. Use before any ticket create, description edit or comment, for every lead, runner and script, any fleet, any harness.
 ---
 
 # Ticket writing: two lanes
@@ -38,25 +38,6 @@ Models: https://app.hypertask.ai/detail/project-15/7852 (open), https://app.hype
 - **One problem per ticket.** Two bugs that can be fixed apart? Two tickets. Link them under "Not in this ticket".
 - **Every noun is something he sees.** Name the app and the screen. No hub, server, setup, checks, exception, delivery.
   Valentin 2026-10-30 on IGSH-1169: "ticket is badly written".
-
-## Brain tag (required on every ticket)
-When you create or edit a ticket, set exactly one label:
-- `brain-light`: tiny fix, rename, one file, obvious one-liner.
-- `brain-medium`: default. Normal feature, bug, design apply.
-- `brain-hard`: hard bug, security, money or billing, many systems.
-- `brain-extra-hard`: rare. Auth or account integrity, or security plus money. Runners skip it.
-
-Rules:
-1. Always pick one. Never leave it blank.
-2. Unsure? `brain-medium`.
-3. Never more than one `brain-*` label.
-4. Keep all other labels. Only add or replace the `brain-*` one.
-5. Never invent other brain names.
-
-Valentin, 2026-11-06:
-> Brain tag (required on every new ticket)
-
-Check: `skills/hypertask-triage/scripts/flow-check --board <id>` prints the NO-BRAIN count.
 
 ## Question comment
 One open Question per ticket. Mark it as the blocker. Retire older ones.

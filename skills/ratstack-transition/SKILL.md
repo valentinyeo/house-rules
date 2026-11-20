@@ -135,8 +135,6 @@ Each slice ticket names: the Rat Stack commit, the Rat Stack skill to follow, th
 
 **Coverage rule.** Each inventory item has one owning slice. A test that spans slices is owned by the last slice it needs.
 
-**Brain tags.** One per ticket. Medium is the default for every slice kind. Hard for money, auth, secrets and the live cutover.
-
 ## 7. Stops
 
 - **Paid plan.** The scaffold slice measures the built Worker size. Ask Valentin only if it is over the free limit: one Question on the parent ticket. Other new paid items (Hyperdrive, extra plans) are money too.
