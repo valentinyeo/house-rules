@@ -32,6 +32,7 @@ Valentin, 2026-11-07: "this project has runners AND a solo dev, they must be abl
 
 ## Board login
 
+- File CI snags through `vcc` on the CI board with that board's sections and labels.
 Do it yourself, before any ticket. Never ask Valentin. Never print a token.
 
 - Follow `board-identity` steps 1 to 7 with your app's row instead of its board map:
@@ -52,6 +53,8 @@ Do it yourself, before any ticket. Never ask Valentin. Never print a token.
 
 ## Order of work
 
+- Ship a local hide that writes nothing shared and file the synced field as a separate ticket.
+- Treat a shared path printed for every queued branch as a conflict with the default branch.
 1. **PR queue first.** Every open PR on the repo, drafts too, plus every ticket in the board view's PR column. Rebase, fix if red, merge, see it released. Dead or duplicate? Close it and say why on the ticket. Anything merged since the last release tag must reach a release.
 2. **Then the board view, top down.** The ticket text is the spec. Never ask Valentin to restate it. One ticket at a time.
 3. **Done** when every ticket in the view is in Done, or in Valentin Review with one marked Question that only he can answer.
@@ -60,8 +63,13 @@ Do it yourself, before any ticket. Never ask Valentin. Never print a token.
 
 Run the board check below before this loop.
 
+- Use a new worktree from the remote default branch and leave the runner checkout uncommitted.
+- Use the house adb wrapper, treat connection refused as a down tunnel, never run `adb kill-server`, and capture with `adb exec-out screencap -p` and `adb shell uiautomator dump`.
+- Rerun failed jobs only when the run is completed, treat an in-progress refusal as a timing limit, and use the Actions API job log when `--log-failed` is empty.
+- Keep a speed goal open until a measured number is on the ticket; a follow-up ticket alone is not done.
+
 1. Move the ticket to Doing. Read it and its screenshots.
-2. One small change per commit, straight to the default branch. No new PRs.
+2. One small change per commit; if branch protection requires PRs, merge one, refresh the rest and wait for its release check before starting the next.
 3. Put the one-line undo in the commit message.
 4. Push. Never build or test on the VPS. CI on GitHub-hosted runners does it (free, public repo).
 5. Green push means a release. Confirm it: `gh release list -R <owner>/<repo> --limit 1`, and check the app's update file points at it.
@@ -82,12 +90,14 @@ Do this once per repo, as its own commit, before the first ticket.
 
 ## When things break
 
+- Fix the check before merging again and leave cancelled release records until that fix makes the queue green.
 - Release does not launch: revert that commit right away. Releasing again beats debugging.
 - Same failure twice: add the smallest check that would have caught it, and nothing more.
 - Stuck after two tries: hand it to `gpt-6.1-sol` high once. Still stuck? Write why in the agent lane, mark it blocked on your own lead, take the next. Never park tech trouble on Valentin. (2026-11-02, why: IGSH-1410 reverted fix sat in his review)
 
 ## Talking on the board
 
+- Change an existing roster row through a PR to `fleet/roster.json`.
 Behave on the board exactly like a fleet runner, just alone. Follow the `tickets` skill.
 Run `~/.local/share/house-rules/skills/tickets/scripts/ticket-lint <file>` before every description or people comment; raw `hypertask --token` writes skip no check. (2026-10-30, why: IGSH-1169 passed jargon to Valentin)
 
@@ -142,6 +152,7 @@ Valentin and other people message you in the Hypertask sidebar chat. Nothing rea
 
 ## Never
 
+- Ship a phone control that deletes desktop data under the speed-first rule.
 - Spend money, raise a spending limit or add a paid service. "Saves money" is still money: ask first.
 - Print, commit or publish a secret. Keys only via `stack-key`, once per job.
 - Run CI, builds or tests on this VPS, or add a runner here. CI runs only on GitHub-hosted runners (see house rules, Doing the work).
@@ -150,4 +161,5 @@ Valentin and other people message you in the Hypertask sidebar chat. Nothing rea
 
 ## Report to Valentin
 
+- Treat a shared regression as a failure and name that case in the line to Valentin.
 Short plain lines only: what shipped, release tag, ticket link. Technical detail only if he asks.
