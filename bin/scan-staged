@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""Stop a commit whose added lines contain a key.
+
+Gitleaks and trufflehog both read one private tree: the lines this commit adds,
+built from `git diff -U0`. A pure rename adds nothing. A finding is cleared only
+when it is a proven non-key (commit SHA, lockfile peer hash, RFC 2606/6761 test
+host) or the line carries `trufflehog:ignore` plus a reason.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse
+
+HERE = Path(__file__).resolve().parent
+BASE_CONFIG = HERE / "gitleaks.toml"
+FIX = (
+    "remove the key and keep keys in 1Password (stack-key / yeo-key).",
+    "a false hit gets `trufflehog:ignore <reason>` on its line.",
+)
+LOCKFILES = {"pnpm-lock.yaml", "package-lock.json", "yarn.lock", "npm-shrinkwrap.json"}
+EXACT_HOSTS = {"localhost", "example.com", "example.org", "example.net"}
+HOST_SUFFIXES = (".test", ".example", ".invalid", ".localhost")
+SHA_PLACE = re.compile(
+    r"/(?:tree|commits?|blob)/<sha>"
+    r"|(?:^|[^A-Za-z0-9_-])(?:commit|sha)(?:[ \t]+sha)?:?[ \t]`<sha>`"
+    r"|(?:^|[^A-Za-z0-9_-])at (?:commit|sha) `<sha>`"
+    r"|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#<sha>`"
+    r'|"(?:sha|commit|commits|previousCommit|previousSha|sourceCommit|provenanceCommit|pinnedCommit|mergeCommit|headCommit)"[ \t]*:[ \t]*"<sha>"'
+)
+HEADER = (
+    "index ",
+    "--- ",
+    "+++ ",
+    "new file mode ",
+    "deleted file mode ",
+    "old mode ",
+    "new mode ",
+    "similarity index ",
+    "dissimilarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    "Binary files ",
+    "GIT binary patch",
+)
+
+
+def die(*lines):
+    for line in lines:
+        print("secret-scan: " + line, file=sys.stderr)
+    sys.exit(1)
+
+
+def find_tool(name):
+    found = shutil.which(name)
+    if found and os.access(found, os.X_OK):
+        return found
+    fallback = Path.home() / ".local" / "bin" / name
+    if fallback.is_file() and os.access(fallback, os.X_OK):
+        return str(fallback)
+    die(
+        "%s is not installed, so this change cannot be checked for keys." % name,
+        "install it, then retry.",
+    )
+
+
+def repo_top():
+    run = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    if run.returncode != 0 or not run.stdout.strip():
+        die("not a git repository; blocked.")
+    return run.stdout.strip()
+
+
+def parse_range(argv):
+    if not argv:
+        return None
+    if len(argv) != 2 or argv[0] != "--range":
+        die("use scan-staged or scan-staged --range BASE...HEAD")
+    spec = argv[1]
+    if spec.count("...") != 1:
+        die("range must be BASE...HEAD")
+    base, head = spec.split("...")
+    if not base or not head:
+        die("range must be BASE...HEAD")
+    return spec
+
+
+def git_diff(args):
+    cmd = [
+        "git",
+        "-c",
+        "core.quotepath=true",
+        "-c",
+        "diff.mnemonicPrefix=false",
+        "-c",
+        "diff.noprefix=false",
+        "-c",
+        "diff.renames=true",
+        "diff",
+        "--no-ext-diff",
+        *args,
+    ]
+    env = os.environ.copy()
+    env.pop("GIT_EXTERNAL_DIFF", None)
+    run = subprocess.run(cmd, capture_output=True, env=env)
+    if run.returncode != 0:
+        die("could not list the added lines; blocked.")
+    return run.stdout.decode("utf-8", "surrogateescape")
+
+
+def decode_token(token):
+    if len(token) < 2 or token[0] != '"' or token[-1] != '"':
+        return token
+    raw = token[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(raw):
+        if raw[i] != "\\":
+            out.extend(raw[i].encode("utf-8"))
+            i += 1
+            continue
+        if i + 1 >= len(raw):
+            raise ValueError("truncated escape")
+        nxt = raw[i + 1]
+        if nxt in "01234567":
+            j = i + 1
+            octs = ""
+            while j < len(raw) and len(octs) < 3 and raw[j] in "01234567":
+                octs += raw[j]
+                j += 1
+            out.append(int(octs, 8))
+            i = j
+            continue
+        mapped = {"n": 10, "t": 9, "b": 8, "r": 13, "\\": 92, '"': 34, "a": 7, "v": 11, "f": 12}
+        if nxt not in mapped:
+            raise ValueError("bad escape")
+        out.append(mapped[nxt])
+        i += 2
+    return out.decode("utf-8", "surrogateescape")
+
+
+def take_token(text, index):
+    while index < len(text) and text[index] == " ":
+        index += 1
+    if index >= len(text):
+        raise ValueError("missing path")
+    if text[index] != '"':
+        end = index
+        while end < len(text) and text[end] != " ":
+            end += 1
+        return text[index:end], end
+    end = index + 1
+    while end < len(text):
+        if text[end] == "\\":
+            end += 2
+            continue
+        if text[end] == '"':
+            return text[index : end + 1], end + 1
+        end += 1
+    raise ValueError("unclosed quote")
+
+
+def safe_rel(path):
+    if not path or path.startswith("/") or "\\" in path:
+        return False
+    return all(part not in ("", ".", "..") for part in path.split("/"))
+
+
+def strip_b(path):
+    if path.startswith("b/"):
+        path = path[2:]
+    if not safe_rel(path):
+        raise ValueError("unsafe path")
+    return path
+
+
+def new_path(line):
+    rest = line[len("diff --git ") :]
+    _old, index = take_token(rest, 0)
+    new, _next = take_token(rest, index)
+    return strip_b(decode_token(new))
+
+
+def path_from_plus(line):
+    # `diff --git` does not quote a path that contains a space, so it cannot be split.
+    # The +++ line is the new path, with a trailing tab when the path contains a space.
+    rest = line[4:]
+    if rest.endswith("\t"):
+        rest = rest[:-1]
+    elif "\t" in rest:
+        rest = rest.split("\t", 1)[0]
+    if rest == "/dev/null":
+        return None
+    if rest.startswith('"'):
+        rest = decode_token(rest)
+    return strip_b(rest)
+
+
+def parse_added(diff):
+    """Map repo-relative path to the lines this diff adds. Line numbers here are not the repo file's."""
+    files = {}
+    path = None
+    in_hunk = False
+    skip_binary = False
+    for line in diff.split("\n"):
+        if skip_binary:
+            if line.startswith("diff --git "):
+                skip_binary = False
+            else:
+                continue
+        if line.startswith("diff --git "):
+            in_hunk = False
+            try:
+                path = new_path(line)
+            except ValueError:
+                path = None
+            continue
+        if line.startswith("+++ ") and not in_hunk:
+            path = path_from_plus(line)
+            continue
+        if line.startswith("@@"):
+            if path is None:
+                raise ValueError("hunk without a file")
+            in_hunk = True
+            continue
+        if in_hunk:
+            if line.startswith("+"):
+                files.setdefault(path, []).append(line[1:])
+            elif line.startswith(("-", "\\", " ")) or line == "":
+                continue
+            else:
+                raise ValueError("bad hunk line")
+            continue
+        if line == "" or line.startswith(HEADER):
+            if line.startswith("GIT binary patch"):
+                skip_binary = True
+            continue
+        raise ValueError("bad diff line")
+    return files
+
+
+def ignore_reason(line):
+    match = re.search(r"trufflehog:ignore\b(.*)$", line)
+    if not match:
+        return None
+    rest = match.group(1).strip()
+    if rest.startswith("--"):
+        rest = rest[2:].strip()
+    return rest
+
+
+def line_for_scan(line):
+    # Trufflehog skips a line that merely contains the marker. A reason is required,
+    # so a bare marker is removed and the line is still scanned.
+    reason = ignore_reason(line)
+    if reason is None or reason:
+        return line
+    return re.sub(r"[ \t]*trufflehog:ignore\b.*$", "", line).rstrip()
+
+
+def write_tree(files, root):
+    for rel, lines in files.items():
+        dest = root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        text = "\n".join(line_for_scan(line) for line in lines) + "\n"
+        dest.write_bytes(text.encode("utf-8", "surrogateescape"))
+
+
+def config_for(top):
+    repo_config = Path(top) / ".gitleaks.toml"
+    chosen = repo_config if repo_config.is_file() else BASE_CONFIG
+    if not chosen.is_file():
+        die("no gitleaks config; blocked.")
+    return str(chosen)
+
+
+def run_gitleaks(binary, source, config):
+    run = subprocess.run(
+        [
+            binary,
+            "detect",
+            "--no-git",
+            "--source",
+            str(source),
+            "--config",
+            config,
+            "--redact",
+            "--no-banner",
+            "--no-color",
+            "--log-level=warn",
+        ]
+    )
+    if run.returncode != 0:
+        die("blocked, an added line looks like a key (value hidden above).", *FIX)
+
+
+def load_findings(stdout):
+    text = stdout.strip()
+    if not text:
+        return []
+    if text[0] == "[":
+        data = json.loads(text)
+        if not isinstance(data, list):
+            raise ValueError("report is not a list")
+        return data
+    return [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
+
+def finding_line(obj, added):
+    filesystem = ((obj.get("SourceMetadata") or {}).get("Data") or {}).get("Filesystem") or {}
+    file_name = filesystem.get("file")
+    line_no = filesystem.get("line")
+    if not isinstance(file_name, str) or not isinstance(line_no, int):
+        return None
+    path = Path(file_name)
+    if not path.is_absolute():
+        path = added / path
+    try:
+        path = path.resolve()
+        root = added.resolve()
+    except OSError:
+        return None
+    if path != root and root not in path.parents:
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    rows = raw.decode("utf-8", "replace").split("\n")
+    if rows and rows[-1] == "":
+        rows = rows[:-1]
+    if line_no < 1 or line_no > len(rows):
+        return None
+    return rows[line_no - 1]
+
+
+def uri_host(obj):
+    parts = obj.get("SecretParts") or {}
+    host = parts.get("host") if isinstance(parts, dict) else ""
+    if not host:
+        raw = obj.get("Raw") or ""
+        if raw and "://" not in raw:
+            raw = "http://" + raw
+        host = urlparse(raw).hostname or ""
+    host = str(host).lower().strip().rstrip(".")
+    if host.startswith("[") and "]" in host:
+        host = host[1 : host.index("]")]
+    elif host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    return host
+
+
+def reserved_host(host):
+    # RFC 2606 / 6761: these names are test fixtures, not a place a real key is hosted.
+    return bool(host) and (host in EXACT_HOSTS or host.endswith(HOST_SUFFIXES))
+
+
+def proven(obj, added):
+    detector = obj.get("DetectorName") or ""
+    raw = obj.get("Raw") or ""
+    filesystem = ((obj.get("SourceMetadata") or {}).get("Data") or {}).get("Filesystem") or {}
+    file_name = filesystem.get("file") or ""
+    if detector == "Alchemy" and re.fullmatch(r"[0-9a-f]{32}", raw):
+        return Path(file_name).name in LOCKFILES
+    if detector == "URI" and reserved_host(uri_host(obj)):
+        return True
+    if not re.fullmatch(r"[0-9a-f]{40}", raw):
+        return False
+    text = finding_line(obj, added)
+    if not text or raw not in text:
+        return False
+    return SHA_PLACE.search(text.replace(raw, "<sha>")) is not None
+
+
+def run_trufflehog(binary, added):
+    run = subprocess.run(
+        [binary, "filesystem", str(added), "--fail", "--no-update", "--json"],
+        capture_output=True,
+        text=True,
+    )
+    code = run.returncode
+    if code not in (0, 183):
+        die("trufflehog failed (exit %s); blocked. Retry." % code)
+    if code == 0:
+        if '"DetectorName"' in run.stdout:
+            die("blocked, trufflehog printed a finding but exited clean.", *FIX)
+        return
+    try:
+        findings = load_findings(run.stdout)
+    except (ValueError, json.JSONDecodeError):
+        die("blocked, trufflehog reported a finding but its report could not be read.", *FIX)
+    if not findings:
+        die("blocked, trufflehog reported a finding but its report could not be read.", *FIX)
+    blocking = []
+    for hit in findings:
+        if not isinstance(hit, dict):
+            die("blocked, trufflehog reported a finding but its report could not be read.", *FIX)
+        if proven(hit, added):
+            continue
+        text = finding_line(hit, added)
+        if text is not None and ignore_reason(text):
+            continue
+        blocking.append(hit)
+    if not blocking:
+        return
+    names = sorted({hit.get("DetectorName") or "unknown" for hit in blocking})
+    print(
+        "secret-scan: blocked, trufflehog found a key (working or not, it blocks either way):",
+        file=sys.stderr,
+    )
+    for name in names:
+        print('"DetectorName":"%s"' % name, file=sys.stderr)
+    for line in FIX:
+        print("secret-scan: " + line, file=sys.stderr)
+    sys.exit(1)
+
+
+def main():
+    range_spec = parse_range(sys.argv[1:])
+    leaks = find_tool("gitleaks")
+    truffle = find_tool("trufflehog")
+    top = repo_top()
+    os.chdir(top)
+    if range_spec:
+        diff = git_diff(["-U0", "--no-color", "-M", "--diff-filter=ACMRT", range_spec])
+    else:
+        diff = git_diff(["--cached", "-U0", "--no-color", "-M", "--diff-filter=ACMRT"])
+    try:
+        files = parse_added(diff)
+    except ValueError:
+        die("could not list the added lines; blocked.")
+    if not files:
+        return 0
+    config = config_for(top)
+    with tempfile.TemporaryDirectory(prefix="scan-staged-") as tmp:
+        added = Path(tmp) / "added"
+        added.mkdir()
+        write_tree(files, added)
+        run_gitleaks(leaks, added, config)
+        run_trufflehog(truffle, added)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
