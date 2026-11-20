@@ -63,5 +63,5 @@ Get values with `stack-key <item> <VAR>` into a chmod 600 file. Never echo.
   ANTHROPIC_MODEL, ADMIN_PASSWORD, EVAL_INGEST_SECRET.
 - GitHub Actions secrets: CLOUDFLARE_API_TOKEN (docs), CLOUDFLARE_D1_TOKEN
   (ai-chatbot sync).
-- Board identity: see [board-identity](../board-identity/SKILL.md).
+- Board identity: see the `hypertask` skill, references/identity.md.
 Rotation, new keys and paid keys: Valentin only.

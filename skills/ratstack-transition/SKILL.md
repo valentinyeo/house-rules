@@ -1,6 +1,8 @@
 ---
 name: ratstack-transition
 description: Plan a forced rewrite of an existing app onto Rat Stack (github.com/joelhooks/rat-stack), as close to Joel Hooks' stack as possible. Pins Rat Stack at one commit, diffs the app against it, maps every behaviour onto Rat Stack's own nouns and layout, and files one ticket per slice. Use for /ratstack-transition, "move this app to Rat Stack", "rewrite on ratstack", or a stack review that says move. Any session or runner, any harness.
+skill-word-budget: 2000
+skill-word-budget-reason: The rat-stack migration protocol must stay together.
 ---
 
 # /ratstack-transition [app dir]
@@ -21,7 +23,7 @@ The one rule: **Rat Stack's own files decide.** Its `AGENTS.md` is law. Its pins
 
 - Clone it next to the app: `gh repo clone joelhooks/rat-stack /tmp/rat-stack-<app>`.
 - Record the commit: `SHA=$(git -C /tmp/rat-stack-<app> rev-parse HEAD)`. Every ticket names this commit, and so does every rat-diff run.
-- Read in full, in this order: `AGENTS.md`, `VISION.md`, `README.md`, `skills/rat-stack-mode/SKILL.md`, `skills/learn-rat-stack/SKILL.md`, `skills/keep-or-cut/SKILL.md`.
+- Read in full, in this order: `AGENTS.md`, VISION.md, `README.md`, skills/rat-stack-mode/SKILL.md, skills/learn-rat-stack/SKILL.md, skills/keep-or-cut/SKILL.md.
 - Skim every other `skills/*/SKILL.md`. Each slice ticket points at the Rat Stack skill that builds it (`add-a-capability`, `add-a-store`, `add-a-lifecycle-machine`, `add-a-feature-flag`, `ship`, `learn-alchemy`).
 
 ## 2. Diff the app
@@ -36,12 +38,12 @@ The one rule: **Rat Stack's own files decide.** Its `AGENTS.md` is law. Its pins
 - **ADD core**: packages every Rat Stack app has. All of them.
 - **ADD by cartridge**: take only with the cartridge that needs them.
 - **LAYOUT missing**: Rat Stack files and folders the app lacks.
-- **FOREIGN files**: configs for tools Rat Stack does not use (wrangler, biome, npm lockfile, raw `.env`).
-- **NON-JS manifests**: `go.mod`, `Cargo.toml`, `pyproject.toml` and the like.
-- **LOOSE non-JS files**: `.py`, `.go`, `.sh` and other scripts with no manifest.
-- **CDN tags**: script and link tags to Tailwind, Chart.js, React, htmx, fonts and the like. They are not in `package.json`, so DROP misses them.
+- **FOREIGN files**: configs for tools Rat Stack does not use (wrangler, biome, npm lockfile, raw .env).
+- **NON-JS manifests**: go.mod, Cargo.toml, pyproject.toml and the like.
+- **LOOSE non-JS files**: .py, .go, .sh and other scripts with no manifest.
+- **CDN tags**: script and link tags to Tailwind, Chart.js, React, htmx, fonts and the like. They are not in package.json, so DROP misses them.
 - **SELF-HOSTED CI**: workflow lines with `runs-on: self-hosted`.
-- **PAGES markers**: `pages_build_output_dir`, `_routes.json`, `functions/`, `wrangler pages`.
+- **PAGES markers**: `pages_build_output_dir`, _routes.json, functions/, `wrangler pages`.
 
 The script cannot see everything. Still read the code for inline `fetch` to outside APIs, server-rendered HTML and anything the sections miss.
 
@@ -66,22 +68,22 @@ Use the noun table in Rat Stack's `AGENTS.md`. Typical homes:
 
 | App has | Rat Stack home |
 |---|---|
-| Route, endpoint, webhook | Contract in `packages/core/src/contracts.ts` + Capability via `implement`, projected with `toHttpApi` |
+| Route, endpoint, webhook | Contract in packages/core/src/contracts.ts + Capability via `implement`, projected with `toHttpApi` |
 | Form post, HTML fragment endpoint | A Foldkit Message + Command that calls the same Capability over RPC. No separate form endpoint |
-| MCP tool, CLI command | Same Capability, projected with `toToolkit` or `toCommand`; served by `apps/cli` |
+| MCP tool, CLI command | Same Capability, projected with `toToolkit` or `toCommand`; served by apps/cli |
 | Retry, polling, multi-step job, status-field lifecycle | XState Machine in `packages/core/src/<name>-machine.ts` |
 | Cron trigger, queue | A scheduled handler in an app-named Worker. See the Worker rule below |
-| D1, Postgres | `packages/database` cartridge (D1 or Hyperdrive Postgres) |
-| Login, users the app owns | `packages/auth` cartridge (Better Auth) |
+| D1, Postgres | packages/database cartridge (D1 or Hyperdrive Postgres) |
+| Login, users the app owns | packages/auth cartridge (Better Auth) |
 | Cloudflare Access login | Access stays in front. A small Effect cartridge reads the JWT. See the Access rule below |
-| Feature switch | `packages/flags` cartridge |
-| Analytics events | `packages/events` cartridge |
+| Feature switch | packages/flags cartridge |
+| Analytics events | packages/events cartridge |
 | Screen or page | Foldkit Feature in `apps/web/src/features/<name>/` + Client in `apps/web/src/client/<name>/`, styled with StyleX |
 | The app's look | Keep the app's own theme: its colours, fonts, sizes and corners, rebuilt in StyleX. Never copy Rat Stack's or Foldkit's look. docs.hypertask.ai and ai-chatbot keep their own themes |
 | Charts | SVG drawn in Foldkit views. No chart library |
 | CDN script or link tag | Same home as the package it loads (Tailwind to StyleX, fonts self-hosted). Never keep a CDN tag |
-| Secret, setting | `.env.schema` (varlock) |
-| KV, R2, D1, domain | Alchemy resource in `apps/infra/alchemy.run.ts` |
+| Secret, setting | .env.schema (varlock) |
+| KV, R2, D1, domain | Alchemy resource in apps/infra/alchemy.run.ts |
 | Outside API call | Effect `HttpClient` behind a Capability. No vendor SDK unless Rat Stack pins it |
 | Validation | Effect `Schema` on the Contract |
 | Small helper script (Python, shell, Go) | Port to Effect, or cut with `keep-or-cut`. Never a stop |
@@ -90,18 +92,18 @@ An item with no home: run Rat Stack's `keep-or-cut`. Cut it, or write on its tic
 
 Rules behind the table:
 - **Non-JS.** Only a native app (Go, Rust, Zig or Kotlin as the main app) is out of scope. Stop and say so. A small helper script is port-to-Effect-or-cut.
-- **Workers.** Read Rat Stack's `AGENTS.md` for where Workers live. `apps/site` is Joel's site Worker, not a home for the app's jobs. Follow the `apps/site/src/worker.ts` pattern in an app-named Worker declared in `alchemy.run.ts`. Write the reason on the ticket.
+- **Workers.** Read Rat Stack's `AGENTS.md` for where Workers live. apps/site is Joel's site Worker, not a home for the app's jobs. Follow the apps/site/src/worker.ts pattern in an app-named Worker declared in alchemy.run.ts. Write the reason on the ticket.
 - **Access.** Keep Cloudflare Access (Zero Trust) in front. Read the JWT in a small Effect cartridge, with the written reason on the ticket. Use Better Auth only for apps that own their users.
 - **D1 already migrated.** Baseline the existing `d1_migrations` rows in the database cartridge. Never re-run a migration. Never drop a table.
 
 ## 5. Shape of the rewrite
 
 - Start from the template, never edit the old app in place.
-- **Repo choice.** New repo from the template when hosting changes (Pages to Workers) or the layout differs a lot: `gh repo create <owner>/<app>-rs --template joelhooks/rat-stack --private`. Otherwise a `rat/` folder in the same repo. State the choice and the reason on the parent ticket.
+- **Repo choice.** New repo from the template when hosting changes (Pages to Workers) or the layout differs a lot: `gh repo create <owner>/<app>-rs --template joelhooks/rat-stack --private`. Otherwise a rat/ folder in the same repo. State the choice and the reason on the parent ticket.
 - **Pages to Workers is part of the move.** Rat Stack deploys Workers. A Pages app (any PAGES marker) gets the Rat Stack `Website` Worker (apps/web), which serves static files and server rendering. The Pages project stays untouched until the delete slice.
-- Cut Rat Stack's demo parts the app does not need with `keep-or-cut`. Keep the fence, `apps/infra`, `apps/web`, `packages/capability`, `packages/core` and the cartridges the map uses.
-- Keep the fence whole: pins, `tsconfig.base.json`, `oxlint.config.ts`, `oxfmt.config.ts`, `lefthook.yml`, the anti-slop rules, `.github/workflows/ci.yml`. Never loosen a rule to make old code pass.
-- **CI.** Rat Stack's `ci.yml` replaces the app's own build and test workflows. Keep security scans (gitleaks, secret scans) with a written reason, on GitHub-hosted runners. Everything else goes. Self-hosted runners are forbidden. Tests and builds run in GitHub Actions only.
+- Cut Rat Stack's demo parts the app does not need with `keep-or-cut`. Keep the fence, apps/infra, apps/web, packages/capability, packages/core and the cartridges the map uses.
+- Keep the fence whole: pins, tsconfig.base.json, oxlint.config.ts, oxfmt.config.ts, lefthook.yml, the anti-slop rules, .github/workflows/ci.yml. Never loosen a rule to make old code pass.
+- **CI.** Rat Stack's ci.yml replaces the app's own build and test workflows. Keep security scans (gitleaks, secret scans) with a written reason, on GitHub-hosted runners. Everything else goes. Self-hosted runners are forbidden. Tests and builds run in GitHub Actions only.
 - Port slice by slice. The old app keeps serving until the new one matches it.
 - Data stays put. Alchemy adopts the live D1, KV and R2 resources (see `learn-alchemy`). No copy, no delete.
 - **Cutover.** Deploy with Alchemy onto the same domain.
@@ -109,7 +111,7 @@ Rules behind the table:
 
 ## 6. File the plan
 
-**Find the board.** Software Factory apps: board 2060, in the app's own view. List views with `vcc view list --project 2060` and match the app name. Other apps: their own board (ai-chatbot: the Support board). Follow `skills/tickets/`.
+**Find the board.** Software Factory apps: board 2060, in the app's own view. List views with `vcc view list --project 2060` and match the app name. Other apps: their own board (ai-chatbot: the Support board). Follow the `hypertask` skill, references/tickets.md.
 
 **Order.** File the parent first. File the children next, each with `--parent-task`. Then edit the parent to add the child links.
 
@@ -117,8 +119,8 @@ Rules behind the table:
 
 **Slices, in this order:**
 1. Scaffold: template, cut unused parts, fence green in GitHub CI. Measure the built Worker size.
-2. Project law and agent files. Rat Stack's child-project checklist: rename the `@rat-stack` scope, `pnpm sources:fetch`, `pnpm git-snapshot`, `.shitrat/public-allow.json`, Alchemy profile. Then replace the Project law, Architecture and Boundaries sections of `AGENTS.md`, write `VISION.md`, port the app's agent files and skills.
-3. `apps/infra`: adopt every live resource and secret name. Plan only, no deploy.
+2. Project law and agent files. Rat Stack's child-project checklist: rename the `@rat-stack` scope, `pnpm sources:fetch`, `pnpm git-snapshot`, .shitrat/public-allow.json, Alchemy profile. Then replace the Project law, Architecture and Boundaries sections of `AGENTS.md`, write VISION.md, port the app's agent files and skills.
+3. apps/infra: adopt every live resource and secret name. Plan only, no deploy.
 4. Database: schema port and migration baseline.
 5. Auth or access, if the app has any.
 6. One ticket per Contract group. A group is one route prefix or resource.
@@ -131,7 +133,7 @@ Rules behind the table:
 
 Each slice ticket names: the Rat Stack commit, the Rat Stack skill to follow, the inventory item numbers it owns, and "Done when" with `pnpm check` and `pnpm test` green in GitHub CI.
 
-**Links.** Link every slice to the slices it needs, in the same turn as filing: `vcc task link <slice> <needed-slice> --type BlockedBy`. Scaffold, project law, `apps/infra`, database and auth block every later slice. Contract and Machine slices block the screen slices that use them. The picker skips a ticket whose blockers are open; an unlinked slice gets offered, and a runner burns a run to find the gap. (HYCI-343, 13 Nov: SOFT-2060 and SOFT-2061 parked on foundation slices nobody had linked.)
+**Links.** Link every slice to the slices it needs, in the same turn as filing: `vcc task link <slice> <needed-slice> --type BlockedBy`. Scaffold, project law, apps/infra, database and auth block every later slice. Contract and Machine slices block the screen slices that use them. The picker skips a ticket whose blockers are open; an unlinked slice gets offered, and a runner burns a run to find the gap. (HYCI-343, 13 Nov: SOFT-2060 and SOFT-2061 parked on foundation slices nobody had linked.)
 
 **Coverage rule.** Each inventory item has one owning slice. A test that spans slices is owned by the last slice it needs.
 

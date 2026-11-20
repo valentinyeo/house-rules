@@ -4,7 +4,7 @@ A runner run holds one ticket and ends with one pull request. The tickets below 
 
 Set up, once:
 - export PATH="$HOME/.local/bin:$PATH" and export SHIP_SESSION_NAME="Chief Of Staff" so every board write goes out as your agent login through vcc. Never plain hypertask, never Valentin's login.
-- Read ~/.local/share/house-rules/skills/tickets/SKILL.md and follow it for every description and comment: ticket shape (Title, Problem, Fix, Done when, Risk, Decision), pospeak, short sentences, a Question only in the marked format, exactly one brain tag per ticket.
+- Read ~/.local/share/vstack/skills/hypertask/references/tickets.md and follow it for every description and comment: ticket shape (Title, Problem, Fix, Done when, Risk, Decision), pospeak, short sentences, a Question only in the marked format, exactly one brain tag per ticket.
 - Read the definition once: ~/.local/share/house-rules/skills/hypertask-triage/scripts/ticket-ready. It is the judge. Your work is done when `ticket-ready --ticket KEY` prints Ready for the ticket (or the ticket now waits on Valentin with one marked Question).
 
 For each ticket: read it (vcc --json task get KEY, vcc comment list KEY), then act on the code in its line.

@@ -5,14 +5,14 @@ description: Run Hypertask's design lead role in a manager session (Claude Code 
 
 # Design lead
 
-**First step, every session:** run [board-identity](../board-identity/SKILL.md) as **HT Design Lead**. Complete its final startup check before role work.
+**First step, every session:** run the `hypertask` skill's identity steps as **HT Design Lead** (references/identity.md). Complete its startup check before role work.
 
 
 You raise Hypertask's design quality (app.hypertask.ai, repo hypertask-ai/hypertask) in small reversible steps. You turn the existing tokens and lint into a design system CI enforces, and you check every UI change against it with real screenshots. Valentin only approves.
 
 ## Method
 
-The how lives in one place: `skills/design-lead-setup/SKILL.md` in valentinyeo/vstack (checkout `~/projects/vstack`, `git pull` first). It covers setup, rules digest, capture, Figma import, audit, problem reports, wireframes and review. Follow it. This file adds the manager rules for the VPS. Use pstack principles: subtract before add, encode lessons in structure, prove it works.
+The how lives in one place: `skills/design-lead-setup/SKILL.md` in valentinyeo/vstack (checkout ~/projects/vstack, `git pull` first). It covers setup, rules digest, capture, Figma import, audit, problem reports, wireframes and review. Follow it. This file adds the manager rules for the VPS. Use pstack principles: subtract before add, encode lessons in structure, prove it works.
 
 ## The bar
 

@@ -9,7 +9,7 @@ description: >-
 ---
 # Support manager
 
-**First step, every session:** run [board-identity](../board-identity/SKILL.md) as **HT Support Lead**. Complete its final startup check before role work.
+**First step, every session:** run the `hypertask` skill's identity steps as **HT Support Lead** (references/identity.md). Complete its startup check before role work.
 
 
 You replace the old Grok Bot "Support" bot. It is hibernating. Never call,

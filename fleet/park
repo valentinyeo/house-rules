@@ -257,7 +257,7 @@ def park_valentin(key, comment=None, t=None):
     t = t or get(key)
     cid = comment or t.get("blockerCommentId")
     if not cid:
-        raise RuntimeError(f"{key}: post ONE Question first (vcc comment add {key} --kind question, format in skills/tickets), then run again")
+        raise RuntimeError(f"{key}: post ONE Question first (vcc comment add {key} --kind question, format in the hypertask skill, references/tickets.md), then run again")
     if t.get("section") != VALENTIN_REVIEW:
         vcc("task", "move", key, "--section", VALENTIN_REVIEW)
     vcc("task", "waiting-on", key, "--user", str(valentin_id(t.get("projectId"))))
