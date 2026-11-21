@@ -38,8 +38,6 @@ class NudgeDedupTests(unittest.TestCase):
         now = 100_000.0
         row_last = now - 5 * 60
         ticket = {'ticketNumber': 'HTPR-9407'}
-        per_ticket = wake.wake_key('live-x', 'HTPR-9407')
-        self.assertIsNone(per_ticket in {} or None)  # no per-ticket entry yet
         verdict, _ = wake.decide({}, idle, ticket, None, now)
         self.assertEqual(verdict, 'wake')
         self.assertEqual(wake.decide({}, idle, ticket, row_last, now)[0], 'skip')
@@ -75,6 +73,64 @@ class NudgeDedupTests(unittest.TestCase):
         ]
         picked = wake.solo_dev_rows(rows)
         self.assertEqual([r['name'] for r in picked], ['postbox'])
+
+    def test_wake_persisted_when_later_step_crashes(self):
+        """A successful send must hit disk before loop_watch so a crash cannot duplicate the nudge."""
+        with TemporaryDirectory() as tmp:
+            watch = Path(tmp)
+            state_path = watch / 'solo-wake.json'
+            lock_path = watch / 'solo-wake.lock'
+            row = {'name': 'postbox', 'kind': 'solo-dev', 'board': '2060', 'tmux': 'live-x'}
+            ticket = {
+                'ticketNumber': 'HTPR-9406', 'section': 'Todo', 'priority': 'High',
+                'assignees': [],
+                'url': 'https://app.hypertask.ai/detail/project-2060/HTPR-9406',
+            }
+            chats = {'live-x': {'tmux': 'live-x', 'sid': 'sid-1', 'state': 'idle', 'name': 'Postbox'}}
+            sends = []
+            crash_once = {'pending': True}
+
+            def fake_send(session, text):
+                sends.append(session['key'])
+                return True, 'ok'
+
+            def loop_crash(*_a, **_k):
+                if crash_once['pending']:
+                    crash_once['pending'] = False
+                    raise PermissionError('transcript read denied')
+
+            base = dict(WATCH=watch, STATE=state_path, LOCK=lock_path, DRY_RUN=False,
+                        log=lambda *_: None, send=fake_send)
+            patches = [
+                patch.multiple(wake, **base),
+                patch.object(wake.roster, 'hosted_chats', return_value=chats),
+                patch.object(wake.roster, 'rows', return_value=[row]),
+                patch.object(wake, 'tmux_states', return_value={}),
+                patch.object(wake, 'transcript_age', return_value=3600),
+                patch.object(wake, 'board_tickets', return_value=[ticket]),
+                patch.object(wake.scopes, 'view_labels', return_value=frozenset()),
+                patch.object(wake.scopes, 'in_view', return_value=True),
+                patch.object(wake, 'ht', return_value={}),
+                patch.object(wake, 'open_blocker', lambda _k: None),
+            ]
+
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+                    patches[6], patches[7], patches[8], patches[9], \
+                    patch.object(wake, 'loop_watch', side_effect=loop_crash):
+                with self.assertRaises(PermissionError):
+                    wake.main()
+
+            self.assertEqual(sends, ['live-x'])
+            nkey = wake.wake_key('live-x', 'HTPR-9406')
+            self.assertIn(nkey, json.loads(state_path.read_text()))
+
+            sends.clear()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+                    patches[6], patches[7], patches[8], patches[9], \
+                    patch.object(wake, 'loop_watch', return_value=None):
+                wake.main()
+
+            self.assertEqual(sends, [])
 
 
 if __name__ == '__main__':

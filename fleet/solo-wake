@@ -291,8 +291,8 @@ def loop_watch(chats, panes, state, now, woken=frozenset(), save=True):
         if ok and ask_identity:
             state[ikey] = now
         log(f"{row['name']}: {'sent' if ok else 'send failed'} {len(parts)} ask(s) to {session['key']} ({detail})")
-    if not DRY_RUN and save:
-        STATE.write_text(json.dumps(state))
+    if save:
+        persist_state(state)
 
 
 def wake_key(chat, ticket_number):
@@ -389,6 +389,16 @@ def load_state():
         return {}
 
 
+def persist_state(state):
+    """Atomic write while state_guard holds the flock so a mid-run crash cannot lose a wake."""
+    if DRY_RUN:
+        return
+    WATCH.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, STATE)
+
+
 @contextmanager
 def state_guard():
     """Exclusive lock: one solo-wake run reads/writes nudge state at a time."""
@@ -398,8 +408,7 @@ def state_guard():
         try:
             state = load_state()
             yield state
-            if not DRY_RUN:
-                STATE.write_text(json.dumps(state))
+            persist_state(state)
         finally:
             fcntl.flock(lockf, fcntl.LOCK_UN)
 
@@ -450,6 +459,7 @@ def _main_rows(rows, chats, panes, state, now, boards, woken):
             if nkey:
                 state[nkey] = now
             woken.add(session["key"])
+            persist_state(state)
         log(f"{who}: {'woke' if ok else 'wake failed for'} {session['key']} with {why} via {session['via']} ({detail})")
 
 
