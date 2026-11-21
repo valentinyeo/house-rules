@@ -24,8 +24,10 @@ log ESCALATE for Fleet Tools.
 Usage: solo-wake [--dry-run] | --self-test
 Log: ~/.local/state/fleet-switch/log.txt. State: ~/.local/state/fleet-switch/solo-wake.json.
 """
+import fcntl
 import json
 import re
+from contextlib import contextmanager
 from datetime import datetime
 import os
 import subprocess
@@ -37,6 +39,8 @@ HERE = Path(__file__).resolve().parent
 HOME = Path.home()
 WATCH = Path(os.environ.get("FLEET_WATCH_STATE", HOME / ".local/state/fleet-switch"))
 STATE = WATCH / "solo-wake.json"
+LOCK = WATCH / "solo-wake.lock"
+HOST_ROOT = HOME / ".local/state/multiprompt/agent-host"
 MP_SEND = HOME / ".local/share/multiprompt-talk/mp_send.py"
 SESSION_LIST = HOME / ".local/bin/session-list"
 SESSION_SAY = HOME / ".local/bin/session-say"
@@ -242,7 +246,7 @@ def identity_gap(name, sessions=SESSIONS, exists=Path.is_file):
     return None if exists(token) else str(token)
 
 
-def loop_watch(chats, panes, state, now, woken=frozenset()):
+def loop_watch(chats, panes, state, now, woken=frozenset(), save=True):
     """At most one message per chat per tick: the loop ask and the identity ask go out together, and a chat solo-wake
     woke this tick gets nothing more until the next one. Two roster rows that resolve to one chat count once."""
     seen = set()
@@ -287,14 +291,59 @@ def loop_watch(chats, panes, state, now, woken=frozenset()):
         if ok and ask_identity:
             state[ikey] = now
         log(f"{row['name']}: {'sent' if ok else 'send failed'} {len(parts)} ask(s) to {session['key']} ({detail})")
-    if not DRY_RUN:
+    if not DRY_RUN and save:
         STATE.write_text(json.dumps(state))
 
 
-def decide(row, session, ticket, last_wake, now):
+def wake_key(chat, ticket_number):
+    return f"wake:{chat}:{ticket_number}"
+
+
+def host_wait(session):
+    """Why a live chat must not get another user nudge yet, or None when the outbox is clear. Pure aside from one stat."""
+    if session is None or session.get("via") != "live":
+        return None
+    tmux = session["key"]
+    for config in HOST_ROOT.glob("*.config.json"):
+        try:
+            cfg = json.loads(config.read_text())
+        except (OSError, ValueError):
+            continue
+        if cfg.get("tmux") != tmux:
+            continue
+        state_path = config.with_name(config.name[: -len(".config.json")] + ".state.json")
+        try:
+            host = json.loads(state_path.read_text())
+        except (OSError, ValueError):
+            return None
+        if host.get("inflight"):
+            return "mid-turn"
+        if host.get("sends"):
+            return "send queued"
+        for meta in (host.get("written") or {}).values():
+            if meta.get("accepted") is False:
+                return "prior send not accepted"
+        return None
+    return None
+
+
+def solo_dev_rows(rows):
+    """Solo-dev drain targets only: never outside/closed rows (SOFT-2785)."""
+    out = []
+    for row in rows:
+        if row.get("kind") in ("outside", "closed"):
+            continue
+        if row.get("kind") == "solo-dev" or "solo-dev" in (row.get("roles") or []):
+            out.append(row)
+    return out
+
+
+def decide(row, session, ticket, last_wake, now, host_busy=None):
     """One verdict per solo dev: ("wake", why) or ("skip", why). Pure."""
     if session is None:
         return "skip", "session not found; Fleet Tools: restart it or fix its roster row"
+    if host_busy:
+        return "skip", f"host {host_busy}"
     if session["state"] not in ("idle", "stopped"):
         return "skip", f"busy ({session['state']})"
     if session["age"] is not None and session["age"] < QUIET:
@@ -340,10 +389,31 @@ def load_state():
         return {}
 
 
+@contextmanager
+def state_guard():
+    """Exclusive lock: one solo-wake run reads/writes nudge state at a time."""
+    WATCH.mkdir(parents=True, exist_ok=True)
+    with open(LOCK, "a") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            state = load_state()
+            yield state
+            if not DRY_RUN:
+                STATE.write_text(json.dumps(state))
+        finally:
+            fcntl.flock(lockf, fcntl.LOCK_UN)
+
+
 def main():
-    rows = [r for r in roster.rows() if r.get("kind") == "solo-dev" or "solo-dev" in (r.get("roles") or [])]
-    chats, panes, state, now = roster.hosted_chats(), tmux_states(), load_state(), time.time()
+    chats, panes, now = roster.hosted_chats(), tmux_states(), time.time()
+    rows = solo_dev_rows(roster.rows())
     boards, woken = {}, set()
+    with state_guard() as state:
+        _main_rows(rows, chats, panes, state, now, boards, woken)
+        loop_watch(chats, panes, state, now, woken, save=False)
+
+
+def _main_rows(rows, chats, panes, state, now, boards, woken):
     for row in rows:
         scope = scope_of(row)
         who = f"{row['name']} ({scope['where']})" if scope else row["name"]
@@ -351,7 +421,8 @@ def main():
             log(f"{who}: skip, no board, or a view without a login, in its roster row")
             continue
         session = session_of(row, chats, panes)
-        verdict, why = decide(row, session, {"ticketNumber": "?"}, state.get(row["name"]), now)
+        busy = host_wait(session)
+        verdict, why = decide(row, session, {"ticketNumber": "?"}, state.get(row["name"]), now, busy)
         if verdict == "skip":
             log(f"{who}: skip, {why}")
             continue
@@ -364,7 +435,9 @@ def main():
         labels = scopes.view_labels(scope, ht)
         ticket = next_ticket([t for t in tickets if scopes.in_view(t, labels)], row.get("login"),
                              take=row.get("take") or TAKE)
-        verdict, why = decide(row, session, ticket, state.get(row["name"]), now)
+        nkey = wake_key(session["key"], ticket["ticketNumber"]) if ticket and session else None
+        last = state.get(nkey) if nkey else state.get(row["name"])
+        verdict, why = decide(row, session, ticket, last, now, busy)
         if verdict == "skip":
             log(f"{who}: skip, {why}")
             continue
@@ -374,10 +447,10 @@ def main():
         ok, detail = send(session, message(ticket, "view" if scope.get("view") else "board"))
         if ok:
             state[row["name"]] = now
+            if nkey:
+                state[nkey] = now
             woken.add(session["key"])
-            STATE.write_text(json.dumps(state))
         log(f"{who}: {'woke' if ok else 'wake failed for'} {session['key']} with {why} via {session['via']} ({detail})")
-    loop_watch(chats, panes, state, now, woken)
 
 
 def self_test():
