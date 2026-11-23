@@ -45,6 +45,7 @@ Local enforcement:
 | needs-design shown before build | nothing yet |
 | no merge around a failed check | house-rules main: `rules-lint` required, admins included; product repos: nothing yet |
 | no real email in a public repo | `new-public-repo` refuses to push one; per repo, a ci check on commit emails |
+| merged branches delete themselves | github `delete_branch_on_merge` on every repo; `new-public-repo` sets it on new ones |
 | no secrets anywhere | `secrets-guard` hook |
 | fresh chat keeps its loop | `short-chat` hook: a long chat saves its handover and starts its own fresh chat, never deletes its loop; if fresh start fails it stays quiet 2 h and auto-compact keeps the chat going |
 | worker briefs name both fault paths | poteto-2-advisor `.claude/hooks/book-check.py`, advisor-checks CI; fleet/runner includes the shared rules, tested in rules-lint CI; filing remains agent judgment |
