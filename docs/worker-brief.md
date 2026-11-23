@@ -28,3 +28,6 @@ These reporting rules override legacy workaround instructions.
 PR body: add one line `Author model: <family>/<model>` per author,
 for example `Author model: deepseek/deepseek-v4.1-flash`,
 `Author model: anthropic/claude-sonnet`, `Author model: openai/gpt-6.1-sol`.
+
+Builds and test suites run on GitHub Actions.
+Push and read the PR checks; a build or suite on the shared server is refused.
