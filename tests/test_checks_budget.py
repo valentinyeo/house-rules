@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
@@ -29,7 +30,8 @@ class ChecksBudgetTest(unittest.TestCase):
 
     def git(self, *args):
         return self.run(["git", "-C", str(self.path), *args], check=True,
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5).stdout
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5,
+                        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}).stdout
 
     def commit_workflows(self):
         self.git("add", ".github/workflows")
