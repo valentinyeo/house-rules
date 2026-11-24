@@ -144,7 +144,9 @@ def billing_block(key, comments=None):
     return None
 
 
-def next_ticket(tickets, login, blocked=open_blocker, billing=billing_block, take=TAKE):
+def next_ticket(tickets, login, blocked=None, billing=None, take=TAKE):
+    blocked = blocked or open_blocker
+    billing = billing or billing_block
     for t in candidates(tickets, login, take):
         if blocked(t["ticketNumber"]):
             continue
