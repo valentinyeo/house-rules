@@ -181,10 +181,10 @@ def inspect_repo(path, debug=False):
     branch = (api("") or {}).get("default_branch")
     ref = f"origin/{branch}" if branch else "HEAD"
     try:
-        workflow_paths = command(["git", "-C", path, "ls-tree", "--name-only", ref, ".github/workflows/"]).splitlines()
+        workflow_paths = command(["git", "-C", path, "ls-tree", "--name-only", "-z", ref, ".github/workflows/"]).split("\0")
     except subprocess.CalledProcessError:
         ref = "HEAD"
-        workflow_paths = command(["git", "-C", path, "ls-tree", "--name-only", ref, ".github/workflows/"]).splitlines()
+        workflow_paths = command(["git", "-C", path, "ls-tree", "--name-only", "-z", ref, ".github/workflows/"]).split("\0")
     workflows = []
     for filename in workflow_paths:
         workflow_path = Path(filename)
@@ -252,7 +252,7 @@ def self_test():
         assert "--slurp" not in args and "--paginate" not in args, args
         if args[0] == "git":
             if args[3] == "ls-tree":
-                paths = ".github/workflows/release.yml\n" if source_path.exists() else ""
+                paths = ".github/workflows/release.yml\0" if source_path.exists() else ""
                 return subprocess.CompletedProcess(args, 0, paths)
             if args[3] == "show":
                 return subprocess.CompletedProcess(args, 0, source_path.read_text())

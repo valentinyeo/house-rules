@@ -92,6 +92,14 @@ class ChecksBudgetTest(unittest.TestCase):
         self.assertIn("1/1 workflows lack concurrency group with cancel-in-progress true", output)
         self.assertIn("workflows missing cancel-in-progress=1/1", debug)
 
+    def test_non_ascii_workflow_is_counted(self):
+        (self.workflows / "café.yaml").write_text("on: pull_request\njobs: {}\n")
+        self.commit_workflows()
+        self.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+        output, debug = self.inspect()
+        self.assertIn("1/2 workflows lack concurrency group with cancel-in-progress true", output)
+        self.assertIn("workflows missing cancel-in-progress=1/2", debug)
+
     def test_existing_regressions(self):
         CHECKS_BUDGET["self_test"]()
 
