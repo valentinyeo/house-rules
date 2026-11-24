@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
       - run: python3 -m pip install --quiet pyyaml
       - run: python3 scripts/rules-lint --self-test
-      - run: python3 -m unittest tests.test_board_health_timer tests.test_filing_gate tests.test_fleet_live_boards tests.test_fleet_supervisor_heartbeat tests.test_house_rules_sync tests.test_referenced_paths_exist tests.test_roster_hosted_chats tests.test_rules_drift tests.test_pick_verifier_model tests.test_picker_from_base tests.test_pstack_delegation tests.test_run_verifier tests.test_runner_chat tests.test_slo_watch_open_prs tests.test_solo_wake_events tests.test_solo_wake_nudge_dedup tests.test_ticket_ownership tests.test_workflow_concurrency tests.test_skill_lint_verdict_step tests.test_worker_brief_owner_steps
+      - run: python3 -m unittest tests.test_checks_budget tests.test_board_health_timer tests.test_filing_gate tests.test_fleet_live_boards tests.test_fleet_supervisor_heartbeat tests.test_house_rules_sync tests.test_referenced_paths_exist tests.test_roster_hosted_chats tests.test_rules_drift tests.test_pick_verifier_model tests.test_picker_from_base tests.test_pstack_delegation tests.test_run_verifier tests.test_runner_chat tests.test_slo_watch_open_prs tests.test_solo_wake_events tests.test_solo_wake_nudge_dedup tests.test_ticket_ownership tests.test_workflow_concurrency tests.test_skill_lint_verdict_step tests.test_worker_brief_owner_steps
       - run: python3 fleet/tool-gate.py --self-test
       - name: lint what this change adds
         env:

@@ -178,21 +178,28 @@ def inspect_repo(path, debug=False):
             page += 1
         return None if collection is None else items
 
+    branch = (api("") or {}).get("default_branch")
+    ref = f"origin/{branch}" if branch else "HEAD"
+    try:
+        workflow_paths = command(["git", "-C", path, "ls-tree", "--name-only", ref, ".github/workflows/"]).splitlines()
+    except subprocess.CalledProcessError:
+        ref = "HEAD"
+        workflow_paths = command(["git", "-C", path, "ls-tree", "--name-only", ref, ".github/workflows/"]).splitlines()
     workflows = []
-    workflow_directory = Path(path) / ".github/workflows"
-    for workflow_path in sorted(workflow_directory.glob("*")):
+    for filename in workflow_paths:
+        workflow_path = Path(filename)
         if workflow_path.suffix not in {".yml", ".yaml"}:
             continue
         try:
-            source = workflow_path.read_text(encoding="utf-8")
+            source = command(["git", "-C", path, "show", f"{ref}:{filename}"])
         except TimeoutError:
             raise
-        except (OSError, UnicodeError) as error:
+        except (subprocess.CalledProcessError, OSError, UnicodeError) as error:
             if debug:
                 print(f"checks-budget: {workflow_path}: {type(error).__name__}: {error}", file=sys.stderr)
             continue
         workflows.append({"id": None, "name": workflow_path.stem,
-                          "path": f".github/workflows/{workflow_path.name}", "source": source})
+                          "path": filename, "source": source})
     local_workflows = {workflow["path"]: workflow for workflow in workflows}
     for workflow in api("actions/workflows?per_page=100", collection="workflows"):
         if workflow.get("state") == "active" and workflow["path"] in local_workflows:
@@ -205,7 +212,6 @@ def inspect_repo(path, debug=False):
         measurement = api(f"actions/runs/{run['id']}/jobs?per_page=1")
         if measurement is not None:
             jobs[str(run["id"])] = measurement["total_count"]
-    branch = (api("") or {}).get("default_branch")
     branch_runs = []
     if branch:
         branch_query = urllib.parse.urlencode({"branch": branch, "status": "completed", "per_page": 100})
@@ -245,6 +251,11 @@ def self_test():
     def gh245(args, **kwargs):
         assert "--slurp" not in args and "--paginate" not in args, args
         if args[0] == "git":
+            if args[3] == "ls-tree":
+                paths = ".github/workflows/release.yml\n" if source_path.exists() else ""
+                return subprocess.CompletedProcess(args, 0, paths)
+            if args[3] == "show":
+                return subprocess.CompletedProcess(args, 0, source_path.read_text())
             return subprocess.CompletedProcess(args, 0, "git@github.com:owner/repo.git\n")
         endpoint = args[-1].removeprefix("repos/owner/repo/")
         responses = {
