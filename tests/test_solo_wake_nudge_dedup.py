@@ -133,5 +133,60 @@ class NudgeDedupTests(unittest.TestCase):
             self.assertEqual(sends, [])
 
 
+class CannotActTests(unittest.TestCase):
+    """Solo-wake must skip a tab with no Multibot name and a ticket blocked by GitHub billing (VSTA-224)."""
+
+    def run_row(self, name='Postbox', billing=None):
+        now = 1_000_000.0
+        row = {'name': 'postbox', 'kind': 'solo-dev', 'board': '2060', 'tmux': 'live-x'}
+        chats = {'live-x': {'tmux': 'live-x', 'sid': 'sid-1', 'state': 'idle', 'name': name}}
+        ticket = {'ticketNumber': 'HTPR-9406', 'section': 'Todo', 'priority': 'High', 'assignees': [],
+                  'url': 'https://app.hypertask.ai/detail/project-2060/HTPR-9406'}
+        logs, sends = [], []
+        with TemporaryDirectory() as tmp, \
+                patch.multiple(wake, DRY_RUN=False, log=logs.append, HOST_ROOT=Path(tmp),
+                               send=lambda session, text: (sends.append(text) is None, 'ok')), \
+                patch.object(wake, 'tmux_states', return_value={}), \
+                patch.object(wake, 'transcript_age', return_value=3600), \
+                patch.object(wake, 'board_tickets', return_value=[ticket]), \
+                patch.object(wake.scopes, 'view_labels', return_value=None), \
+                patch.object(wake, 'open_blocker', lambda _k: None), \
+                patch.object(wake, 'billing_block', billing or (lambda _k: None)):
+            wake._main_rows([row], chats, {}, {}, now, {}, set())
+        return logs, sends
+
+    def test_nameless_tab_is_skipped(self):
+        logs, sends = self.run_row(name='')
+        self.assertEqual(sends, [], logs)
+        self.assertTrue(any('no Multibot name' in line for line in logs), logs)
+
+    def test_billing_blocked_ticket_is_skipped(self):
+        logs, sends = self.run_row(billing=lambda _k: 'GitHub billing waits on Valentin (house rules)')
+        self.assertEqual(sends, [], logs)
+        self.assertTrue(any('billing' in line.lower() for line in logs), logs)
+
+    def test_normal_ticket_still_wakes_a_named_tab(self):
+        logs, sends = self.run_row()
+        self.assertEqual(len(sends), 1, logs)
+        self.assertIn('HTPR-9406', sends[0])
+
+    def test_billing_block_reads_the_note_a_chat_left_on_the_ticket(self):
+        failed = [{'text': '<p>Checks red: recent account payments have failed.</p>'}]
+        self.assertTrue(wake.billing_block('HTPR-1', comments=failed))
+        self.assertIn('Valentin', wake.billing_block('HTPR-1', comments=failed))
+        self.assertIsNone(wake.billing_block('HTPR-1', comments=[{'text': '<p>Billing page copy needs a fix.</p>'}]),
+                          'a ticket about billing is not blocked by billing')
+
+    def test_next_ticket_takes_the_next_one_past_a_billing_block(self):
+        tickets = [{'ticketNumber': 'HTPR-1', 'section': 'Todo', 'priority': 'Urgent', 'assignees': []},
+                   {'ticketNumber': 'HTPR-2', 'section': 'Todo', 'priority': 'Low', 'assignees': []}]
+        with patch.multiple(wake, DRY_RUN=True):
+            held = wake.next_ticket(tickets, None, blocked=lambda _k: None,
+                                    billing=lambda k: 'held' if k == 'HTPR-1' else None)
+            self.assertEqual(held['ticketNumber'], 'HTPR-2')
+            self.assertEqual(wake.next_ticket(tickets, None, blocked=lambda _k: None,
+                                             billing=lambda _k: None)['ticketNumber'], 'HTPR-1')
+
+
 if __name__ == '__main__':
     unittest.main()

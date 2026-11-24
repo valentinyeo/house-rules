@@ -84,9 +84,9 @@ if __name__ == '__main__':
 
 
 class NamelessIdentityTests(EventWakeTests):
-    def run_nameless(self, name):
+    def run_nameless(self, name, age=60):
         self.chats = {'live-test': {'transcript': 'current', 'name': name}}
-        (self.project / 'current.jsonl').write_text(json.dumps(self.event()) + '\n')
+        (self.project / 'current.jsonl').write_text(json.dumps(self.event(age=age)) + '\n')
         logs, sent = [], []
         with (patch.multiple(wake, HOME=self.home, DRY_RUN=False, STATE=self.home / 'state.json',
                             log=logs.append, identity_gap=lambda n: 'a token' if n else 'a Multibot name (the tab has none)',
@@ -102,6 +102,15 @@ class NamelessIdentityTests(EventWakeTests):
         self.assertFalse(any('None' in text for text in sent), sent)
         self.assertEqual(sent, [], sent)
 
-    def test_named_chat_with_gap_is_still_asked(self):
+    def test_nameless_tab_with_a_dead_loop_is_not_nudged(self):
+        logs, sent = self.run_nameless('', age=3000)
+        self.assertEqual(sent, [], logs)
+        self.assertTrue(any('no Multibot name' in line for line in logs), logs)
+
+    def test_named_chat_with_a_dead_loop_is_still_nudged(self):
+        logs, sent = self.run_nameless('Test Lead', age=3000)
+        self.assertEqual(len(sent), 1, logs)
+
+    def test_named_chat_with_a_gap_is_still_asked_to_log_in(self):
         logs, sent = self.run_nameless('Test Lead')
         self.assertTrue(any('Test Lead' in text for text in sent), sent)
