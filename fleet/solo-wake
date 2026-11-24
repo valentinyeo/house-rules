@@ -21,6 +21,10 @@ Loop watch (every orchestrator row: chief, lead, solo-dev): the chat's current t
 none shows and the chat is idle or stopped, send one arm-your-loop message (one per 30 minutes); after two unanswered,
 log ESCALATE for Fleet Tools.
 
+A live tab that publishes no Multibot name is never nudged: it cannot act on the ask, and Fleet Tools fixes the tab. The gap
+is logged instead. A ticket whose note names a GitHub billing failure is held: house rules make billing Valentin's, so the
+ticket waits on him rather than on the chat.
+
 Usage: solo-wake [--dry-run] | --self-test
 Log: ~/.local/state/fleet-switch/log.txt. State: ~/.local/state/fleet-switch/solo-wake.json.
 """
@@ -108,13 +112,13 @@ def open_blocker(key):
 
 
 def candidates(tickets, login, take=TAKE):
-    """Scope tickets the solo dev may take, best first. Pure: the BlockedBy read happens later, one ticket at a time."""
+    """Scope tickets the solo dev may take, best first. Pure: the BlockedBy and billing reads happen later, one ticket at a time."""
     me = (login or "").lower()
     out = []
     for t in tickets:
         if t.get("sectionIsDone") or t.get("section") not in take:
             continue
-        if t.get("waitingOnUserId") or t.get("blockerCommentId"):
+        if t.get("waitingOnUserId") or t.get("waitingOnAgentId") or t.get("blockerCommentId"):
             continue
         names = {(a.get("displayName") or "").lower() for a in t.get("assignees") or []}
         if names - {me}:
@@ -125,10 +129,30 @@ def candidates(tickets, login, take=TAKE):
     return sorted(out, key=lambda t: (take[t["section"]], PRIORITY.get(t.get("priority"), 4), t.get("createdAt") or ""))
 
 
-def next_ticket(tickets, login, blocked=open_blocker, take=TAKE):
+BILLING = ("payments have failed", "spending limit", "billing problem", "billing failure", "github billing")
+
+
+def billing_block(key, comments=None):
+    """Why this ticket waits on GitHub billing, or None. House rules: the chat says it once on the ticket, so that note is
+    the mark. board-drain's merge-gate reads the same failure text. Pure when comments are supplied."""
+    if comments is None:
+        comments = (ht("comment", "list", key, "--limit", "200") or {}).get("comments") or []
+    for c in comments:
+        text = (c.get("text") or c.get("commentText") or "").lower()
+        if any(word in text for word in BILLING):
+            return "GitHub billing waits on Valentin (house rules)"
+    return None
+
+
+def next_ticket(tickets, login, blocked=open_blocker, billing=billing_block, take=TAKE):
     for t in candidates(tickets, login, take):
-        if not blocked(t["ticketNumber"]):
-            return t
+        if blocked(t["ticketNumber"]):
+            continue
+        why = billing(t["ticketNumber"])
+        if why:
+            log(f"{t['ticketNumber']}: skip, {why}")
+            continue
+        return t
     return None
 
 
@@ -246,6 +270,13 @@ def identity_gap(name, sessions=SESSIONS, exists=Path.is_file):
     return None if exists(token) else str(token)
 
 
+def tab_name(session, chats):
+    """The live tab's Multibot name, "" when it publishes none, or None for a plain tmux session."""
+    if not session or session.get("via") != "live":
+        return None
+    return (chats.get(session["key"], {}).get("name") or "").strip()
+
+
 def loop_watch(chats, panes, state, now, woken=frozenset(), save=True):
     """At most one message per chat per tick: the loop ask and the identity ask go out together, and a chat solo-wake
     woke this tick gets nothing more until the next one. Two roster rows that resolve to one chat count once."""
@@ -275,12 +306,15 @@ def loop_watch(chats, panes, state, now, woken=frozenset(), save=True):
         state[key] = nudges
         verdict, why = loop_verdict(session, fire, nudges, now)
         live = session is not None and session["via"] == "live"
-        name = chats.get(session["key"], {}).get("name") if live else None
+        name = tab_name(session, chats)
         gap = identity_gap(name) if live else None
         ask_identity = bool(gap) and bool(name) and session["state"] in ("idle", "stopped") and now - state.get(ikey, 0) >= COOLDOWN
         log(f"{row['name']} loop: {'would arm' if verdict == 'arm' else verdict}, {why}")
         if gap:
             log(f"{row['name']} identity: gap, missing {gap}")
+        if live and not name:
+            log(f"{row['name']} loop: skip, its tab has no Multibot name; Fleet Tools: fix the tab")
+            continue
         parts = ([LOOP_MESSAGE] if verdict == "arm" else []) + \
                 ([IDENTITY_MESSAGE.format(name=name, token=gap)] if ask_identity else [])
         if not parts or DRY_RUN or session["key"] in woken:
@@ -430,6 +464,9 @@ def _main_rows(rows, chats, panes, state, now, boards, woken):
             log(f"{who}: skip, no board, or a view without a login, in its roster row")
             continue
         session = session_of(row, chats, panes)
+        if session and session["via"] == "live" and not tab_name(session, chats):
+            log(f"{who}: skip, its tab has no Multibot name; Fleet Tools: fix the tab")
+            continue
         busy = host_wait(session)
         verdict, why = decide(row, session, {"ticketNumber": "?"}, state.get(row["name"]), now, busy)
         if verdict == "skip":
@@ -474,9 +511,20 @@ def self_test():
             tk("H", "Doing"), tk("I", "Done", me, sectionIsDone=True)]
     assert [t["ticketNumber"] for t in candidates(view, me)] == ["B", "A"], "queue order or skips wrong"
     view.append(tk("J", "Doing", me, prio="Low"))
-    assert next_ticket(view, me, blocked=lambda k: False)["ticketNumber"] == "J", "own work in flight must come first"
-    assert next_ticket(view, me, blocked=lambda k: k == "J")["ticketNumber"] == "B", "BlockedBy ticket must be skipped"
-    assert next_ticket([tk("C", "Todo", "Runner 7")], me, blocked=lambda k: False) is None, "runner's ticket taken"
+    free = dict(blocked=lambda k: False, billing=lambda k: None)
+    assert next_ticket(view, me, **free)["ticketNumber"] == "J", "own work in flight must come first"
+    assert next_ticket(view, me, blocked=lambda k: k == "J", billing=lambda k: None)["ticketNumber"] == "B", \
+        "BlockedBy ticket must be skipped"
+    assert next_ticket([tk("C", "Todo", "Runner 7")], me, **free) is None, "runner's ticket taken"
+    assert next_ticket(view, me, blocked=lambda k: False, billing=lambda k: k == "J")["ticketNumber"] == "B", \
+        "a billing-blocked ticket must be skipped"
+    assert billing_block("X", comments=[{"text": "<p>CI red: recent account payments have failed</p>"}]), \
+        "the house-rules billing note holds the ticket"
+    assert billing_block("X", comments=[{"text": "<p>Billing page copy needs a fix.</p>"}]) is None, \
+        "a ticket about billing is not blocked by it"
+    assert tab_name({"via": "live", "key": "live-1"}, {"live-1": {"name": "Test Lead"}}) == "Test Lead"
+    assert tab_name({"via": "live", "key": "live-1"}, {"live-1": {}}) == "", "a tab with no name publishes none"
+    assert tab_name({"via": "tmux", "key": "postbox"}, {}) is None, "a plain tmux session has no tab name"
     idle = {"via": "live", "key": "live-1", "sid": "s", "state": "idle", "age": 3600}
     t, now = {"ticketNumber": "B"}, 10_000
     assert decide({}, idle, t, None, now) == ("wake", "B"), "idle with open work must wake"
