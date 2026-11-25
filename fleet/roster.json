@@ -476,7 +476,7 @@
   {
    "name": "HT Bugs",
    "multibot": "HT Bugs",
-   "kind": "outside",
+   "kind": "lead",
    "login": "HT Bugs",
    "board": "15",
    "label": "HT Bugs",
@@ -494,7 +494,7 @@
   {
    "name": "HT Features",
    "multibot": "HT Features",
-   "kind": "outside",
+   "kind": "lead",
    "login": "HT Features",
    "board": "15",
    "label": "HT Features",
@@ -512,7 +512,7 @@
   {
    "name": "HT Verification",
    "multibot": "HT Verification",
-   "kind": "outside",
+   "kind": "lead",
    "login": "HT Verification",
    "board": "15",
    "label": "HT Verification",
