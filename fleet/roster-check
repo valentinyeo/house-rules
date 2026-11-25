@@ -128,10 +128,11 @@ def self_test():
                               {"name": "B"}])
     actual = roster.static_rows()
     assert not worker_errors(actual)
-    assert {r["name"]: r["workers"] for r in actual if "workers" in r} == {
-        "HT Product Lead": 7, "Multi Bot Opus Runner": 7, "multiprompt-android": 3,
-        "Pecunia": 3, "postbox": 3, "poteto-2-advisor": 3}
-    assert all(r["workers_by"] == "Valentin 2026-11-17" for r in actual if "workers" in r)
+    assert {(r["name"], r["workers"], r["workers_by"]) for r in actual if "workers" in r} == {
+        ("HT Product Lead", 7, "Valentin 2026-11-17"), ("Multi Bot Opus Runner", 7, "Valentin 2026-11-17"),
+        ("multiprompt-android", 3, "Valentin 2026-11-17"), ("Pecunia", 3, "Valentin 2026-11-17"),
+        ("postbox", 3, "Valentin 2026-11-17"), ("poteto-2-advisor", 3, "Valentin 2026-11-17"),
+        ("HT Features", 10, "Valentin 2026-11-25")}
     static = [{"name": "postbox"}, {"name": "ht-or-runner-{n}"},
               {"name": "Matt Live Stream", "multibot": "Matt Live Stream", "tmux": "live-1d21840"}]
     s = lambda t, name=None: {"tmux": t, "name": name, "harness": "claude"}
