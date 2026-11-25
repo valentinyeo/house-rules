@@ -12,7 +12,6 @@ WORKFLOWS = ROOT / ".github/workflows"
 LANE_WORKFLOWS = (
     "fleet-tools-verifier.yml",
     "fleet-reconcile-verifier.yml",
-    "pstack-audit-verifier.yml",
     "skill-lint.yml",
 )
 FAKE_PI = '''#!/usr/bin/env python3

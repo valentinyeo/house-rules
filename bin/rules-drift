@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""rules-drift: one source of truth for standing rules.
+"""rules-drift: catch stale rule text in the sources agents read.
 
-house-rules.md is the only place a standing rule lives. Every other instruction source
-agents read on this server may only point to it or hold project-only rules. This script
-greps those other sources for banned stale phrases (texts that once contradicted house
-rules) and exits 1 with file:line for every hit.
+The rules live in vstack's valentin-mode skill and in pstack; house-rules.md is only a
+pointer. This script greps those sources for banned stale phrases (texts that once
+contradicted the rules) and exits 1 with file:line for every hit.
 
   rules-drift               scan, print hits, log to ~/.local/state/rules-drift.log, exit 1 on any hit
   rules-drift --house-rules scan only house-rules.md for retired runner-pool prose
