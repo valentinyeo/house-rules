@@ -4,5 +4,5 @@ The rules no longer live here. Valentin's working rules are the valentin-mode sk
 
 - `fleet/`: the roster scripts (roster-live, roster-announce, solo-wake) and the rest of the fleet tooling.
 - `bin/`: the hooks and installers, for example `no-vps-ci`, `house-rules-sync` and `rules-drift`.
-- `skills/`: the role skills: design-lead, finance-lead, marketing-lead, support-manager, solo-dev, shipping-update, figma-design and hypertask-triage.
+- `skills/`: the role skills: design-lead, finance-lead, marketing-lead, support-manager, solo-dev, shipping-update, figma-design and hypertask-triage, plus two retired pointers (house-rules, house-rules-update) that only say where the rules went.
 - `systemd/`: the timers that run the fleet scripts.
