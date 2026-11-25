@@ -1,6 +1,6 @@
 {
  "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name (a tmux pattern: {n} a number, {x} one letter, {*} any suffix, as in live-chromescribe-{*}) and loads role_skill. No row: it reports 'not in roster' to Fleet Tools and takes no work. kind: chief, lead, view-lead, solo-dev, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371. Sessions announce themselves at start with fleet/roster-announce (HYCI-214); announcements live in ~/.local/state/roster/announce/, never in this file. Solo-dev rows may carry board without view (client board, whole board), view as a scopes.json key or a raw view id, client, harness and take (section: 0 in flight, 1 queue).",
- "_updated": "2026-11-18 SOFT-2710",
+ "_updated": "2026-11-25 HT Features",
  "runners": 17,
  "rows": [
   {
@@ -61,6 +61,22 @@
     "lead",
     "solo-dev"
    ]
+  },
+  {
+   "name": "HT Features",
+   "multibot": "HT Features",
+   "tmux": "live-4b135e3",
+   "kind": "lead",
+   "board": "15",
+   "app": "hypertask",
+   "harness": "claude",
+   "take": "Features",
+   "status": "live",
+   "workers": 10,
+   "workers_by": "Valentin 2026-11-25",
+   "repo": "hypertask-ai/hypertask",
+   "cwd": "~/projects/hypertask",
+   "notes": "Valentin 2026-11-25: 'this is HT features allowed 10 workers'. The 10-worker cap is for live-4b135e3 only; a second chat also named HT Features (live-7afb95d9ebc38ff2846b69a3c95dbbd0) is not this row."
   },
   {
    "name": "SF Design Lead",
