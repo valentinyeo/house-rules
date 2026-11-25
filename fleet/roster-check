@@ -130,8 +130,9 @@ def self_test():
     assert not worker_errors(actual)
     assert {r["name"]: r["workers"] for r in actual if "workers" in r} == {
         "HT Product Lead": 7, "Multi Bot Opus Runner": 7, "multiprompt-android": 3,
-        "Pecunia": 3, "postbox": 3, "poteto-2-advisor": 3}
-    assert all(r["workers_by"] == "Valentin 2026-11-17" for r in actual if "workers" in r)
+        "Pecunia": 3, "postbox": 3, "poteto-2-advisor": 3,
+        "HT Bugs": 10, "HT Features": 10, "HT Verification": 10}
+    assert all(r["workers_by"] in ("Valentin 2026-11-17", "Valentin 2026-11-25") for r in actual if "workers" in r)
     static = [{"name": "postbox"}, {"name": "ht-or-runner-{n}"},
               {"name": "Matt Live Stream", "multibot": "Matt Live Stream", "tmux": "live-1d21840"}]
     s = lambda t, name=None: {"tmux": t, "name": name, "harness": "claude"}

@@ -1,6 +1,6 @@
 {
  "_doc": "Who every session is. One row per session, chat or runner pool. A session finds its row by name (a tmux pattern: {n} a number, {x} one letter, {*} any suffix, as in live-chromescribe-{*}) and loads role_skill. No row: it reports 'not in roster' to Fleet Tools and takes no work. kind: chief, lead, view-lead, solo-dev, runner-pool, specialist, outside, closed. status measured 2026-11-07 14:00 UTC from tmux and process lists; Multibot chats are 'unknown' until mp-layout list exists (multiprompt PRs 834, 850). Source of decisions: YPER4-1371. Sessions announce themselves at start with fleet/roster-announce (HYCI-214); announcements live in ~/.local/state/roster/announce/, never in this file. Solo-dev rows may carry board without view (client board, whole board), view as a scopes.json key or a raw view id, client, harness and take (section: 0 in flight, 1 queue).",
- "_updated": "2026-11-18 SOFT-2710",
+ "_updated": "2026-11-25",
  "runners": 17,
  "rows": [
   {
@@ -472,6 +472,60 @@
    "harness": "hax",
    "cwd": "~/projects",
    "notes": "SOFT-2710. Shell that runs the scheduled shipping, update and status report jobs through hax/codex (poteto-reports/run-report). hax cannot run hooks, so it never announces; matched by its tmux name."
+  },
+  {
+   "name": "HT Bugs",
+   "multibot": "HT Bugs",
+   "kind": "outside",
+   "login": "HT Bugs",
+   "board": "15",
+   "label": "HT Bugs",
+   "status": "unknown",
+   "notes": "Owns every board 15 bug end to end. 2026-11-25 Valentin: up to 10 workers, never on Claude.",
+   "roles": [
+    "bugs"
+   ],
+   "priority": 2,
+   "workers": 10,
+   "workers_by": "Valentin 2026-11-25",
+   "repo": "hypertask-ai/hypertask",
+   "cwd": "~/projects/hypertask"
+  },
+  {
+   "name": "HT Features",
+   "multibot": "HT Features",
+   "kind": "outside",
+   "login": "HT Features",
+   "board": "15",
+   "label": "HT Features",
+   "status": "unknown",
+   "notes": "Owns every board 15 feature and improvement end to end. 2026-11-25 Valentin: up to 10 workers, never on Claude.",
+   "roles": [
+    "features"
+   ],
+   "priority": 2,
+   "workers": 10,
+   "workers_by": "Valentin 2026-11-25",
+   "repo": "hypertask-ai/hypertask",
+   "cwd": "~/projects/hypertask"
+  },
+  {
+   "name": "HT Verification",
+   "multibot": "HT Verification",
+   "kind": "outside",
+   "login": "HT Verification",
+   "board": "15",
+   "label": "HT Verification",
+   "status": "unknown",
+   "notes": "Only job: /maintain-verification-skill, CI setup and CI speed, per pstack playbooks. 2026-11-25 Valentin: up to 10 workers, never on Claude.",
+   "roles": [
+    "verification"
+   ],
+   "priority": 2,
+   "workers": 10,
+   "workers_by": "Valentin 2026-11-25",
+   "repo": "hypertask-ai/hypertask",
+   "cwd": "~/projects/hypertask"
   }
  ],
  "cleanup": {
