@@ -43,4 +43,4 @@ Quoted:
 In order: slop-strip, then the no-comments pass at `/home/valentin/.claude/plugins/cache/cursor-plugins/pstack/<version>/skills/no-comments/SKILL.md`,
 then rebase onto current trunk and report the code-ready head, then self-proof on the real artifact.
 The outside verifier runs after that.
-`deslop` (cursor-team-kit) is not installed on these servers: until it is, apply the no-comments pass and report "deslop unavailable" in your final line.
+`deslop` (cursor-team-kit) is not installed on these servers: until it is, apply the no-comments pass, then commit, push and open the PR as usual, and note "deslop unavailable" in the PR body and your final line. A missing deslop never stops the run.

@@ -54,7 +54,8 @@ class WorkerBriefOwnerSteps(unittest.TestCase):
     def test_brief_names_the_owner_steps_and_the_deslop_gap(self):
         brief = BRIEF.read_text()
         self.assertIn("skills/no-comments/SKILL.md", brief)
-        self.assertIn("report \"deslop unavailable\" in your final line", brief)
+        self.assertIn("note \"deslop unavailable\" in the PR body and your final line", brief)
+        self.assertIn("A missing deslop never stops the run", brief)
 
 
 if __name__ == "__main__":
