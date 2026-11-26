@@ -67,16 +67,22 @@
    "multibot": "HT Features",
    "tmux": "live-4b135e3",
    "kind": "lead",
+   "login": "HT Features",
    "board": "15",
+   "label": "HT Features",
    "app": "hypertask",
    "harness": "claude",
    "take": "Features",
    "status": "live",
+   "roles": [
+    "features"
+   ],
+   "priority": 2,
    "workers": 10,
    "workers_by": "Valentin 2026-11-25",
    "repo": "hypertask-ai/hypertask",
    "cwd": "~/projects/hypertask",
-   "notes": "Valentin 2026-11-25: 'this is HT features allowed 10 workers'. The 10-worker cap is for live-4b135e3 only; a second chat also named HT Features (live-7afb95d9ebc38ff2846b69a3c95dbbd0) is not this row."
+   "notes": "Owns every board 15 feature and improvement end to end. 2026-11-25 Valentin: up to 10 workers, never on Claude. The 10-worker cap is for live-4b135e3 only; a second chat also named HT Features (live-7afb95d9ebc38ff2846b69a3c95dbbd0) is not this row."
   },
   {
    "name": "SF Design Lead",
@@ -488,6 +494,42 @@
    "harness": "hax",
    "cwd": "~/projects",
    "notes": "SOFT-2710. Shell that runs the scheduled shipping, update and status report jobs through hax/codex (poteto-reports/run-report). hax cannot run hooks, so it never announces; matched by its tmux name."
+  },
+  {
+   "name": "HT Bugs",
+   "multibot": "HT Bugs",
+   "kind": "lead",
+   "login": "HT Bugs",
+   "board": "15",
+   "label": "HT Bugs",
+   "status": "unknown",
+   "notes": "Owns every board 15 bug end to end. 2026-11-25 Valentin: up to 10 workers, never on Claude.",
+   "roles": [
+    "bugs"
+   ],
+   "priority": 2,
+   "workers": 10,
+   "workers_by": "Valentin 2026-11-25",
+   "repo": "hypertask-ai/hypertask",
+   "cwd": "~/projects/hypertask"
+  },
+  {
+   "name": "HT Verification",
+   "multibot": "HT Verification",
+   "kind": "lead",
+   "login": "HT Verification",
+   "board": "15",
+   "label": "HT Verification",
+   "status": "unknown",
+   "notes": "Only job: /maintain-verification-skill, CI setup and CI speed, per pstack playbooks. 2026-11-25 Valentin: up to 10 workers, never on Claude.",
+   "roles": [
+    "verification"
+   ],
+   "priority": 2,
+   "workers": 10,
+   "workers_by": "Valentin 2026-11-25",
+   "repo": "hypertask-ai/hypertask",
+   "cwd": "~/projects/hypertask"
   }
  ],
  "cleanup": {

@@ -99,7 +99,41 @@ def processes(proc):
     return result
 
 
-def attribute_workers(tree, roster, row_tickets, home, scoped_boards=()):
+def chat_owners(roster, chats, records):
+    """pid -> {row name} for a chat process, from Claude session records and live Multibot host pids."""
+    keys_by_pid = {}
+    for record in (r for group in (records or {}).values() for r in group if isinstance(r, dict)):
+        pid, sid = record.get("pid"), record.get("sessionId")
+        if not isinstance(pid, int):
+            continue
+        keys = {sid, record.get("tmux")}
+        for chat in chats.values():
+            if sid and sid in (chat.get("sid"), chat.get("transcript")):
+                keys.update((chat.get("tmux"), chat.get("name")))
+        keys_by_pid.setdefault(pid, set()).update(key for key in keys if isinstance(key, str) and key)
+    for key, chat in chats.items():
+        if isinstance(chat.get("pid"), int):
+            keys_by_pid.setdefault(chat["pid"], set()).update(k for k in (key, chat.get("name")) if k)
+    owners = {}
+    for pid, keys in keys_by_pid.items():
+        names = {row["name"] for row in roster
+                 if any(row.get(field) in keys for field in ("name", "tmux", "multibot", "login", "sid"))}
+        if len(names) == 1:
+            owners[pid] = names
+    return owners
+
+
+def parent_rows(tree, pid, owners):
+    """Roster rows owning any ancestor of this process: which chat started it."""
+    names, seen, parent = set(), {pid}, tree[pid].ppid
+    while parent in tree and parent not in seen:
+        seen.add(parent)
+        names |= owners.get(parent, set())
+        parent = tree[parent].ppid
+    return names
+
+
+def attribute_workers(tree, roster, row_tickets, home, scoped_boards=(), owner_by_pid=None):
     assigned = {row["name"]: set() for row in roster}
     unattributed = set()
     ticket_rows = {}
@@ -114,6 +148,10 @@ def attribute_workers(tree, roster, row_tickets, home, scoped_boards=()):
                     ticket_rows.setdefault(key, {})[name] = (name, board) in scoped_boards
     for pid, process in tree.items():
         if not process.worker:
+            continue
+        parents = parent_rows(tree, pid, owner_by_pid or {})
+        if len(parents) == 1:
+            assigned[next(iter(parents))].add(pid)
             continue
         references = set(re.findall(r"project-\d+/[\w-]+|\b[A-Z][A-Z0-9]*-\d+\b", process.command))
         candidates = set()
@@ -358,9 +396,11 @@ def select_rows(rows, root, repo, all_rows=False, home=None, keys=()):
                or [r for r in rows if folder and folder in folders(r)])
     if len(matches) > 1 and keys:
         matches = [r for r in matches if any(r.get(k) in keys for k in ("name", "tmux", "multibot", "sid"))]
-    if len(matches) != 1:
-        raise ValueError("caller matches no unique roster row; use --all")
-    return matches, False
+    if len(matches) == 1:
+        return matches, False
+    if len(matches) > 1 and exact:
+        return exact, False
+    raise ValueError("caller matches no unique roster row; use --all")
 
 
 def gather(solo, now, roster_path=HERE / "roster.json", home=None, proc=Path("/proc"), tasks=None,
@@ -405,6 +445,7 @@ def gather(solo, now, roster_path=HERE / "roster.json", home=None, proc=Path("/p
         native = {r.get("sessionId") for group in records.values() for r in group if r.get("pid") in ancestors}
         caller_keys = tuple(value for key, chat in chats.items()
                             if chat.get("sid") in native or chat.get("transcript") in native
+                            or chat.get("pid") in ancestors
                             for value in (key, chat.get("name")) if value)
         caller_keys += tuple(r.get("tmux", "").split(":", 1)[0] for group in records.values()
                              for r in group if r.get("pid") in ancestors)
@@ -508,7 +549,8 @@ def gather(solo, now, roster_path=HERE / "roster.json", home=None, proc=Path("/p
                                      repo, model, str(row.get("workers_by", "")).startswith("Valentin"),
                                      process_why, snapshot.prs.get(repo)))
     if tree is not None:
-        assigned, unattributed = attribute_workers(tree, roster, row_tickets, home, scoped_boards)
+        assigned, unattributed = attribute_workers(tree, roster, row_tickets, home, scoped_boards,
+                                                   chat_owners(roster, chats, records))
         snapshot.unattributed = len(unattributed)
         for row in snapshot:
             row.active = len(assigned[row.name])
@@ -723,6 +765,30 @@ def self_test():
         assert sum(p.worker for p in tree.values()) == 21
         assert len(assigned["A"]) == 8 and len(assigned["B"]) == 8 and len(unknown) == 5
         assert sum(map(len, assigned.values())) + len(unknown) == 21
+        lanes = [dict(name="HT Bugs", cwd="/fixture/shared", repo="owner/lane"),
+                 dict(name="HT Features", cwd="/fixture/shared", repo="owner/lane")]
+        orphan = {5: Process(1, "claude -p task", "/fixture/shared", True)}
+        assigned, unknown = attribute_workers(orphan, lanes, {}, home)
+        assert unknown == {5} and not any(assigned.values()), "a shared cwd alone names no lane"
+        chatted = {5: Process(7, "claude -p task", "/fixture/shared", True),
+                   7: Process(1, "node agent-host", "/fixture/shared", False)}
+        assigned, unknown = attribute_workers(chatted, lanes, {}, home, owner_by_pid={7: {"HT Features"}})
+        assert assigned["HT Features"] == {5} and not unknown, "the parent chat names the lane"
+        filed = {"HT Bugs": {"15": [dict(id=1, uniqueIndex=2, ticketNumber="SOFT-2")]}}
+        both = {5: Process(1, "hax https://app.hypertask.ai/detail/project-15/2", "/fixture/shared", True),
+                6: Process(7, "claude -p task", "/fixture/shared", True),
+                7: Process(1, "node agent-host", "/fixture/shared", False)}
+        assigned, unknown = attribute_workers(both, lanes, filed, home, owner_by_pid={7: {"HT Features"}})
+        assert assigned["HT Bugs"] == {5} and assigned["HT Features"] == {6} and not unknown
+        assigned, unknown = attribute_workers(orphan, lanes[:1], {}, home)
+        assert assigned["HT Bugs"] == {5} and not unknown, "one row at the cwd still attributes"
+        assert chat_owners([dict(name="HT Bugs"), dict(name="HT Features", tmux="live-v")],
+                           {"live-v": dict(tmux="live-v", name="HT Bugs", sid="native-v")},
+                           {("sid", "native-v"): [dict(pid=42, sessionId="native-v")]}) == {}, \
+            "a pid two rows claim names nobody"
+        assert chat_owners(lanes + [dict(name="HT Verification", multibot="HT Verification")],
+                           {"live-v": dict(tmux="live-v", name="HT Verification", sid="native-v", pid=42)},
+                           {("sid", "native-v"): [dict(pid=42)]}) == {42: {"HT Verification"}}
         real_ticket = dict(id=97859, uniqueIndex=2551, ticketNumber="SOFT-2551",
                            url="/detail/project-2060/2551")
         actual = {"A": {"2060": [real_ticket]}}
@@ -815,11 +881,8 @@ def self_test():
                  dict(name="two", cwd="/same", repo="owner/repo", tmux="live-two")]
         assert select_rows(pairs, "/same", "owner/repo", keys=("live-two",))[0] == [pairs[1]]
         assert select_rows(pairs, "/elsewhere", "owner/repo", keys=("live-one",))[0] == [pairs[0]]
-        try:
-            select_rows(pairs, "/same", "owner/repo")
-            assert False, "ambiguous scope must fail"
-        except ValueError:
-            pass
+        assert select_rows(pairs, "/same", "owner/repo")[0] == pairs, "a shared cwd lists every row that shares it"
+        assert select_rows(pairs, "/same", "owner/repo")[1] is False
         pecunia = [dict(name="Pecunia", repo="owner/pecunia-oss", tmux="live-pecunia")]
         assert select_rows(pecunia, "/fixture/pecunia", "owner/pecunia", home=home)[0] == pecunia
         assert select_rows(pecunia, "/fixture/Pecunia", "owner/pecunia", home=home)[0] == pecunia
@@ -869,7 +932,7 @@ def self_test():
         token_file.write_text("fixture-token")
         with patch.dict(os.environ, {"HT_TOKEN": str(token_file)}):
             assert read_token(home) == "fixture-token"
-    print("factory-state self-test ok: 21 reparented workers, ticket/cwd attribution, unattributed totals, saved views, 504-safe PR checks, reset retry, partial totals, shared sources, Codex sessions, verifier counts, loops, scope, failures, archived boards")
+    print("factory-state self-test ok: 21 reparented workers, chat and ticket/cwd attribution, unattributed totals, saved views, 504-safe PR checks, reset retry, partial totals, shared sources, Codex sessions, verifier counts, loops, scope, failures, archived boards")
 
 
 def main():

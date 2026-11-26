@@ -205,7 +205,7 @@ def hosted_chats():
         if tmux in best and started < best[tmux]["started"]:
             continue
         best[tmux] = dict(tmux=tmux, sid=sid, provider=provider, name=names.get(tmux), cwd=config.get("cwd"),
-                          state=chat_state(state, alive), started=started,
+                          state=chat_state(state, alive), started=started, pid=state.get("pid"),
                           transcript=state.get("native_session") if isinstance(state.get("native_session"), str) else sid)
     return best
 

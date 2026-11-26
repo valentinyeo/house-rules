@@ -51,9 +51,9 @@ def announced_sessions(announced, live_tmux):
 
 
 def worker_errors(rows):
-    return [f"roster.json row {row.get('name', index)}: workers requires workers_by starting Valentin"
+    return [f"roster.json row {row.get('name', index)}: workers requires workers_by starting Valentin "
             for index, row in enumerate(rows)
-            if "workers" in row and not str(row.get("workers_by", "")).startswith("Valentin")]
+            if "workers" in row and not str(row.get("workers_by", "")).startswith("Valentin ")]
 
 
 def read_names(path):
@@ -122,8 +122,10 @@ def main():
 
 def self_test():
     assert worker_errors([{"name": "A", "workers": 5}]) == [
-        "roster.json row A: workers requires workers_by starting Valentin"]
+        "roster.json row A: workers requires workers_by starting Valentin "]
     assert worker_errors([{"name": "A", "workers": 5, "workers_by": "agent"}])
+    assert worker_errors([{"name": "A", "workers": 5, "workers_by": "Valentine 2026-11-16"}])
+    assert worker_errors([{"name": "A", "workers": 5, "workers_by": "Valentin"}])
     assert not worker_errors([{"name": "A", "workers": 5, "workers_by": "Valentin 2026-11-16"},
                               {"name": "B"}])
     actual = roster.static_rows()
@@ -132,7 +134,8 @@ def self_test():
         ("HT Product Lead", 7, "Valentin 2026-11-17"), ("Multi Bot Opus Runner", 7, "Valentin 2026-11-17"),
         ("multiprompt-android", 3, "Valentin 2026-11-17"), ("Pecunia", 3, "Valentin 2026-11-17"),
         ("postbox", 3, "Valentin 2026-11-17"), ("poteto-2-advisor", 3, "Valentin 2026-11-17"),
-        ("HT Features", 10, "Valentin 2026-11-25")}
+        ("HT Bugs", 10, "Valentin 2026-11-25"), ("HT Features", 10, "Valentin 2026-11-25"),
+        ("HT Verification", 10, "Valentin 2026-11-25")}
     static = [{"name": "postbox"}, {"name": "ht-or-runner-{n}"},
               {"name": "Matt Live Stream", "multibot": "Matt Live Stream", "tmux": "live-1d21840"}]
     s = lambda t, name=None: {"tmux": t, "name": name, "harness": "claude"}
