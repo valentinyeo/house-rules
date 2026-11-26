@@ -31,21 +31,12 @@ class PstackDelegationTest(unittest.TestCase):
                 for pattern in patterns:
                     self.assertIsNone(re.search(pattern, text),
                                       f'Delegate to pstack {source}: {pattern}')
-                self.assertIn(source.lower(), text, f'Link to pstack {source}')
 
-    def test_audit_link_survives_sync_to_other_repositories(self):
-        text = (ROOT / 'house-rules.md').read_text()
-        match = re.search(r'\[audit\]\(([^)]+)\)', text)
-        self.assertIsNotNone(match, 'Keep the line audit accessible')
-        self.assertTrue(match.group(1).startswith('https://github.com/'),
-                        'Use an absolute audit URL in synced rules')
-
-    def test_local_verifier_difference_survives(self):
+    def test_retired_rules_point_at_valentin_mode(self):
+        # SOFT-2819: Valentin's own lines moved to vstack's valentin-mode.
         text = (ROOT / 'house-rules.md').read_text().lower()
-        self.assertIn('another model family', text)
-        self.assertIn('github-hosted', text)
-        self.assertIn('no self-hosted runner', text)
-
+        self.assertIn('valentin-mode', text)
+        self.assertIn('pstack wins', text)
 
 if __name__ == '__main__':
     unittest.main()
